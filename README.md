@@ -14,6 +14,37 @@ Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 - `jq` installed (`brew install jq` on macOS)
 - A git repository for your project
 
+### Optional: Playwright MCP (for browser testing)
+
+For UI stories that require browser verification, install the Playwright MCP server:
+
+```bash
+claude mcp add playwright npx '@playwright/mcp@latest'
+```
+
+**Omarchy users:** The default Playwright config won't find Chromium. Edit your Claude config to add the executable path:
+
+```bash
+nano ~/.claude.json
+```
+
+Update the playwright MCP entry to include `--executable-path`:
+
+```json
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--executable-path",
+        "/usr/bin/chromium"
+      ]
+    }
+  }
+}
+```
+
 ## Setup
 
 ### Option 1: Copy to your project
