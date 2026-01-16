@@ -125,33 +125,33 @@ This creates `tasks/{effort-name}/prd.json` with user stories structured for aut
 ### 3. Run Ralph
 
 ```bash
-./scripts/ralph/ralph.sh [task-directory] [max_iterations]
+./scripts/ralph/ralph.sh [task-directory] [-i iterations]
 ```
 
 Examples:
 ```bash
-# Auto-select if only one task, or prompt to choose from multiple
+# Interactive mode - prompts for task and iterations
 ./ralph.sh
 
-# Run specific task with default 10 iterations
+# Run specific task (prompts for iterations)
 ./ralph.sh tasks/device-system-refactor
 
-# Run with 20 iterations
-./ralph.sh tasks/fix-auth-timeout 20
+# Run with explicit iteration count (no prompts)
+./ralph.sh tasks/fix-auth-timeout -i 20
 ```
 
-When run without arguments, Ralph will:
-- If **one active task**: Run it automatically
-- If **multiple active tasks**: Show a numbered list and prompt you to select:
-  ```
-  Active tasks:
+**Interactive prompts:**
 
-    1) tasks/device-system-refactor     [5/20] (feature)
-    2) tasks/fix-auth-timeout           [2/6]  (bug-investigation)
+1. **Task selection** (if no task directory specified):
+   - If **one active task**: Runs it automatically
+   - If **multiple active tasks**: Shows numbered list to choose from
+   - If **no active tasks**: Shows instructions for creating one
 
-  Select task [1-2]:
-  ```
-- If **no active tasks**: Show instructions for creating one
+2. **Iteration count** (if `-i` not specified):
+   ```
+   Max iterations [10]:
+   ```
+   Press Enter for default (10) or enter a number.
 
 Ralph will:
 1. Create a feature branch (from PRD `branchName`)
