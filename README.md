@@ -13,6 +13,7 @@ Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
 - `jq` installed (`brew install jq` on macOS)
 - A git repository for your project
+- (Optional) `tmux` for interactive mode (`sudo apt install tmux` or `brew install tmux`)
 
 ### Optional: Playwright MCP (for browser testing)
 
@@ -125,12 +126,20 @@ This creates `tasks/{effort-name}/prd.json` with user stories structured for aut
 ### 3. Run Ralph
 
 ```bash
-./scripts/ralph/ralph.sh [task-directory] [-i iterations]
+./scripts/ralph/ralph.sh [task-directory] [-i iterations] [-I|--interactive] [--rotate-at N]
 ```
+
+**Options:**
+| Flag | Description |
+|------|-------------|
+| `-i N` | Set max iterations (default: 10) |
+| `-I` or `--interactive` | Enable interactive mode (requires tmux) |
+| `--rotate-at N` | Set progress.txt rotation threshold in lines (default: 500) |
+| `-y` | Skip all confirmation prompts |
 
 Examples:
 ```bash
-# Interactive mode - prompts for task and iterations
+# Basic mode - prompts for task and iterations
 ./ralph.sh
 
 # Run specific task (prompts for iterations)
@@ -138,6 +147,12 @@ Examples:
 
 # Run with explicit iteration count (no prompts)
 ./ralph.sh tasks/fix-auth-timeout -i 20
+
+# Interactive mode - allows sending messages mid-iteration
+./ralph.sh tasks/fix-auth-timeout -I
+
+# Custom rotation threshold (rotate progress.txt at 300 lines)
+./ralph.sh tasks/big-refactor --rotate-at 300
 ```
 
 **Interactive prompts:**
@@ -153,6 +168,13 @@ Examples:
    ```
    Press Enter for default (10) or enter a number.
 
+3. **Rotation threshold** (if progress.txt is near threshold or has been rotated before):
+   ```
+   Progress file has 475 lines (rotation threshold: 500)
+   Rotation threshold [500]:
+   ```
+   Press Enter to accept or enter a new value.
+
 Ralph will:
 1. Create a feature branch (from PRD `branchName`)
 2. Pick the highest priority story where `passes: false`
@@ -161,7 +183,8 @@ Ralph will:
 5. Commit if checks pass
 6. Update `prd.json` to mark story as `passes: true`
 7. Append learnings to `progress.txt`
-8. Repeat until all stories pass or max iterations reached
+8. Rotate `progress.txt` if it exceeds threshold
+9. Repeat until all stories pass or max iterations reached
 
 ### 4. Archive completed efforts
 
@@ -246,6 +269,102 @@ Ralph only works if there are feedback loops:
 ### Stop Condition
 
 When all stories have `passes: true`, Ralph outputs `<promise>COMPLETE</promise>` and the loop exits.
+
+## Interactive Mode
+
+Interactive mode (`-I` flag) lets you send messages to Claude while it's working, without interrupting the current iteration.
+
+**Requirements:** tmux must be installed.
+
+**Keyboard shortcuts:**
+| Key | Action |
+|-----|--------|
+| `i` | Send a message to Claude (supports multiline - double-Enter to send, Esc to cancel) |
+| `f` | Force a checkpoint (asks Claude to update progress files) |
+| `q` | Quit the current iteration gracefully |
+
+**Use cases:**
+- Ask Claude if it's stuck when you see it repeating actions
+- Provide additional context or hints
+- Request a checkpoint to save progress before stopping
+- Redirect Claude when it's going down the wrong path
+
+**Example interaction:**
+```
+╔═══════════════════════════════════════════════════════════════╗
+║  Ralph Wiggum - Autonomous Agent Loop                         ║
+╚═══════════════════════════════════════════════════════════════╝
+
+  Task:       tasks/meteorite-refactor
+  Mode:       Interactive (tmux)
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  i: Send message    f: Force checkpoint    q: Quit iter   │
+  └─────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════
+  Iteration 3 of 20 (2/15 complete)
+═══════════════════════════════════════════════════════════════
+
+  ⠹ Claude working... 32:15
+  Let me check the serial port configuration...
+  ● Bash(ls -la /dev/ttyUSB*)
+  [i: message | f: checkpoint | q: quit]
+
+[User presses 'i']
+
+  Enter message (double-Enter to send, Esc to cancel):
+  > You've been testing serial for 30 min. Is there an issue?
+  > (press Enter twice to send)
+```
+
+## Progress Rotation
+
+For long-running efforts, `progress.txt` can grow very large, consuming excessive context tokens. Ralph automatically rotates the file when it exceeds a threshold (default: 500 lines).
+
+**How it works:**
+
+1. Before each iteration, Ralph checks `progress.txt` line count
+2. If approaching threshold (within 50 lines) or already rotated once, prompts to confirm threshold
+3. When threshold exceeded:
+   - Renames `progress.txt` → `progress-N.txt`
+   - Creates new `progress.txt` with:
+     - Codebase Patterns section (preserved)
+     - Brief summary referencing prior file
+     - Ready for new iteration logs
+
+**File structure after rotation:**
+```
+tasks/big-refactor/
+├── prd.json
+├── progress.txt       # Current (lines 1-500, references progress-1.txt)
+├── progress-1.txt     # Previous (lines 1-500, references progress-0.txt if exists)
+└── progress-2.txt     # Older
+```
+
+**Example rotated progress.txt:**
+```markdown
+# Ralph Progress Log
+Effort: meteorite-refactor
+Type: feature
+Started: Fri Jan 10 09:00:00 2025
+Rotation: 1 (rotated at Thu Jan 16 14:30:00 2026)
+
+## Codebase Patterns
+- Use `sql<number>` template for aggregations
+- Always use `IF NOT EXISTS` for migrations
+- Export types from actions.ts for UI components
+
+## Prior Progress
+Completed 12 iterations in progress-1.txt.
+_See progress-1.txt for detailed iteration logs._
+
+---
+## 2025-01-16 14:35 - S13
+- What was implemented: ...
+```
+
+Claude can read prior progress files if needed for additional context, but typically the summary and patterns provide sufficient continuity.
 
 ## Debugging
 
