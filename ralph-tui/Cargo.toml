@@ -6,20 +6,13 @@ description = "Interactive terminal interface for Ralph autonomous coding agent"
 authors = ["Ralph Project Contributors"]
 license = "MIT"
 repository = "https://github.com/apino/ralph-claude"
-readme = "../README.md"
 keywords = ["tui", "terminal", "claude", "ai", "agent"]
 categories = ["command-line-interface", "development-tools"]
 
-[[bin]]
-name = "ralph-tui"
-path = "src/main.rs"
-
 [dependencies]
-ratatui = "0.30"
+ratatui = "0.29"
 crossterm = "0.28"
 portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-vt100 = "0.16"
-notify = { version = "6", default-features = false, features = ["macos_fsevent"] }
