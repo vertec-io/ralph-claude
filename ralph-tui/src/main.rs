@@ -13,16 +13,16 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-/// Shared state for PTY output buffer
+/// Shared state for PTY with VT100 parser
 struct PtyState {
-    output_buffer: String,
+    parser: vt100::Parser,
     child_exited: bool,
 }
 
 impl PtyState {
-    fn new() -> Self {
+    fn new(rows: u16, cols: u16) -> Self {
         Self {
-            output_buffer: String::new(),
+            parser: vt100::Parser::new(rows, cols, 1000), // 1000 lines of scrollback
             child_exited: false,
         }
     }
@@ -35,9 +35,9 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(rows: u16, cols: u16) -> Self {
         Self {
-            pty_state: Arc::new(Mutex::new(PtyState::new())),
+            pty_state: Arc::new(Mutex::new(PtyState::new(rows, cols))),
             master_pty: None,
         }
     }
@@ -52,7 +52,82 @@ impl App {
                 pixel_height: 0,
             });
         }
+        // Also resize the VT100 parser's screen
+        let mut state = self.pty_state.lock().unwrap();
+        state.parser.screen_mut().set_size(rows, cols);
     }
+}
+
+/// Convert vt100::Color to ratatui::Color
+fn vt100_to_ratatui_color(color: vt100::Color) -> Color {
+    match color {
+        vt100::Color::Default => Color::Reset,
+        vt100::Color::Idx(idx) => Color::Indexed(idx),
+        vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+/// Render the VT100 screen to a Vec of ratatui Lines (styled text)
+/// This function renders the visible content of the terminal emulator
+fn render_vt100_screen(screen: &vt100::Screen) -> Vec<Line<'static>> {
+    let (rows, cols) = screen.size();
+    let mut lines = Vec::with_capacity(rows as usize);
+
+    // Render each visible row
+    for row in 0..rows {
+        let mut spans = Vec::new();
+        let mut col = 0u16;
+
+        while col < cols {
+            if let Some(cell) = screen.cell(row, col) {
+                let contents = cell.contents();
+
+                // Skip wide character continuations
+                if cell.is_wide_continuation() {
+                    col += 1;
+                    continue;
+                }
+
+                let display_str = if contents.is_empty() {
+                    " ".to_string()
+                } else {
+                    contents.to_string()
+                };
+
+                let mut style = Style::default();
+                style = style.fg(vt100_to_ratatui_color(cell.fgcolor()));
+                style = style.bg(vt100_to_ratatui_color(cell.bgcolor()));
+
+                if cell.bold() {
+                    style = style.add_modifier(Modifier::BOLD);
+                }
+                if cell.italic() {
+                    style = style.add_modifier(Modifier::ITALIC);
+                }
+                if cell.underline() {
+                    style = style.add_modifier(Modifier::UNDERLINED);
+                }
+                if cell.inverse() {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+
+                spans.push(Span::styled(display_str, style));
+
+                // Wide characters take 2 columns
+                if cell.is_wide() {
+                    col += 2;
+                } else {
+                    col += 1;
+                }
+            } else {
+                spans.push(Span::raw(" "));
+                col += 1;
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
 }
 
 fn main() -> io::Result<()> {
@@ -88,8 +163,8 @@ fn main() -> io::Result<()> {
     // Drop slave after spawning (important for proper cleanup)
     drop(pair.slave);
 
-    // Create app state
-    let mut app = App::new();
+    // Create app state with VT100 parser sized to PTY dimensions
+    let mut app = App::new(pty_rows, pty_cols);
     app.master_pty = Some(pair.master);
 
     // Clone reader for background thread
@@ -100,7 +175,7 @@ fn main() -> io::Result<()> {
         .try_clone_reader()
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    // Spawn thread to read PTY output
+    // Spawn thread to read PTY output and feed to VT100 parser
     let pty_state = Arc::clone(&app.pty_state);
     let reader_thread = thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -113,14 +188,9 @@ fn main() -> io::Result<()> {
                     break;
                 }
                 Ok(n) => {
-                    let text = String::from_utf8_lossy(&buf[..n]);
+                    // Feed raw bytes to VT100 parser - it handles escape sequences
                     let mut state = pty_state.lock().unwrap();
-                    state.output_buffer.push_str(&text);
-                    // Limit buffer size to prevent memory issues
-                    if state.output_buffer.len() > 100_000 {
-                        let drain_to = state.output_buffer.len() - 50_000;
-                        state.output_buffer.drain(..drain_to);
-                    }
+                    state.parser.process(&buf[..n]);
                 }
                 Err(_) => {
                     let mut state = pty_state.lock().unwrap();
@@ -218,18 +288,19 @@ fn run(
 
             frame.render_widget(left_content, left_panel_area);
 
-            // Right panel: Claude Code (PTY output)
+            // Right panel: Claude Code (PTY output with VT100 rendering)
             let right_block = Block::default()
                 .title(" Claude Code ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan));
 
-            // Display PTY output (last portion that fits)
-            let output = &state.output_buffer;
-            let right_content = Paragraph::new(output.as_str())
-                .block(right_block)
-                .style(Style::default().fg(Color::White))
-                .wrap(ratatui::widgets::Wrap { trim: false });
+            // Render VT100 screen content with proper ANSI colors
+            // The screen already shows the most recent content (auto-scroll behavior
+            // is handled by the terminal emulator when new content is written)
+            let screen = state.parser.screen();
+            let lines = render_vt100_screen(screen);
+
+            let right_content = Paragraph::new(lines).block(right_block);
 
             frame.render_widget(right_content, right_panel_area);
 

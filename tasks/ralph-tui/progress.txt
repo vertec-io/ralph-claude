@@ -9,7 +9,46 @@ Started: 2026-01-17
 - Always enable_raw_mode() and EnterAlternateScreen at startup, disable_raw_mode() and LeaveAlternateScreen at exit
 - Use portable-pty crate for PTY subprocess management
 - Build with `cargo build --release` from ralph-tui/ directory
+- Use vt100 crate for terminal emulation (ANSI escape code interpretation)
+- Access vt100 screen via `parser.screen()` for reading, `parser.screen_mut()` for resizing
+- Convert vt100::Color to ratatui::Color (Default->Reset, Idx->Indexed, Rgb->Rgb)
 
+---
+
+## 2026-01-17 - US-005
+- Implemented: PTY output rendering with ANSI escape code interpretation using vt100 crate
+- Files changed:
+  - ralph-tui/Cargo.toml - added vt100 = "0.16" dependency, upgraded ratatui to 0.30 for compatibility
+  - ralph-tui/Cargo.lock - updated with new dependencies
+  - ralph-tui/src/main.rs - replaced raw output buffer with vt100::Parser, added render_vt100_screen() function
+  - tasks/ralph-tui/prd.json - marked US-005 as passes: true
+- **Learnings for future iterations:**
+  - vt100::Parser::new(rows, cols, scrollback_len) creates terminal emulator
+  - Feed PTY output bytes to parser via parser.process(&bytes)
+  - parser.screen() returns immutable Screen reference
+  - parser.screen_mut().set_size(rows, cols) for resizing
+  - screen.cell(row, col) returns Option<&Cell> with text and styling
+  - Cell has fgcolor(), bgcolor(), bold(), italic(), underline(), inverse() methods
+  - Handle is_wide_continuation() cells by skipping them (wide chars take 2 columns)
+  - vt100 handles auto-scroll internally - just render the visible screen
+  - ratatui 0.30 needed to resolve unicode-width version conflict with vt100
+---
+
+## 2026-01-17 - US-004
+- Implemented: PTY subprocess management using portable-pty
+- Files changed:
+  - ralph-tui/src/main.rs - added PTY creation, spawning bash, output capture to buffer, cleanup, and resize handling
+  - tasks/ralph-tui/prd.json - marked US-004 as passes: true
+- **Learnings for future iterations:**
+  - Use `native_pty_system()` to get the system-appropriate PTY implementation
+  - `openpty(PtySize { rows, cols, ... })` creates the PTY pair
+  - Drop `pair.slave` after spawning to allow proper EOF detection
+  - Use `try_clone_reader()` to get a reader that can be moved to another thread
+  - Background thread reads PTY output into shared buffer (Arc<Mutex<PtyState>>)
+  - Limit buffer size to prevent memory issues (keep last 50KB when buffer exceeds 100KB)
+  - PTY resize via `master.resize(PtySize { ... })` on terminal resize events
+  - Proper cleanup order: wait for child, drop master PTY, join reader thread
+  - Poll for input every 50ms for responsive UI
 ---
 
 ## 2026-01-17 - US-003
