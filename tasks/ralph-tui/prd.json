@@ -275,8 +275,8 @@
         "cargo build --release succeeds"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": "Use clap crate for CLI parsing"
+      "passes": true,
+      "notes": "Implemented with manual CLI parsing (no clap). Features: find_active_tasks() discovers tasks with prd.json, prompt_task_selection() for interactive selection, prompt_iterations() when -i not provided, prompt_rotation_threshold() when progress.txt is near threshold. Supports -y/--yes to skip prompts."
     },
     {
       "id": "US-018",

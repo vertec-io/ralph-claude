@@ -141,11 +141,15 @@ struct App {
     max_iterations: u32,
     iteration_state: IterationState,
     delay_start: Option<std::time::Instant>,
+    // Progress rotation
+    rotate_threshold: u32,
+    #[allow(dead_code)]
+    skip_prompts: bool,
 }
 
 impl App {
-    fn new(rows: u16, cols: u16, task_dir: PathBuf, max_iterations: u32) -> Self {
-        let prd_path = task_dir.join("prd.json");
+    fn new(rows: u16, cols: u16, config: CliConfig) -> Self {
+        let prd_path = config.task_dir.join("prd.json");
         let prd = Prd::load(&prd_path).ok();
 
         Self {
@@ -153,14 +157,16 @@ impl App {
             master_pty: None,
             pty_writer: None,
             mode: Mode::Ralph, // Default to Ralph mode
-            task_dir,
+            task_dir: config.task_dir,
             prd_path,
             prd,
             prd_needs_reload: Arc::new(Mutex::new(false)),
             current_iteration: 1,
-            max_iterations,
+            max_iterations: config.max_iterations,
             iteration_state: IterationState::Running,
             delay_start: None,
+            rotate_threshold: config.rotate_threshold,
+            skip_prompts: config.skip_prompts,
         }
     }
 
@@ -437,26 +443,203 @@ fn forward_key_to_pty(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers)
     app.write_to_pty(&bytes);
 }
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 fn print_usage() {
-    eprintln!("Usage: ralph-tui <task-directory> [OPTIONS]");
+    eprintln!("Ralph TUI - Interactive terminal interface for Ralph agent");
+    eprintln!();
+    eprintln!("Usage: ralph-tui [task-directory] [OPTIONS]");
     eprintln!();
     eprintln!("Arguments:");
-    eprintln!("  <task-directory>  Path to the task directory containing prd.json");
+    eprintln!("  [task-directory]  Path to the task directory containing prd.json");
+    eprintln!("                    If omitted, prompts for task selection");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -i, --iterations <N>  Maximum iterations to run (default: 10)");
-    eprintln!("  -h, --help            Show this help message");
+    eprintln!("  -i, --iterations <N>   Maximum iterations to run (default: 10)");
+    eprintln!("  --rotate-at <N>        Rotate progress file at N lines (default: 300)");
+    eprintln!("  -y, --yes              Skip confirmation prompts");
+    eprintln!("  -h, --help             Show this help message");
+    eprintln!("  -V, --version          Show version");
     eprintln!();
-    eprintln!("Example:");
-    eprintln!("  ralph-tui tasks/my-feature");
-    eprintln!("  ralph-tui tasks/my-feature -i 5");
+    eprintln!("Examples:");
+    eprintln!("  ralph-tui                          # Interactive task selection");
+    eprintln!("  ralph-tui tasks/my-feature         # Run specific task");
+    eprintln!("  ralph-tui tasks/my-feature -i 5    # Run with 5 iterations");
 }
 
-/// Parse CLI arguments and return (task_dir, max_iterations)
-fn parse_args() -> io::Result<(PathBuf, u32)> {
+/// Configuration from CLI arguments
+struct CliConfig {
+    task_dir: PathBuf,
+    max_iterations: u32,
+    rotate_threshold: u32,
+    skip_prompts: bool,
+}
+
+/// Find active tasks (directories with prd.json, excluding archived)
+fn find_active_tasks() -> Vec<PathBuf> {
+    let tasks_dir = PathBuf::from("tasks");
+    if !tasks_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut tasks = Vec::new();
+
+    // Look for prd.json files in tasks/ subdirectories
+    if let Ok(entries) = std::fs::read_dir(&tasks_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            // Skip archived directory
+            if path.file_name().map_or(false, |n| n == "archived") {
+                continue;
+            }
+            if path.is_dir() {
+                let prd_path = path.join("prd.json");
+                if prd_path.exists() {
+                    tasks.push(path);
+                }
+            }
+        }
+    }
+
+    tasks.sort();
+    tasks
+}
+
+/// Get task info for display
+fn get_task_info(task_dir: &PathBuf) -> (String, usize, usize, String) {
+    let prd_path = task_dir.join("prd.json");
+    let content = std::fs::read_to_string(&prd_path).unwrap_or_default();
+
+    // Parse JSON to get info
+    if let Ok(prd) = serde_json::from_str::<serde_json::Value>(&content) {
+        let description = prd.get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No description")
+            .chars()
+            .take(50)
+            .collect::<String>();
+
+        let stories = prd.get("userStories")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.len())
+            .unwrap_or(0);
+
+        let completed = prd.get("userStories")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter(|s| {
+                s.get("passes").and_then(|v| v.as_bool()).unwrap_or(false)
+            }).count())
+            .unwrap_or(0);
+
+        let prd_type = prd.get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("feature")
+            .to_string();
+
+        (description, completed, stories, prd_type)
+    } else {
+        ("Unable to parse prd.json".to_string(), 0, 0, "unknown".to_string())
+    }
+}
+
+/// Display task selection prompt and return selected task
+fn prompt_task_selection(tasks: &[PathBuf]) -> io::Result<PathBuf> {
+    println!();
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Ralph TUI - Select a Task                                    ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Active tasks:");
+    println!();
+
+    for (i, task) in tasks.iter().enumerate() {
+        let (desc, completed, total, prd_type) = get_task_info(task);
+        let task_name = task.display().to_string();
+        println!(
+            "  {}) {:35} [{}/{}] ({})",
+            i + 1,
+            task_name,
+            completed,
+            total,
+            prd_type
+        );
+        if !desc.is_empty() {
+            println!("     {}", desc);
+        }
+    }
+
+    println!();
+    print!("Select task [1-{}]: ", tasks.len());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let selection: usize = input.trim().parse().map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Invalid selection")
+    })?;
+
+    if selection < 1 || selection > tasks.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Selection out of range",
+        ));
+    }
+
+    println!();
+    println!("Selected: {}", tasks[selection - 1].display());
+    println!();
+
+    Ok(tasks[selection - 1].clone())
+}
+
+/// Prompt for iterations if not provided
+fn prompt_iterations() -> io::Result<u32> {
+    print!("Max iterations [10]: ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(10);
+    }
+
+    input.parse().map_err(|_| {
+        eprintln!("Invalid number. Using default of 10.");
+        io::Error::new(io::ErrorKind::InvalidInput, "Invalid number")
+    }).or(Ok(10))
+}
+
+/// Prompt for rotation threshold
+fn prompt_rotation_threshold(current: u32, progress_lines: usize) -> io::Result<u32> {
+    println!();
+    println!("Progress file has {} lines (rotation threshold: {})", progress_lines, current);
+    print!("Rotation threshold [{}]: ", current);
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(current);
+    }
+
+    input.parse().map_err(|_| {
+        eprintln!("Invalid number. Using default of {}.", current);
+        io::Error::new(io::ErrorKind::InvalidInput, "Invalid number")
+    }).or(Ok(current))
+}
+
+/// Parse CLI arguments and return configuration
+fn parse_args() -> io::Result<CliConfig> {
     let args: Vec<String> = std::env::args().collect();
     let mut task_dir: Option<PathBuf> = None;
-    let mut max_iterations: u32 = 10; // Default
+    let mut max_iterations: Option<u32> = None;
+    let mut rotate_threshold: u32 = 300;
+    let mut skip_prompts = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -464,6 +647,12 @@ fn parse_args() -> io::Result<(PathBuf, u32)> {
         if arg == "-h" || arg == "--help" {
             print_usage();
             std::process::exit(0);
+        } else if arg == "-V" || arg == "--version" {
+            println!("ralph-tui {}", VERSION);
+            std::process::exit(0);
+        } else if arg == "-y" || arg == "--yes" {
+            skip_prompts = true;
+            i += 1;
         } else if arg == "-i" || arg == "--iterations" {
             i += 1;
             if i >= args.len() {
@@ -473,14 +662,32 @@ fn parse_args() -> io::Result<(PathBuf, u32)> {
                     "Missing value for --iterations",
                 ));
             }
-            max_iterations = args[i].parse().map_err(|_| {
+            max_iterations = Some(args[i].parse().map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!("Invalid iterations value: {}", args[i]),
                 )
+            })?);
+            i += 1;
+        } else if arg == "--rotate-at" {
+            i += 1;
+            if i >= args.len() {
+                print_usage();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Missing value for --rotate-at",
+                ));
+            }
+            rotate_threshold = args[i].parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid rotate-at value: {}", args[i]),
+                )
             })?;
+            i += 1;
         } else if !arg.starts_with('-') {
             task_dir = Some(PathBuf::from(arg));
+            i += 1;
         } else {
             print_usage();
             return Err(io::Error::new(
@@ -488,15 +695,62 @@ fn parse_args() -> io::Result<(PathBuf, u32)> {
                 format!("Unknown argument: {}", arg),
             ));
         }
-        i += 1;
     }
 
-    let task_dir = task_dir.ok_or_else(|| {
-        print_usage();
-        io::Error::new(io::ErrorKind::InvalidInput, "Task directory argument required")
-    })?;
+    // If no task directory provided, find and prompt
+    let task_dir = if let Some(dir) = task_dir {
+        dir
+    } else {
+        let tasks = find_active_tasks();
+        if tasks.is_empty() {
+            println!("No active tasks found.");
+            println!();
+            println!("To create a new task:");
+            println!("  1. Use /prd to create a PRD in tasks/{{effort-name}}/");
+            println!("  2. Use /ralph to convert it to prd.json");
+            println!("  3. Run: ralph-tui tasks/{{effort-name}}");
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "No active tasks found",
+            ));
+        } else if tasks.len() == 1 {
+            println!("Found one active task: {}", tasks[0].display());
+            println!();
+            tasks[0].clone()
+        } else {
+            prompt_task_selection(&tasks)?
+        }
+    };
 
-    Ok((task_dir, max_iterations))
+    // Prompt for iterations if not provided and not skipping prompts
+    let max_iterations = if let Some(iters) = max_iterations {
+        iters
+    } else if skip_prompts {
+        10
+    } else {
+        prompt_iterations().unwrap_or(10)
+    };
+
+    // Check progress file for rotation threshold prompt
+    let progress_path = task_dir.join("progress.txt");
+    if progress_path.exists() && !skip_prompts {
+        if let Ok(content) = std::fs::read_to_string(&progress_path) {
+            let lines = content.lines().count();
+            // Prompt if within 50 lines of threshold or has prior rotations
+            let has_prior_rotation = task_dir.join("progress-1.txt").exists();
+            if lines > rotate_threshold.saturating_sub(50) as usize || has_prior_rotation {
+                rotate_threshold = prompt_rotation_threshold(rotate_threshold, lines)
+                    .unwrap_or(rotate_threshold);
+            }
+        }
+    }
+
+    Ok(CliConfig {
+        task_dir,
+        max_iterations,
+        rotate_threshold,
+        skip_prompts,
+    })
 }
 
 /// Spawn Claude Code process and return (child, reader_thread)
@@ -603,25 +857,37 @@ fn spawn_claude(
 }
 
 fn main() -> io::Result<()> {
-    // Parse CLI arguments
-    let (task_dir, max_iterations) = parse_args()?;
+    // Parse CLI arguments (includes interactive prompts if needed)
+    let config = parse_args()?;
 
     // Validate task directory exists
-    if !task_dir.exists() {
+    if !config.task_dir.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("Task directory not found: {}", task_dir.display()),
+            format!("Task directory not found: {}", config.task_dir.display()),
         ));
     }
 
     // Validate prd.json exists
-    let prd_path = task_dir.join("prd.json");
+    let prd_path = config.task_dir.join("prd.json");
     if !prd_path.exists() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("prd.json not found in: {}", task_dir.display()),
+            format!("prd.json not found in: {}", config.task_dir.display()),
         ));
     }
+
+    // Show startup banner
+    println!();
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Ralph TUI - Autonomous Agent Loop                            ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("  Task:       {}", config.task_dir.display());
+    println!("  Max iters:  {}", config.max_iterations);
+    println!();
+    println!("Starting TUI...");
+    println!();
 
     // Setup terminal
     enable_raw_mode()?;
@@ -635,7 +901,7 @@ fn main() -> io::Result<()> {
     let pty_rows = initial_size.height - 3; // Account for bottom bar and borders
 
     // Create app state with VT100 parser sized to PTY dimensions
-    let mut app = App::new(pty_rows, pty_cols, task_dir, max_iterations);
+    let mut app = App::new(pty_rows, pty_cols, config);
 
     // Set up file watcher for prd.json
     let prd_needs_reload = Arc::clone(&app.prd_needs_reload);
