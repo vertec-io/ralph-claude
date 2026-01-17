@@ -83,3 +83,16 @@ pub const ROUNDED_BORDERS: Set = Set {
     horizontal_top: "─",
     horizontal_bottom: "─",
 };
+
+// ============================================================================
+// Layout Spacing Constants
+// ============================================================================
+
+/// Padding inside card widgets (in cells)
+pub const CARD_PADDING: u16 = 1;
+
+/// Gap between major sections (in cells)
+pub const SECTION_GAP: u16 = 1;
+
+/// Gap between card widgets (in cells)
+pub const CARD_GAP: u16 = 1;
