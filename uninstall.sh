@@ -36,32 +36,36 @@ print_info() {
 }
 
 # Installation paths
-INSTALL_BIN="${HOME}/.local/bin"
+LOCAL_BIN="${HOME}/.local/bin"
+CARGO_BIN="${HOME}/.cargo/bin"
 INSTALL_CONFIG="${HOME}/.config/ralph"
 INSTALL_SKILLS="${HOME}/.claude/skills"
 
 print_header
 
-echo "This will remove:"
-echo "  - $INSTALL_BIN/ralph-tui"
-echo "  - $INSTALL_CONFIG/ (prompt.md)"
-echo ""
-
 # Check what exists
-BINARY_EXISTS=false
+BINARY_LOCAL=false
+BINARY_CARGO=false
 CONFIG_EXISTS=false
 PRD_SKILL_EXISTS=false
 RALPH_SKILL_EXISTS=false
 
-[ -f "$INSTALL_BIN/ralph-tui" ] && BINARY_EXISTS=true
+[ -f "$LOCAL_BIN/ralph-tui" ] && BINARY_LOCAL=true
+[ -f "$CARGO_BIN/ralph-tui" ] && BINARY_CARGO=true
 [ -d "$INSTALL_CONFIG" ] && CONFIG_EXISTS=true
 [ -d "$INSTALL_SKILLS/prd" ] && PRD_SKILL_EXISTS=true
 [ -d "$INSTALL_SKILLS/ralph" ] && RALPH_SKILL_EXISTS=true
 
-if [ "$BINARY_EXISTS" = false ] && [ "$CONFIG_EXISTS" = false ]; then
+if [ "$BINARY_LOCAL" = false ] && [ "$BINARY_CARGO" = false ] && [ "$CONFIG_EXISTS" = false ]; then
     print_warning "Ralph TUI doesn't appear to be installed"
     exit 0
 fi
+
+echo "This will remove:"
+[ "$BINARY_LOCAL" = true ] && echo "  - $LOCAL_BIN/ralph-tui"
+[ "$BINARY_CARGO" = true ] && echo "  - $CARGO_BIN/ralph-tui (cargo install)"
+[ "$CONFIG_EXISTS" = true ] && echo "  - $INSTALL_CONFIG/ (prompt.md)"
+echo ""
 
 # Confirm uninstall
 read -p "Continue with uninstall? [y/N]: " CONFIRM
@@ -72,12 +76,20 @@ fi
 
 echo ""
 
-# Remove binary
-if [ "$BINARY_EXISTS" = true ]; then
-    rm -f "$INSTALL_BIN/ralph-tui"
-    print_success "Removed $INSTALL_BIN/ralph-tui"
-else
-    print_warning "Binary not found at $INSTALL_BIN/ralph-tui"
+# Remove binary from ~/.local/bin
+if [ "$BINARY_LOCAL" = true ]; then
+    rm -f "$LOCAL_BIN/ralph-tui"
+    print_success "Removed $LOCAL_BIN/ralph-tui"
+fi
+
+# Remove binary from ~/.cargo/bin (cargo install)
+if [ "$BINARY_CARGO" = true ]; then
+    rm -f "$CARGO_BIN/ralph-tui"
+    print_success "Removed $CARGO_BIN/ralph-tui"
+fi
+
+if [ "$BINARY_LOCAL" = false ] && [ "$BINARY_CARGO" = false ]; then
+    print_warning "Binary not found"
 fi
 
 # Remove config

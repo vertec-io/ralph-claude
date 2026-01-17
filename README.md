@@ -91,14 +91,10 @@ ralph-tui --help
 **Uninstall:**
 
 ```bash
-# If installed with ./install.sh
-./uninstall.sh
-
-# If installed with cargo
-cargo uninstall ralph-tui
-rm -rf ~/.config/ralph                              # Remove config
-rm -rf ~/.claude/skills/prd ~/.claude/skills/ralph  # Remove skills (optional)
+./uninstall.sh  # Works for both install.sh and cargo install
 ```
+
+The script detects binaries in both `~/.local/bin/` and `~/.cargo/bin/`, removes config, and optionally removes skills.
 
 ### Option 2: Use bash scripts (no Rust required)
 
