@@ -12,7 +12,22 @@ Started: 2026-01-17
 - Use vt100 crate for terminal emulation (ANSI escape code interpretation)
 - Access vt100 screen via `parser.screen()` for reading, `parser.screen_mut()` for resizing
 - Convert vt100::Color to ratatui::Color (Default->Reset, Idx->Indexed, Rgb->Rgb)
+- Modal input: Mode enum controls input handling; match on mode in event loop
 
+---
+
+## 2026-01-17 - US-006
+- Implemented: Modal input system with Ralph/Claude modes
+- Files changed:
+  - ralph-tui/src/main.rs - added Mode enum, mode field to App, mode switching with i/Tab/Esc, visual indicators
+  - tasks/ralph-tui/prd.json - marked US-006 as passes: true
+- **Learnings for future iterations:**
+  - Mode enum with Ralph (default) and Claude variants controls input handling
+  - Use match on app.mode in input handling to determine behavior per mode
+  - Visual indicators: [ACTIVE] suffix in panel title, green bold border for active panel, gray for inactive
+  - Status bar text changes based on mode (Ralph shows all controls, Claude shows "Press Esc to return")
+  - 'i' and Tab both switch to Claude mode; Escape switches back to Ralph mode
+  - 'q' only quits in Ralph mode (future: keys forwarded to PTY in Claude mode)
 ---
 
 ## 2026-01-17 - US-005

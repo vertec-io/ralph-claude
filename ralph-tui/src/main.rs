@@ -13,6 +13,13 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+/// Mode for modal input system
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Ralph,  // Default mode - focus on left panel
+    Claude, // Claude mode - focus on right panel, forward input to PTY
+}
+
 /// Shared state for PTY with VT100 parser
 struct PtyState {
     parser: vt100::Parser,
@@ -32,6 +39,7 @@ impl PtyState {
 struct App {
     pty_state: Arc<Mutex<PtyState>>,
     master_pty: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    mode: Mode,
 }
 
 impl App {
@@ -39,6 +47,7 @@ impl App {
         Self {
             pty_state: Arc::new(Mutex::new(PtyState::new(rows, cols))),
             master_pty: None,
+            mode: Mode::Ralph, // Default to Ralph mode
         }
     }
 
@@ -268,11 +277,27 @@ fn run(
             let left_panel_area = panels[0];
             let right_panel_area = panels[1];
 
+            // Determine border styles based on current mode
+            let (left_border_style, right_border_style) = match app.mode {
+                Mode::Ralph => (
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Mode::Claude => (
+                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+            };
+
             // Left panel: Ralph Status
+            let left_title = match app.mode {
+                Mode::Ralph => " Ralph Status [ACTIVE] ",
+                Mode::Claude => " Ralph Status ",
+            };
             let left_block = Block::default()
-                .title(" Ralph Status ")
+                .title(left_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan));
+                .border_style(left_border_style);
 
             // Get PTY state for display
             let state = app.pty_state.lock().unwrap();
@@ -289,10 +314,14 @@ fn run(
             frame.render_widget(left_content, left_panel_area);
 
             // Right panel: Claude Code (PTY output with VT100 rendering)
+            let right_title = match app.mode {
+                Mode::Claude => " Claude Code [ACTIVE] ",
+                Mode::Ralph => " Claude Code ",
+            };
             let right_block = Block::default()
-                .title(" Claude Code ")
+                .title(right_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan));
+                .border_style(right_border_style);
 
             // Render VT100 screen content with proper ANSI colors
             // The screen already shows the most recent content (auto-scroll behavior
@@ -304,8 +333,12 @@ fn run(
 
             frame.render_widget(right_content, right_panel_area);
 
-            // Bottom bar with keybinding hints
-            let keybindings = Paragraph::new(" q: Quit | i/Tab: Claude Mode | Esc: Ralph Mode ")
+            // Bottom bar with keybinding hints (mode-specific)
+            let keybindings_text = match app.mode {
+                Mode::Ralph => " q: Quit | i/Tab: Enter Claude Mode ",
+                Mode::Claude => " Press Esc to return to Ralph ",
+            };
+            let keybindings = Paragraph::new(keybindings_text)
                 .style(Style::default().fg(Color::Black).bg(Color::Cyan));
 
             frame.render_widget(keybindings, bottom_bar_area);
@@ -322,11 +355,27 @@ fn run(
             }
         }
 
-        // Handle input
+        // Handle input based on current mode
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
+                match app.mode {
+                    Mode::Ralph => {
+                        // In Ralph mode: handle TUI controls
+                        match key.code {
+                            KeyCode::Char('q') => break,
+                            KeyCode::Char('i') | KeyCode::Tab => {
+                                app.mode = Mode::Claude;
+                            }
+                            _ => {}
+                        }
+                    }
+                    Mode::Claude => {
+                        // In Claude mode: Escape returns to Ralph mode
+                        // (Other keys will be forwarded to PTY in US-007)
+                        if key.code == KeyCode::Esc {
+                            app.mode = Mode::Ralph;
+                        }
+                    }
                 }
             }
         }

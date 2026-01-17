@@ -99,8 +99,8 @@
         "cargo build --release succeeds"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Mode enum added with Ralph (default) and Claude states. Visual indicators include [ACTIVE] in title and green/bold borders for active panel."
     },
     {
       "id": "US-007",
