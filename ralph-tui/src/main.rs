@@ -1424,6 +1424,16 @@ fn run(
             // Build status text with PRD information
             let mut status_lines: Vec<Line> = Vec::new();
 
+            // Header: Ralph branding
+            status_lines.push(Line::from(vec![
+                Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
+                Span::styled("RALPH LOOP", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)),
+            ]));
+            status_lines.push(Line::from(vec![
+                Span::styled(format!("Terminal v{}", VERSION), Style::default().fg(CYAN_PRIMARY)),
+            ]));
+            status_lines.push(Line::from("")); // Gap after header
+
             // Iteration info
             status_lines.push(Line::from(vec![
                 Span::styled("Iteration: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
@@ -1796,6 +1806,16 @@ fn run_delay(
                 .style(Style::default().bg(BG_PRIMARY));
 
             let mut status_lines: Vec<Line> = Vec::new();
+
+            // Header: Ralph branding
+            status_lines.push(Line::from(vec![
+                Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
+                Span::styled("RALPH LOOP", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)),
+            ]));
+            status_lines.push(Line::from(vec![
+                Span::styled(format!("Terminal v{}", VERSION), Style::default().fg(CYAN_PRIMARY)),
+            ]));
+            status_lines.push(Line::from("")); // Gap after header
 
             // Iteration info
             status_lines.push(Line::from(vec![
