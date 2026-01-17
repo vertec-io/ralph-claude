@@ -115,8 +115,8 @@
         "cargo build --release succeeds"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Added forward_key_to_pty() function with ANSI escape sequences for special keys, Ctrl/Alt modifiers. Uses MasterPty::take_writer() for PTY input."
     },
     {
       "id": "US-008",

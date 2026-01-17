@@ -1,9 +1,9 @@
-use std::io::{self, stdout, Read};
+use std::io::{self, stdout, Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -39,6 +39,7 @@ impl PtyState {
 struct App {
     pty_state: Arc<Mutex<PtyState>>,
     master_pty: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    pty_writer: Option<Box<dyn Write + Send>>,
     mode: Mode,
 }
 
@@ -47,7 +48,16 @@ impl App {
         Self {
             pty_state: Arc::new(Mutex::new(PtyState::new(rows, cols))),
             master_pty: None,
+            pty_writer: None,
             mode: Mode::Ralph, // Default to Ralph mode
+        }
+    }
+
+    /// Write bytes to the PTY stdin
+    fn write_to_pty(&mut self, data: &[u8]) {
+        if let Some(ref mut writer) = self.pty_writer {
+            let _ = writer.write_all(data);
+            let _ = writer.flush();
         }
     }
 
@@ -139,6 +149,89 @@ fn render_vt100_screen(screen: &vt100::Screen) -> Vec<Line<'static>> {
     lines
 }
 
+/// Forward a key event to the PTY
+/// Converts crossterm key events to the appropriate byte sequences for the terminal
+fn forward_key_to_pty(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers) {
+    let bytes: Vec<u8> = match key_code {
+        // Printable characters
+        KeyCode::Char(c) => {
+            if modifiers.contains(KeyModifiers::CONTROL) {
+                // Handle Ctrl+key combinations
+                // Ctrl+A = 0x01, Ctrl+B = 0x02, ..., Ctrl+Z = 0x1A
+                // Ctrl+C = 0x03 (interrupt)
+                if c.is_ascii_alphabetic() {
+                    let ctrl_char = (c.to_ascii_lowercase() as u8) - b'a' + 1;
+                    vec![ctrl_char]
+                } else if c == '[' {
+                    vec![0x1b] // Escape
+                } else if c == '\\' {
+                    vec![0x1c] // File separator (Ctrl+\)
+                } else if c == ']' {
+                    vec![0x1d] // Group separator (Ctrl+])
+                } else if c == '^' {
+                    vec![0x1e] // Record separator (Ctrl+^)
+                } else if c == '_' {
+                    vec![0x1f] // Unit separator (Ctrl+_)
+                } else {
+                    // Just send the character for other Ctrl combinations
+                    c.to_string().into_bytes()
+                }
+            } else if modifiers.contains(KeyModifiers::ALT) {
+                // Alt+key sends ESC followed by the character
+                let mut bytes = vec![0x1b]; // ESC
+                bytes.extend(c.to_string().into_bytes());
+                bytes
+            } else {
+                // Regular character
+                c.to_string().into_bytes()
+            }
+        }
+
+        // Special keys
+        KeyCode::Enter => vec![b'\r'],     // Carriage return
+        KeyCode::Backspace => vec![0x7f],  // DEL character (most terminals)
+        KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'], // ANSI escape sequence
+        KeyCode::Tab => vec![b'\t'],       // Tab character
+
+        // Arrow keys (ANSI escape sequences)
+        KeyCode::Up => vec![0x1b, b'[', b'A'],
+        KeyCode::Down => vec![0x1b, b'[', b'B'],
+        KeyCode::Right => vec![0x1b, b'[', b'C'],
+        KeyCode::Left => vec![0x1b, b'[', b'D'],
+
+        // Home/End keys
+        KeyCode::Home => vec![0x1b, b'[', b'H'],
+        KeyCode::End => vec![0x1b, b'[', b'F'],
+
+        // Page Up/Down
+        KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
+        KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
+
+        // Insert key
+        KeyCode::Insert => vec![0x1b, b'[', b'2', b'~'],
+
+        // Function keys
+        KeyCode::F(1) => vec![0x1b, b'O', b'P'],
+        KeyCode::F(2) => vec![0x1b, b'O', b'Q'],
+        KeyCode::F(3) => vec![0x1b, b'O', b'R'],
+        KeyCode::F(4) => vec![0x1b, b'O', b'S'],
+        KeyCode::F(5) => vec![0x1b, b'[', b'1', b'5', b'~'],
+        KeyCode::F(6) => vec![0x1b, b'[', b'1', b'7', b'~'],
+        KeyCode::F(7) => vec![0x1b, b'[', b'1', b'8', b'~'],
+        KeyCode::F(8) => vec![0x1b, b'[', b'1', b'9', b'~'],
+        KeyCode::F(9) => vec![0x1b, b'[', b'2', b'0', b'~'],
+        KeyCode::F(10) => vec![0x1b, b'[', b'2', b'1', b'~'],
+        KeyCode::F(11) => vec![0x1b, b'[', b'2', b'3', b'~'],
+        KeyCode::F(12) => vec![0x1b, b'[', b'2', b'4', b'~'],
+        KeyCode::F(_) => return, // Unsupported function keys
+
+        // Other keys we don't handle
+        _ => return,
+    };
+
+    app.write_to_pty(&bytes);
+}
+
 fn main() -> io::Result<()> {
     // Setup terminal
     enable_raw_mode()?;
@@ -172,17 +265,22 @@ fn main() -> io::Result<()> {
     // Drop slave after spawning (important for proper cleanup)
     drop(pair.slave);
 
+    // Clone reader for background thread (must be done before take_writer)
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
+    // Get writer for sending input to PTY
+    let pty_writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+
     // Create app state with VT100 parser sized to PTY dimensions
     let mut app = App::new(pty_rows, pty_cols);
     app.master_pty = Some(pair.master);
-
-    // Clone reader for background thread
-    let mut reader = app
-        .master_pty
-        .as_ref()
-        .unwrap()
-        .try_clone_reader()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    app.pty_writer = Some(pty_writer);
 
     // Spawn thread to read PTY output and feed to VT100 parser
     let pty_state = Arc::clone(&app.pty_state);
@@ -371,9 +469,12 @@ fn run(
                     }
                     Mode::Claude => {
                         // In Claude mode: Escape returns to Ralph mode
-                        // (Other keys will be forwarded to PTY in US-007)
+                        // All other keys are forwarded to PTY
                         if key.code == KeyCode::Esc {
                             app.mode = Mode::Ralph;
+                        } else {
+                            // Forward key to PTY
+                            forward_key_to_pty(app, key.code, key.modifiers);
                         }
                     }
                 }
