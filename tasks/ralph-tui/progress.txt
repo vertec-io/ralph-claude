@@ -24,7 +24,21 @@ Started: 2026-01-17
 - Interactive CLI: find_active_tasks() scans tasks/ for prd.json; prompt_task_selection() for numbered list
 - CLI config: CliConfig struct holds task_dir, max_iterations, rotate_threshold, skip_prompts
 - Elapsed time: session_start and iteration_start Instant fields; format_duration() for MM:SS format
+- Token tracking: TokenStats struct with parse_from_output(); patterns 'input tokens', 'output tokens'. session_tokens in App accumulates across iterations.
 
+---
+
+## 2026-01-17 - US-012
+- Implemented: Token usage parsing and display
+- Files changed:
+  - ralph-tui/src/main.rs - Added TokenStats struct with parse_from_output(), iteration_tokens in PtyState, session_tokens in App, display in status panel
+  - tasks/ralph-tui/prd.json - marked US-012 as passes: true
+- **Learnings for future iterations:**
+  - TokenStats uses find_number_after() helper for flexible pattern matching
+  - Patterns: 'input tokens', 'output tokens', 'input:', 'output:', 'in:', 'out:'
+  - Token display shows iter tokens (↓↑ arrows for input/output) and session total
+  - Tokens accumulated to session_tokens when child_exited detected
+  - update_tokens() called during render loop and on exit for real-time updates
 ---
 
 ## 2026-01-17 - US-011

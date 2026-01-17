@@ -194,8 +194,8 @@
         "cargo build --release succeeds"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": "Token usage may be in verbose output or stream-json format"
+      "passes": true,
+      "notes": "TokenStats struct with parse_from_output() for parsing. Patterns: 'input tokens', 'output tokens'. Display shows iter tokens (↓↑) and session total. Tokens accumulated on iteration end."
     },
     {
       "id": "US-013",

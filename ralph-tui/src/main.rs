@@ -77,12 +77,89 @@ enum Mode {
     Claude, // Claude mode - focus on right panel, forward input to PTY
 }
 
+/// Token usage statistics
+#[derive(Debug, Clone, Default)]
+struct TokenStats {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+impl TokenStats {
+    /// Parse a number from text, handling commas
+    fn parse_number(s: &str) -> Option<u64> {
+        let cleaned: String = s.chars().filter(|c| c.is_ascii_digit()).collect();
+        cleaned.parse().ok()
+    }
+
+    /// Find a number after a pattern in text
+    fn find_number_after(text: &str, pattern: &str) -> Option<u64> {
+        let lower = text.to_lowercase();
+        if let Some(pos) = lower.find(pattern) {
+            let after = &text[pos + pattern.len()..];
+            // Skip whitespace and colons
+            let trimmed = after.trim_start_matches(|c: char| c.is_whitespace() || c == ':');
+            // Extract digits (with potential commas)
+            let num_str: String = trimmed.chars()
+                .take_while(|c| c.is_ascii_digit() || *c == ',')
+                .collect();
+            if !num_str.is_empty() {
+                return Self::parse_number(&num_str);
+            }
+        }
+        None
+    }
+
+    /// Parse token usage from Claude output text
+    /// Looks for patterns like "Input tokens: X" or "X input tokens"
+    fn parse_from_output(text: &str) -> Option<TokenStats> {
+        let mut input = None;
+        let mut output = None;
+
+        // Try various patterns for input tokens
+        for pattern in ["input tokens", "input:", "in:"] {
+            if input.is_none() {
+                input = Self::find_number_after(text, pattern);
+            }
+        }
+
+        // Try various patterns for output tokens
+        for pattern in ["output tokens", "output:", "out:"] {
+            if output.is_none() {
+                output = Self::find_number_after(text, pattern);
+            }
+        }
+
+        // Return stats if we found at least one value
+        if input.is_some() || output.is_some() {
+            Some(TokenStats {
+                input_tokens: input.unwrap_or(0),
+                output_tokens: output.unwrap_or(0),
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Total tokens (input + output)
+    fn total(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+
+    /// Add another TokenStats to this one
+    fn add(&mut self, other: &TokenStats) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+    }
+}
+
 /// Shared state for PTY with VT100 parser
 struct PtyState {
     parser: vt100::Parser,
     child_exited: bool,
     /// Recent raw output for detecting completion signal
     recent_output: String,
+    /// Token stats for current iteration
+    iteration_tokens: TokenStats,
 }
 
 impl PtyState {
@@ -91,6 +168,7 @@ impl PtyState {
             parser: vt100::Parser::new(rows, cols, 1000), // 1000 lines of scrollback
             child_exited: false,
             recent_output: String::new(),
+            iteration_tokens: TokenStats::default(),
         }
     }
 
@@ -100,7 +178,14 @@ impl PtyState {
             self.recent_output.push_str(s);
             // Keep only last 10KB to limit memory
             if self.recent_output.len() > 10 * 1024 {
-                let start = self.recent_output.len() - 8 * 1024;
+                let target_start = self.recent_output.len() - 8 * 1024;
+                // Find a valid UTF-8 character boundary
+                let start = self
+                    .recent_output
+                    .char_indices()
+                    .find(|(i, _)| *i >= target_start)
+                    .map(|(i, _)| i)
+                    .unwrap_or(target_start);
                 self.recent_output = self.recent_output[start..].to_string();
             }
         }
@@ -114,6 +199,22 @@ impl PtyState {
     /// Clear recent output (called when starting new iteration)
     fn clear_recent_output(&mut self) {
         self.recent_output.clear();
+        self.iteration_tokens = TokenStats::default();
+    }
+
+    /// Parse tokens from recent output and update iteration stats
+    fn update_tokens(&mut self) {
+        if let Some(stats) = TokenStats::parse_from_output(&self.recent_output) {
+            // Only update if we found new data
+            if stats.input_tokens > 0 || stats.output_tokens > 0 {
+                self.iteration_tokens = stats;
+            }
+        }
+    }
+
+    /// Get current iteration token stats
+    fn get_iteration_tokens(&self) -> TokenStats {
+        self.iteration_tokens.clone()
     }
 }
 
@@ -144,6 +245,8 @@ struct App {
     // Elapsed time tracking
     session_start: Instant,
     iteration_start: Instant,
+    // Token usage tracking
+    session_tokens: TokenStats,
     // Progress rotation
     rotate_threshold: u32,
     #[allow(dead_code)]
@@ -171,6 +274,7 @@ impl App {
             delay_start: None,
             session_start: now,
             iteration_start: now,
+            session_tokens: TokenStats::default(),
             rotate_threshold: config.rotate_threshold,
             skip_prompts: config.skip_prompts,
         }
@@ -214,8 +318,9 @@ impl App {
             });
         }
         // Also resize the VT100 parser's screen
-        let mut state = self.pty_state.lock().unwrap();
-        state.parser.screen_mut().set_size(rows, cols);
+        if let Ok(mut state) = self.pty_state.lock() {
+            state.parser.screen_mut().set_size(rows, cols);
+        }
     }
 }
 
@@ -854,7 +959,9 @@ fn spawn_claude(
 
     // Reset PTY state for new iteration
     {
-        let mut state = app.pty_state.lock().unwrap();
+        let mut state = app.pty_state.lock().map_err(|_| {
+            io::Error::new(io::ErrorKind::Other, "Failed to lock PTY state")
+        })?;
         state.child_exited = false;
         state.clear_recent_output();
         // Re-initialize parser to clear screen
@@ -869,19 +976,22 @@ fn spawn_claude(
             match reader.read(&mut buf) {
                 Ok(0) => {
                     // EOF - child process has exited
-                    let mut state = pty_state.lock().unwrap();
-                    state.child_exited = true;
+                    if let Ok(mut state) = pty_state.lock() {
+                        state.child_exited = true;
+                    }
                     break;
                 }
                 Ok(n) => {
                     // Feed raw bytes to VT100 parser and track for completion detection
-                    let mut state = pty_state.lock().unwrap();
-                    state.parser.process(&buf[..n]);
-                    state.append_output(&buf[..n]);
+                    if let Ok(mut state) = pty_state.lock() {
+                        state.parser.process(&buf[..n]);
+                        state.append_output(&buf[..n]);
+                    }
                 }
                 Err(_) => {
-                    let mut state = pty_state.lock().unwrap();
-                    state.child_exited = true;
+                    if let Ok(mut state) = pty_state.lock() {
+                        state.child_exited = true;
+                    }
                     break;
                 }
             }
@@ -894,6 +1004,16 @@ fn spawn_claude(
 }
 
 fn main() -> io::Result<()> {
+    // Set up panic hook to restore terminal state before panicking
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Restore terminal state
+        let _ = disable_raw_mode();
+        let _ = stdout().execute(LeaveAlternateScreen);
+        // Call the default panic handler
+        default_panic(info);
+    }));
+
     // Parse CLI arguments (includes interactive prompts if needed)
     let config = parse_args()?;
 
@@ -1128,8 +1248,8 @@ fn run(
                 .borders(Borders::ALL)
                 .border_style(left_border_style);
 
-            // Get PTY state for display
-            let pty_state = app.pty_state.lock().unwrap();
+            // Get PTY state for display (use default values if mutex is poisoned)
+            let mut pty_state_guard = app.pty_state.lock().ok();
 
             // Build status text with PRD information
             let mut status_lines: Vec<Line> = Vec::new();
@@ -1161,6 +1281,39 @@ fn run(
                 ),
             ]));
             status_lines.push(Line::from(""));
+
+            // Token usage - update from PTY output first
+            let iter_tokens = if let Some(ref mut guard) = pty_state_guard {
+                guard.update_tokens();
+                guard.get_iteration_tokens()
+            } else {
+                TokenStats::default()
+            };
+            let session_tokens = &app.session_tokens;
+
+            // Only show tokens section if we have any data
+            if iter_tokens.total() > 0 || session_tokens.total() > 0 {
+                status_lines.push(Line::from(vec![
+                    Span::styled("Tokens: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("{}↓ {}↑",
+                            iter_tokens.input_tokens,
+                            iter_tokens.output_tokens,
+                        ),
+                        Style::default().fg(Color::White),
+                    ),
+                ]));
+                if session_tokens.total() > 0 {
+                    status_lines.push(Line::from(vec![
+                        Span::styled("Session: ", Style::default().fg(Color::Cyan)),
+                        Span::styled(
+                            format!("{}", session_tokens.total()),
+                            Style::default().fg(Color::Yellow),
+                        ),
+                    ]));
+                }
+                status_lines.push(Line::from(""));
+            }
 
             // PRD information
             if let Some(ref prd) = app.prd {
@@ -1231,15 +1384,19 @@ fn run(
             status_lines.push(Line::from(""));
 
             // PTY status with data received indicator
-            let pty_status = if pty_state.child_exited {
-                Span::styled("PTY: Exited", Style::default().fg(Color::Red))
+            let (pty_status, bytes_received) = if let Some(ref pty_state) = pty_state_guard {
+                let status = if pty_state.child_exited {
+                    Span::styled("PTY: Exited", Style::default().fg(Color::Red))
+                } else {
+                    Span::styled("PTY: Running", Style::default().fg(Color::Green))
+                };
+                (status, pty_state.recent_output.len())
             } else {
-                Span::styled("PTY: Running", Style::default().fg(Color::Green))
+                (Span::styled("PTY: Error", Style::default().fg(Color::Red)), 0)
             };
             status_lines.push(Line::from(pty_status));
 
             // Show bytes received for debugging
-            let bytes_received = pty_state.recent_output.len();
             status_lines.push(Line::from(vec![
                 Span::styled("Data: ", Style::default().fg(Color::Cyan)),
                 Span::styled(
@@ -1271,8 +1428,15 @@ fn run(
             // Render VT100 screen content with proper ANSI colors
             // The screen already shows the most recent content (auto-scroll behavior
             // is handled by the terminal emulator when new content is written)
-            let screen = pty_state.parser.screen();
-            let lines = render_vt100_screen(screen);
+            let lines = if let Some(ref pty_state) = pty_state_guard {
+                let screen = pty_state.parser.screen();
+                render_vt100_screen(screen)
+            } else {
+                vec![Line::from(Span::styled(
+                    "Error: Failed to access PTY state",
+                    Style::default().fg(Color::Red),
+                ))]
+            };
 
             let right_content = Paragraph::new(lines).block(right_block);
 
@@ -1291,11 +1455,19 @@ fn run(
 
         // Check if child exited
         {
-            let state = app.pty_state.lock().unwrap();
-            if state.child_exited {
-                // Check for completion signal
-                let is_complete = state.has_completion_signal();
-                drop(state);
+            let state_result = app.pty_state.lock();
+            let (child_exited, is_complete, iter_tokens) = match state_result {
+                Ok(mut state) => {
+                    // Update tokens one final time before checking exit
+                    state.update_tokens();
+                    let tokens = state.get_iteration_tokens();
+                    (state.child_exited, state.has_completion_signal(), tokens)
+                }
+                Err(_) => (true, false, TokenStats::default()), // Treat poisoned mutex as child exited
+            };
+            if child_exited {
+                // Accumulate iteration tokens into session totals
+                app.session_tokens.add(&iter_tokens);
 
                 // Wait a moment before proceeding so user can see final output
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1503,9 +1675,15 @@ fn run_delay(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray));
 
-            let pty_state = app.pty_state.lock().unwrap();
-            let screen = pty_state.parser.screen();
-            let lines = render_vt100_screen(screen);
+            let lines = if let Ok(pty_state) = app.pty_state.lock() {
+                let screen = pty_state.parser.screen();
+                render_vt100_screen(screen)
+            } else {
+                vec![Line::from(Span::styled(
+                    "Error: Failed to access PTY state",
+                    Style::default().fg(Color::Red),
+                ))]
+            };
 
             let right_content = Paragraph::new(lines).block(right_block);
             frame.render_widget(right_content, right_panel_area);
