@@ -1,7 +1,9 @@
 #!/bin/bash
 # Ralph Wiggum for Claude Code - Long-running AI agent loop
-# Usage: ./ralph.sh [task-directory] [-i iterations] [-I] [--rotate-at N]
-# Example: ./ralph.sh tasks/fix-auth-timeout -i 20 -I
+# Usage: ./ralph.sh [task-directory] [-i iterations] [--rotate-at N]
+# Example: ./ralph.sh tasks/fix-auth-timeout -i 20
+#
+# For interactive mode with tmux, use: ./ralph-i.sh
 
 set -e
 
@@ -11,8 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK_DIR=""
 MAX_ITERATIONS=""
 SKIP_PROMPTS=false
-INTERACTIVE_MODE=false
-ROTATE_THRESHOLD=500
+ROTATE_THRESHOLD=300
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -24,17 +25,29 @@ while [[ $# -gt 0 ]]; do
       SKIP_PROMPTS=true
       shift
       ;;
-    -I|--interactive)
-      INTERACTIVE_MODE=true
-      shift
-      ;;
     --rotate-at)
       ROTATE_THRESHOLD="$2"
       shift 2
       ;;
+    -h|--help)
+      echo "Ralph Wiggum - Autonomous Agent Loop"
+      echo ""
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--rotate-at N]"
+      echo ""
+      echo "Options:"
+      echo "  -i, --iterations N   Max iterations (default: 10)"
+      echo "  -y, --yes            Skip confirmation prompts"
+      echo "  --rotate-at N        Rotate progress file at N lines (default: 300)"
+      echo "  -h, --help           Show this help message"
+      echo ""
+      echo "For interactive mode with tmux, use: ./ralph-i.sh"
+      exit 0
+      ;;
     -*)
       echo "Unknown option: $1"
-      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [-I|--interactive] [--rotate-at N]"
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--rotate-at N]"
+      echo ""
+      echo "For interactive mode, use: ./ralph-i.sh"
       exit 1
       ;;
     *)
@@ -43,16 +56,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-# Check for tmux if interactive mode requested
-if [ "$INTERACTIVE_MODE" = true ]; then
-  if ! command -v tmux &> /dev/null; then
-    echo "Warning: tmux not found. Interactive mode requires tmux."
-    echo "Install with: sudo apt install tmux (Debian/Ubuntu) or brew install tmux (macOS)"
-    echo "Falling back to non-interactive mode."
-    INTERACTIVE_MODE=false
-  fi
-fi
 
 # Function to find active tasks (directories with prd.json, excluding archived)
 find_active_tasks() {
@@ -262,18 +265,9 @@ echo "  Task:       $TASK_DIR"
 echo "  Branch:     $BRANCH_NAME"
 echo "  Progress:   $COMPLETED_STORIES / $TOTAL_STORIES stories complete"
 echo "  Max iters:  $MAX_ITERATIONS"
-if [ "$INTERACTIVE_MODE" = true ]; then
-echo "  Mode:       Interactive (tmux)"
-fi
 echo ""
 echo "  $DESCRIPTION"
 echo ""
-if [ "$INTERACTIVE_MODE" = true ]; then
-echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │  i: Send message    f: Force checkpoint    q: Quit iter   │"
-echo "  └─────────────────────────────────────────────────────────────┘"
-echo ""
-fi
 
 for i in $(seq 1 $MAX_ITERATIONS); do
   # Check and rotate progress file if needed
@@ -302,339 +296,68 @@ $(cat "$PROMPT_FILE")
   STATUS_FILE=$(mktemp)
   trap "rm -f $OUTPUT_FILE $STATUS_FILE" EXIT
 
-  if [ "$INTERACTIVE_MODE" = true ]; then
-    # ═══════════════════════════════════════════════════════════════
-    # INTERACTIVE MODE (tmux-based)
-    # ═══════════════════════════════════════════════════════════════
-    TMUX_SESSION="ralph-$$-$i"
-    PROMPT_FILE_TMP=$(mktemp)
-    echo "$PROMPT" > "$PROMPT_FILE_TMP"
+  # Run claude in background with streaming JSON output
+  echo "$PROMPT" | claude --dangerously-skip-permissions --print --output-format stream-json --verbose > "$OUTPUT_FILE" 2>&1 &
+  CLAUDE_PID=$!
 
-    # Start Claude in a tmux session (use script for unbuffered output)
-    tmux new-session -d -s "$TMUX_SESSION" \
-      "script -q -c 'cat \"$PROMPT_FILE_TMP\" | claude --dangerously-skip-permissions' '$OUTPUT_FILE'; echo 'RALPH_SESSION_DONE' >> '$OUTPUT_FILE'"
+  # Show spinner while claude runs
+  SPINNER="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+  START_TIME=$(date +%s)
+  LAST_STATUS="Starting..."
 
-    # Show spinner while monitoring tmux session
-    SPINNER="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    START_TIME=$(date +%s)
-    LAST_STATUS="Starting..."
-    LAST_MODEL_TEXT=""
-    LAST_TOOL=""
-    MSG_SENT_TIME=0
-    AWAITING_RESPONSE=false
+  # Print initial lines (spinner + status)
+  echo ""
+  echo ""
 
-    # Print initial lines (spinner + model text + status + tool + shortcuts)
-    echo ""
-    echo ""
-    echo ""
-    echo ""
-    echo ""
+  while kill -0 $CLAUDE_PID 2>/dev/null; do
+    ELAPSED=$(($(date +%s) - START_TIME))
+    MINS=$((ELAPSED / 60))
+    SECS=$((ELAPSED % 60))
 
-    # Save terminal settings for raw input (only if we have a tty)
-    HAS_TTY=false
-    if [ -t 0 ]; then
-      OLD_STTY=$(stty -g)
-      stty -echo -icanon min 0 time 1
-      HAS_TTY=true
+    # Parse JSON output for status updates
+    if [ -f "$OUTPUT_FILE" ]; then
+      # Look for tool calls, assistant messages, etc.
+      TOOL_NAME=$(tail -n 20 "$OUTPUT_FILE" 2>/dev/null | grep -o '"tool_name":"[^"]*"' | tail -1 | cut -d'"' -f4)
+      if [ -n "$TOOL_NAME" ]; then
+        LAST_STATUS="Using $TOOL_NAME..."
+      else
+        # Look for text content being generated
+        TEXT_PREVIEW=$(tail -n 5 "$OUTPUT_FILE" 2>/dev/null | grep -o '"text":"[^"]*"' | tail -1 | cut -d'"' -f4 | head -c 60)
+        if [ -n "$TEXT_PREVIEW" ]; then
+          LAST_STATUS="$TEXT_PREVIEW"
+        fi
+      fi
     fi
 
-    while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
-      # Check if session completed
-      if grep -q "RALPH_SESSION_DONE" "$OUTPUT_FILE" 2>/dev/null; then
-        break
+    for (( j=0; j<${#SPINNER}; j++ )); do
+      if ! kill -0 $CLAUDE_PID 2>/dev/null; then
+        break 2
       fi
-
-      ELAPSED=$(($(date +%s) - START_TIME))
-      MINS=$((ELAPSED / 60))
-      SECS=$((ELAPSED % 60))
-
-      # Get latest output from tmux pane - look for meaningful content
-      PANE_CONTENT=$(tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null)
-
-      # Get the last tool call line (● followed by tool name and parenthesis)
-      # Tools: Read, Bash, Edit, Write, Grep, Glob, Search, Task, WebFetch, etc.
-      NEW_TOOL=$(echo "$PANE_CONTENT" | grep -E "^● [A-Za-z]+\(" | tail -1 | head -c 100)
-
-      # Get the last status/thinking line (various Unicode stars/dots used by Claude Code)
-      NEW_STATUS=$(echo "$PANE_CONTENT" | grep -E "^[✢·✻✽✶⋆] |^\* " | tail -1 | head -c 100)
-
-      # Get Claude's thinking/commentary lines (● followed by text, not a tool call)
-      NEW_THINKING=$(echo "$PANE_CONTENT" | grep "^● " | grep -v "^● [A-Za-z]*(" | tail -1 | head -c 100)
-
-      # Get text that looks like Claude's natural language output (starts with letter)
-      NEW_TEXT=$(echo "$PANE_CONTENT" | \
-        grep -v "^$" | \
-        grep -v "^● " | \
-        grep -v "^⎿" | \
-        grep -v "^[✢·✻✽✶⋆*] " | \
-        grep -v "^  ☐" | \
-        grep -v "^  ☑" | \
-        grep -v "^─" | \
-        grep -v "^❯" | \
-        grep -v "^>" | \
-        grep -v "bypass permissions" | \
-        grep -v "shift+tab" | \
-        grep -v "press.*to edit" | \
-        grep -v "queued" | \
-        grep -v "ctrl+c to interrupt" | \
-        grep "^[A-Za-z]" | \
-        tail -1 | head -c 100)
-
-      # Update tool if we found a new one
-      if [ -n "$NEW_TOOL" ]; then
-        LAST_TOOL="$NEW_TOOL"
-        if [ "$AWAITING_RESPONSE" = true ]; then
-          AWAITING_RESPONSE=false
-        fi
-      fi
-
-      # Update status line (spinner indicators)
-      if [ -n "$NEW_STATUS" ]; then
-        if [ "$AWAITING_RESPONSE" = true ]; then
-          LAST_STATUS="← CLAUDE: $NEW_STATUS"
-          AWAITING_RESPONSE=false
-        else
-          LAST_STATUS="$NEW_STATUS"
-        fi
-      fi
-
-      # Update model text (thinking commentary or natural language)
-      if [ -n "$NEW_THINKING" ]; then
-        LAST_MODEL_TEXT="$NEW_THINKING"
-      elif [ -n "$NEW_TEXT" ] && [ ${#NEW_TEXT} -gt 10 ]; then
-        LAST_MODEL_TEXT="$NEW_TEXT"
-      fi
-
-      # Check for keyboard input (non-blocking)
-      KEY=""
-      read -t 0.05 -n 1 KEY 2>/dev/null || true
-
-      if [[ "$KEY" = "i" || "$KEY" = "m" ]] && [ "$HAS_TTY" = true ]; then  # 'i' or 'm' for message
-        # Fully restore terminal for input
-        stty "$OLD_STTY"
-
-        # Clear display area and show input prompt
-        printf "\033[5A"
-        printf "\033[K\n\033[K\n\033[K\n\033[K\n\033[K"
-        printf "\033[5A"
-        printf "  \033[33mEnter message (double-Enter to send, Esc to cancel):\033[0m\n"
-        printf "  > "
-
-        # Read input character by character to detect Escape and double-Enter
-        USER_MSG=""
-        CANCELLED=false
-        LAST_ENTER_MS=0
-        while true; do
-          IFS= read -rsn1 char < /dev/tty
-          if [[ "$char" == $'\x1b' ]]; then
-            # Escape pressed - cancel
-            CANCELLED=true
-            break
-          elif [[ "$char" == "" ]]; then
-            # Enter pressed - check for double-enter
-            CURRENT_MS=$(($(date +%s%N) / 1000000))
-            TIME_DIFF=$((CURRENT_MS - LAST_ENTER_MS))
-            if [ $LAST_ENTER_MS -gt 0 ] && [ $TIME_DIFF -lt 400 ]; then
-              # Double-enter detected - send message (remove trailing newline)
-              USER_MSG="${USER_MSG%$'\n'}"
-              echo
-              break
-            else
-              # Single enter - add newline
-              LAST_ENTER_MS=$CURRENT_MS
-              USER_MSG+=$'\n'
-              echo
-              printf "  > "
-            fi
-          elif [[ "$char" == $'\x7f' || "$char" == $'\x08' ]]; then
-            # Backspace - remove last char
-            if [ ${#USER_MSG} -gt 0 ]; then
-              LAST_CHAR="${USER_MSG: -1}"
-              USER_MSG="${USER_MSG%?}"
-              if [[ "$LAST_CHAR" == $'\n' ]]; then
-                # Move cursor up and to end of previous line
-                printf "\033[A\033[999C"
-              else
-                printf "\b \b"
-              fi
-            fi
-            LAST_ENTER_MS=0
-          else
-            # Regular character - reset enter timer
-            USER_MSG+="$char"
-            printf "%s" "$char"
-            LAST_ENTER_MS=0
-          fi
-        done
-
-        if [ "$CANCELLED" = true ]; then
-          LAST_STATUS="(cancelled)"
-        elif [ -n "$USER_MSG" ]; then
-          # Send message to tmux
-          tmux send-keys -t "$TMUX_SESSION" "$USER_MSG" Enter
-          # Show truncated preview (first line + line count if multiline)
-          LINE_COUNT=$(echo "$USER_MSG" | wc -l)
-          FIRST_LINE=$(echo "$USER_MSG" | head -1 | head -c 35)
-          if [ "$LINE_COUNT" -gt 1 ]; then
-            LAST_STATUS="→ YOU: $FIRST_LINE... ($LINE_COUNT lines)"
-          else
-            LAST_STATUS="→ YOU: $FIRST_LINE"
-          fi
-          MSG_SENT_TIME=$(date +%s)
-          AWAITING_RESPONSE=true
-        else
-          LAST_STATUS="(empty - cancelled)"
-        fi
-
-        # Restore raw mode and redraw
-        stty -echo -icanon min 0 time 1
-        printf "\033[K\n\033[K\n\033[K\n\033[K\n"
-
-      elif [ "$KEY" = "f" ] && [ "$HAS_TTY" = true ]; then  # 'f' for force checkpoint
-        CHECKPOINT_MSG="IMPORTANT: Please stop what you're doing and update prd.json and progress.txt with your current progress, any challenges or blockers, and incomplete items. Then continue."
-        tmux send-keys -t "$TMUX_SESSION" "$CHECKPOINT_MSG" Enter
-        LAST_STATUS="→ CHECKPOINT: Requesting progress save..."
-        MSG_SENT_TIME=$(date +%s)
-        AWAITING_RESPONSE=true
-      elif [ "$KEY" = "q" ] && [ "$HAS_TTY" = true ]; then  # 'q' to quit current iteration
-        # Kill the tmux session gracefully
-        tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-        LAST_STATUS="Iteration stopped by user"
-        break
-      fi
-
-      # Update display (5 lines: spinner, model text, status, tool, shortcuts)
-      # Get terminal width, default to 80
-      TERM_WIDTH=$(tput cols 2>/dev/null || echo 80)
-      MAX_LEN=$((TERM_WIDTH - 5))  # Leave room for leading spaces and safety
-
-      # Truncate text to fit terminal
-      DISP_MODEL="${LAST_MODEL_TEXT:0:$MAX_LEN}"
-      DISP_STATUS="${LAST_STATUS:0:$MAX_LEN}"
-      DISP_TOOL="${LAST_TOOL:0:$MAX_LEN}"
-
-      printf "\033[5A\r"
-      printf "\033[K  ${SPINNER:0:1} Claude working... %02d:%02d\n" $MINS $SECS
-      # Model text line (Claude's actual output)
-      if [ -n "$LAST_MODEL_TEXT" ]; then
-        printf "\033[K  \033[97m%s\033[0m\n" "$DISP_MODEL"  # bright white for model text
-      else
-        printf "\033[K  \033[90m(waiting for output...)\033[0m\n"
-      fi
-      # Status line with color based on state
-      if [[ "$LAST_STATUS" == "→ YOU:"* ]]; then
-        printf "\033[K  \033[33m%s\033[0m\n" "$DISP_STATUS"  # yellow
-      elif [[ "$LAST_STATUS" == "→ CHECKPOINT:"* ]]; then
-        printf "\033[K  \033[35m%s\033[0m\n" "$DISP_STATUS"  # magenta
-      elif [[ "$LAST_STATUS" == "← CLAUDE:"* ]]; then
-        printf "\033[K  \033[32m%s\033[0m\n" "$DISP_STATUS"  # green
-      else
-        printf "\033[K  \033[37m%s\033[0m\n" "$DISP_STATUS"  # white
-      fi
-      # Tool line (always show, even if empty)
-      if [ -n "$LAST_TOOL" ]; then
-        printf "\033[K  \033[36m%s\033[0m\n" "$DISP_TOOL"  # cyan for tool
-      else
-        printf "\033[K  \033[90m(no tool)\033[0m\n"
-      fi
-      printf "\033[K  \033[90m[i: message | f: checkpoint | q: quit]\033[0m\n"
-
-      # Rotate spinner
-      SPINNER="${SPINNER:1}${SPINNER:0:1}"
+      # Move up 2 lines, clear and print spinner, then status
+      printf "\033[2A"
+      printf "\r\033[K  ${SPINNER:$j:1} Claude working... %02d:%02d\n" $MINS $SECS
+      printf "\033[K  \033[90m%.70s\033[0m\n" "$LAST_STATUS"
       sleep 0.1
     done
+  done
 
-    # Restore terminal settings
-    if [ "$HAS_TTY" = true ]; then
-      stty "$OLD_STTY"
-    fi
+  # Wait for claude to finish and get exit code
+  wait $CLAUDE_PID || true
 
-    # Wait for tmux session to fully close
-    tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
-    rm -f "$PROMPT_FILE_TMP"
+  # Clear spinner line and show completion
+  ELAPSED=$(($(date +%s) - START_TIME))
+  MINS=$((ELAPSED / 60))
+  SECS=$((ELAPSED % 60))
+  printf "\033[2A"
+  printf "\r\033[K  ✓ Claude finished in %02d:%02d\n" $MINS $SECS
+  printf "\033[K\n"
 
-    # Clear spinner lines and show completion
-    ELAPSED=$(($(date +%s) - START_TIME))
-    MINS=$((ELAPSED / 60))
-    SECS=$((ELAPSED % 60))
-    printf "\033[5A"
-    printf "\r\033[K  ✓ Claude finished in %02d:%02d\n" $MINS $SECS
-    printf "\033[K\n"
-    printf "\033[K\n"
-    printf "\033[K\n"
-    printf "\033[K\n"
+  # Extract final result from JSON output
+  OUTPUT=$(grep '"type":"result"' "$OUTPUT_FILE" | tail -1 | jq -r '.result // empty' 2>/dev/null)
 
-    # Get output (remove the done marker and script artifacts)
-    OUTPUT=$(grep -v "RALPH_SESSION_DONE" "$OUTPUT_FILE" 2>/dev/null | sed 's/\r//g' || cat "$OUTPUT_FILE")
-
-  else
-    # ═══════════════════════════════════════════════════════════════
-    # NON-INTERACTIVE MODE (original behavior)
-    # ═══════════════════════════════════════════════════════════════
-
-    # Run claude in background with streaming JSON output
-    echo "$PROMPT" | claude --dangerously-skip-permissions --print --output-format stream-json --verbose > "$OUTPUT_FILE" 2>&1 &
-    CLAUDE_PID=$!
-
-    # Show spinner while claude runs
-    SPINNER="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    START_TIME=$(date +%s)
-    LAST_STATUS="Starting..."
-
-    # Print initial lines (spinner + status)
-    echo ""
-    echo ""
-
-    while kill -0 $CLAUDE_PID 2>/dev/null; do
-      ELAPSED=$(($(date +%s) - START_TIME))
-      MINS=$((ELAPSED / 60))
-      SECS=$((ELAPSED % 60))
-
-      # Parse JSON output for status updates
-      if [ -f "$OUTPUT_FILE" ]; then
-        # Look for tool calls, assistant messages, etc.
-        TOOL_NAME=$(tail -n 20 "$OUTPUT_FILE" 2>/dev/null | grep -o '"tool_name":"[^"]*"' | tail -1 | cut -d'"' -f4)
-        if [ -n "$TOOL_NAME" ]; then
-          LAST_STATUS="Using $TOOL_NAME..."
-        else
-          # Look for text content being generated
-          TEXT_PREVIEW=$(tail -n 5 "$OUTPUT_FILE" 2>/dev/null | grep -o '"text":"[^"]*"' | tail -1 | cut -d'"' -f4 | head -c 60)
-          if [ -n "$TEXT_PREVIEW" ]; then
-            LAST_STATUS="$TEXT_PREVIEW"
-          fi
-        fi
-      fi
-
-      for (( j=0; j<${#SPINNER}; j++ )); do
-        if ! kill -0 $CLAUDE_PID 2>/dev/null; then
-          break 2
-        fi
-        # Move up 2 lines, clear and print spinner, then status
-        printf "\033[2A"
-        printf "\r\033[K  ${SPINNER:$j:1} Claude working... %02d:%02d\n" $MINS $SECS
-        printf "\033[K  \033[90m%.70s\033[0m\n" "$LAST_STATUS"
-        sleep 0.1
-      done
-    done
-
-    # Wait for claude to finish and get exit code
-    wait $CLAUDE_PID || true
-
-    # Clear spinner line and show completion
-    ELAPSED=$(($(date +%s) - START_TIME))
-    MINS=$((ELAPSED / 60))
-    SECS=$((ELAPSED % 60))
-    printf "\033[2A"
-    printf "\r\033[K  ✓ Claude finished in %02d:%02d\n" $MINS $SECS
-    printf "\033[K\n"
-
-    # Extract final result from JSON output
-    OUTPUT=$(grep '"type":"result"' "$OUTPUT_FILE" | tail -1 | jq -r '.result // empty' 2>/dev/null)
-
-    # If no result found, try to get the raw text
-    if [ -z "$OUTPUT" ]; then
-      OUTPUT=$(cat "$OUTPUT_FILE")
-    fi
+  # If no result found, try to get the raw text
+  if [ -z "$OUTPUT" ]; then
+    OUTPUT=$(cat "$OUTPUT_FILE")
   fi
 
   rm -f "$OUTPUT_FILE" $STATUS_FILE

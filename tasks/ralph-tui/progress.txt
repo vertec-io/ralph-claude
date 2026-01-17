@@ -1,0 +1,18 @@
+# Ralph Progress Log
+Effort: ralph-tui
+Type: Feature
+Started: 2026-01-17
+---
+
+## 2026-01-17 - US-001
+- Implemented: Split ralph.sh into non-interactive and legacy interactive versions
+- Files changed:
+  - ralph.sh - removed all tmux/interactive code (~300 lines removed)
+  - ralph-i.sh - new file containing interactive tmux functionality
+  - tasks/ralph-tui/prd.json - marked US-001 as passes: true
+- **Learnings for future iterations:**
+  - ralph.sh is now a clean non-interactive loop (simpler foundation for ralph-tui)
+  - ralph-i.sh is the legacy interactive mode using tmux
+  - Both scripts share the same core functionality (task selection, progress rotation, iteration loop)
+  - The split allows ralph-tui to eventually replace ralph-i.sh as the primary interactive mode
+---
