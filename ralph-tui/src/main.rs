@@ -1,5 +1,10 @@
 mod theme;
 
+use theme::{
+    BG_PRIMARY, BG_TERTIARY, BORDER_SUBTLE, CYAN_PRIMARY, GREEN_ACTIVE, GREEN_SUCCESS,
+    AMBER_WARNING, RED_ERROR, TEXT_MUTED, TEXT_PRIMARY,
+};
+
 use std::io::{self, stdout, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -1393,12 +1398,12 @@ fn run(
             // Determine border styles based on current mode
             let (left_border_style, right_border_style) = match app.mode {
                 Mode::Ralph => (
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
+                    Style::default().fg(BORDER_SUBTLE),
                 ),
                 Mode::Claude => (
-                    Style::default().fg(Color::DarkGray),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default().fg(BORDER_SUBTLE),
+                    Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
                 ),
             };
 
@@ -1410,7 +1415,8 @@ fn run(
             let left_block = Block::default()
                 .title(left_title)
                 .borders(Borders::ALL)
-                .border_style(left_border_style);
+                .border_style(left_border_style)
+                .style(Style::default().bg(BG_PRIMARY));
 
             // Get PTY state for display (use default values if mutex is poisoned)
             let mut pty_state_guard = app.pty_state.lock().ok();
@@ -1420,10 +1426,10 @@ fn run(
 
             // Iteration info
             status_lines.push(Line::from(vec![
-                Span::styled("Iteration: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Iteration: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!("{}/{}", app.current_iteration, app.max_iterations),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(CYAN_PRIMARY),
                 ),
             ]));
             status_lines.push(Line::from(""));
@@ -1432,16 +1438,16 @@ fn run(
             let session_elapsed = app.session_start.elapsed();
             let iteration_elapsed = app.iteration_start.elapsed();
             status_lines.push(Line::from(vec![
-                Span::styled("Session: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Session: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format_duration(session_elapsed),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(TEXT_PRIMARY),
                 ),
                 Span::raw("  "),
-                Span::styled("Iter: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Iter: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format_duration(iteration_elapsed),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(TEXT_PRIMARY),
                 ),
             ]));
             status_lines.push(Line::from(""));
@@ -1459,31 +1465,31 @@ fn run(
             // Only show tokens section if we have any data
             if iter_tokens.total() > 0 || session_tokens.total() > 0 {
                 status_lines.push(Line::from(vec![
-                    Span::styled("Tokens: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Tokens: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         format!("{}↓ {}↑",
                             iter_tokens.input_tokens,
                             iter_tokens.output_tokens,
                         ),
-                        Style::default().fg(Color::White),
+                        Style::default().fg(TEXT_PRIMARY),
                     ),
                     Span::raw("  "),
                     Span::styled(
                         iter_tokens.format_cost(),
-                        Style::default().fg(Color::Green),
+                        Style::default().fg(GREEN_SUCCESS),
                     ),
                 ]));
                 if session_tokens.total() > 0 {
                     status_lines.push(Line::from(vec![
-                        Span::styled("Session: ", Style::default().fg(Color::Cyan)),
+                        Span::styled("Session: ", Style::default().fg(CYAN_PRIMARY)),
                         Span::styled(
                             format!("{} tokens", session_tokens.total()),
-                            Style::default().fg(Color::Yellow),
+                            Style::default().fg(CYAN_PRIMARY),
                         ),
                         Span::raw("  "),
                         Span::styled(
                             session_tokens.format_cost(),
-                            Style::default().fg(Color::Green),
+                            Style::default().fg(GREEN_SUCCESS),
                         ),
                     ]));
                 }
@@ -1493,15 +1499,15 @@ fn run(
             // Recent activities section
             if !activities.is_empty() {
                 status_lines.push(Line::from(vec![
-                    Span::styled("Recent Activity:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Recent Activity:", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 ]));
                 let max_activity_width = left_panel_area.width.saturating_sub(6) as usize;
                 for activity in activities.iter().take(5) {
                     status_lines.push(Line::from(vec![
-                        Span::styled("  • ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("  • ", Style::default().fg(TEXT_MUTED)),
                         Span::styled(
                             activity.format(max_activity_width),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(TEXT_PRIMARY),
                         ),
                     ]));
                 }
@@ -1512,7 +1518,7 @@ fn run(
             if let Some(ref prd) = app.prd {
                 // Description
                 status_lines.push(Line::from(vec![
-                    Span::styled("Task: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Task: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 ]));
                 // Wrap description to fit panel
                 for line in wrap_text(&prd.description, left_panel_area.width.saturating_sub(4) as usize) {
@@ -1522,7 +1528,7 @@ fn run(
 
                 // Branch
                 status_lines.push(Line::from(vec![
-                    Span::styled("Branch: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Branch: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                     Span::raw(&prd.branch_name),
                 ]));
                 status_lines.push(Line::from(""));
@@ -1536,13 +1542,13 @@ fn run(
                     0
                 };
                 status_lines.push(Line::from(vec![
-                    Span::styled("Progress: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Progress: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         format!("{}/{} ({}%)", completed, total, progress_pct),
                         if completed == total {
-                            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+                            Style::default().fg(GREEN_SUCCESS).add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(Color::Yellow)
+                            Style::default().fg(CYAN_PRIMARY)
                         },
                     ),
                 ]));
@@ -1551,10 +1557,10 @@ fn run(
                 // Current story
                 if let Some(story) = prd.current_story() {
                     status_lines.push(Line::from(vec![
-                        Span::styled("Current Story: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                        Span::styled("Current Story: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                     ]));
                     status_lines.push(Line::from(vec![
-                        Span::styled(format!("  {} ", story.id), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!("  {} ", story.id), Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                     ]));
                     // Wrap story title
                     for line in wrap_text(&story.title, left_panel_area.width.saturating_sub(4) as usize) {
@@ -1562,12 +1568,12 @@ fn run(
                     }
                 } else {
                     status_lines.push(Line::from(vec![
-                        Span::styled("All stories complete!", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::styled("All stories complete!", Style::default().fg(GREEN_SUCCESS).add_modifier(Modifier::BOLD)),
                     ]));
                 }
             } else {
                 status_lines.push(Line::from(vec![
-                    Span::styled("Error: ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::styled("Error: ", Style::default().fg(RED_ERROR).add_modifier(Modifier::BOLD)),
                     Span::raw("Failed to load prd.json"),
                 ]));
             }
@@ -1579,32 +1585,32 @@ fn run(
             // PTY status with data received indicator
             let (pty_status, bytes_received) = if let Some(ref pty_state) = pty_state_guard {
                 let status = if pty_state.child_exited {
-                    Span::styled("PTY: Exited", Style::default().fg(Color::Red))
+                    Span::styled("PTY: Exited", Style::default().fg(RED_ERROR))
                 } else {
-                    Span::styled("PTY: Running", Style::default().fg(Color::Green))
+                    Span::styled("PTY: Running", Style::default().fg(GREEN_ACTIVE))
                 };
                 (status, pty_state.recent_output.len())
             } else {
-                (Span::styled("PTY: Error", Style::default().fg(Color::Red)), 0)
+                (Span::styled("PTY: Error", Style::default().fg(RED_ERROR)), 0)
             };
             status_lines.push(Line::from(pty_status));
 
             // Show bytes received for debugging
             status_lines.push(Line::from(vec![
-                Span::styled("Data: ", Style::default().fg(Color::Cyan)),
+                Span::styled("Data: ", Style::default().fg(CYAN_PRIMARY)),
                 Span::styled(
                     format!("{} bytes", bytes_received),
                     if bytes_received > 0 {
-                        Style::default().fg(Color::Green)
+                        Style::default().fg(GREEN_SUCCESS)
                     } else {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(AMBER_WARNING)
                     },
                 ),
             ]));
 
             let left_content = Paragraph::new(status_lines)
                 .block(left_block)
-                .style(Style::default().fg(Color::White));
+                .style(Style::default().fg(TEXT_PRIMARY));
 
             frame.render_widget(left_content, left_panel_area);
 
@@ -1616,7 +1622,8 @@ fn run(
             let right_block = Block::default()
                 .title(right_title)
                 .borders(Borders::ALL)
-                .border_style(right_border_style);
+                .border_style(right_border_style)
+                .style(Style::default().bg(BG_PRIMARY));
 
             // Render VT100 screen content with proper ANSI colors
             // The screen already shows the most recent content (auto-scroll behavior
@@ -1627,7 +1634,7 @@ fn run(
             } else {
                 vec![Line::from(Span::styled(
                     "Error: Failed to access PTY state",
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(RED_ERROR),
                 ))]
             };
 
@@ -1641,7 +1648,7 @@ fn run(
                 Mode::Claude => " Esc: Ralph Mode | Ctrl+C: Quit ",
             };
             let keybindings = Paragraph::new(keybindings_text)
-                .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+                .style(Style::default().fg(BG_PRIMARY).bg(BG_TERTIARY));
 
             frame.render_widget(keybindings, bottom_bar_area);
         })?;
@@ -1785,16 +1792,17 @@ fn run_delay(
             let left_block = Block::default()
                 .title(" Ralph Status [ACTIVE] ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+                .border_style(Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD))
+                .style(Style::default().bg(BG_PRIMARY));
 
             let mut status_lines: Vec<Line> = Vec::new();
 
             // Iteration info
             status_lines.push(Line::from(vec![
-                Span::styled("Iteration: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Iteration: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format!("{}/{}", app.current_iteration, app.max_iterations),
-                    Style::default().fg(Color::Yellow),
+                    Style::default().fg(CYAN_PRIMARY),
                 ),
             ]));
             status_lines.push(Line::from(""));
@@ -1803,16 +1811,16 @@ fn run_delay(
             let session_elapsed = app.session_start.elapsed();
             let iteration_elapsed = app.iteration_start.elapsed();
             status_lines.push(Line::from(vec![
-                Span::styled("Session: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Session: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format_duration(session_elapsed),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(TEXT_PRIMARY),
                 ),
                 Span::raw("  "),
-                Span::styled("Iter: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled("Iter: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 Span::styled(
                     format_duration(iteration_elapsed),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(TEXT_PRIMARY),
                 ),
             ]));
             status_lines.push(Line::from(""));
@@ -1826,7 +1834,7 @@ fn run_delay(
             status_lines.push(Line::from(vec![
                 Span::styled(
                     format!("Starting next iteration in {}s...", remaining),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default().fg(AMBER_WARNING).add_modifier(Modifier::BOLD),
                 ),
             ]));
             status_lines.push(Line::from(""));
@@ -1834,7 +1842,7 @@ fn run_delay(
             // PRD info
             if let Some(ref prd) = app.prd {
                 status_lines.push(Line::from(vec![
-                    Span::styled("Task: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Task: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                 ]));
                 for line in wrap_text(&prd.description, left_panel_area.width.saturating_sub(4) as usize) {
                     status_lines.push(Line::from(Span::raw(format!("  {}", line))));
@@ -1849,17 +1857,17 @@ fn run_delay(
                     0
                 };
                 status_lines.push(Line::from(vec![
-                    Span::styled("Progress: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled("Progress: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
                     Span::styled(
                         format!("{}/{} ({}%)", completed, total, progress_pct),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(CYAN_PRIMARY),
                     ),
                 ]));
             }
 
             let left_content = Paragraph::new(status_lines)
                 .block(left_block)
-                .style(Style::default().fg(Color::White));
+                .style(Style::default().fg(TEXT_PRIMARY));
 
             frame.render_widget(left_content, left_panel_area);
 
@@ -1867,7 +1875,8 @@ fn run_delay(
             let right_block = Block::default()
                 .title(" Claude Code ")
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray));
+                .border_style(Style::default().fg(BORDER_SUBTLE))
+                .style(Style::default().bg(BG_PRIMARY));
 
             let lines = if let Ok(pty_state) = app.pty_state.lock() {
                 let screen = pty_state.parser.screen();
@@ -1875,7 +1884,7 @@ fn run_delay(
             } else {
                 vec![Line::from(Span::styled(
                     "Error: Failed to access PTY state",
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(RED_ERROR),
                 ))]
             };
 
@@ -1884,7 +1893,7 @@ fn run_delay(
 
             // Bottom bar
             let keybindings = Paragraph::new(" q: Quit | Waiting for next iteration... ")
-                .style(Style::default().fg(Color::Black).bg(Color::Cyan));
+                .style(Style::default().fg(BG_PRIMARY).bg(BG_TERTIARY));
             frame.render_widget(keybindings, bottom_bar_area);
         })?;
 
