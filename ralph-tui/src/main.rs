@@ -409,6 +409,8 @@ struct App {
     // Animation state
     animation_tick: u64,
     last_animation_update: Instant,
+    // Session identification
+    session_id: String,
 }
 
 impl App {
@@ -416,6 +418,8 @@ impl App {
         let prd_path = config.task_dir.join("prd.json");
         let prd = Prd::load(&prd_path).ok();
         let now = Instant::now();
+        // Generate session ID from process ID (format: RL-XXXXX)
+        let session_id = format!("RL-{:05}", std::process::id() % 100000);
 
         Self {
             pty_state: Arc::new(Mutex::new(PtyState::new(rows, cols))),
@@ -437,6 +441,7 @@ impl App {
             skip_prompts: config.skip_prompts,
             animation_tick: 0,
             last_animation_update: now,
+            session_id,
         }
     }
 
@@ -2021,15 +2026,34 @@ fn run(
 
             frame.render_widget(right_content, right_panel_area);
 
-            // Bottom bar with keybinding hints (mode-specific)
+            // Bottom footer bar with session ID and keybinding hints
             let keybindings_text = match app.mode {
-                Mode::Ralph => " q/Ctrl+C: Quit | i/Tab: Claude Mode ",
-                Mode::Claude => " Esc: Ralph Mode | Ctrl+C: Quit ",
+                Mode::Ralph => "q/Ctrl+C: Quit | i/Tab: Claude Mode",
+                Mode::Claude => "Esc: Ralph Mode | Ctrl+C: Quit",
             };
-            let keybindings = Paragraph::new(keybindings_text)
-                .style(Style::default().fg(BG_PRIMARY).bg(BG_TERTIARY));
 
-            frame.render_widget(keybindings, bottom_bar_area);
+            // Create footer line with session ID on left and keybindings on right
+            let footer_line = Line::from(vec![
+                Span::styled(" Session ID ", Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
+                Span::styled(&app.session_id, Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
+                Span::styled(" ", Style::default().bg(BG_SECONDARY)),
+                // Fill remaining space with background color
+                Span::styled(
+                    " ".repeat(
+                        bottom_bar_area.width.saturating_sub(
+                            12 + app.session_id.len() as u16 + 1 + keybindings_text.len() as u16 + 2
+                        ) as usize
+                    ),
+                    Style::default().bg(BG_SECONDARY),
+                ),
+                Span::styled(keybindings_text, Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
+                Span::styled(" ", Style::default().bg(BG_SECONDARY)),
+            ]);
+
+            let footer = Paragraph::new(footer_line)
+                .style(Style::default().bg(BG_SECONDARY));
+
+            frame.render_widget(footer, bottom_bar_area);
         })?;
 
         // Check if child exited
@@ -2352,10 +2376,31 @@ fn run_delay(
             let right_content = Paragraph::new(lines).block(right_block);
             frame.render_widget(right_content, right_panel_area);
 
-            // Bottom bar
-            let keybindings = Paragraph::new(" q: Quit | Waiting for next iteration... ")
-                .style(Style::default().fg(BG_PRIMARY).bg(BG_TERTIARY));
-            frame.render_widget(keybindings, bottom_bar_area);
+            // Bottom footer bar with session ID and keybinding hints
+            let keybindings_text = "q: Quit | Waiting for next iteration...";
+
+            // Create footer line with session ID on left and keybindings on right
+            let footer_line = Line::from(vec![
+                Span::styled(" Session ID ", Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
+                Span::styled(&app.session_id, Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
+                Span::styled(" ", Style::default().bg(BG_SECONDARY)),
+                // Fill remaining space with background color
+                Span::styled(
+                    " ".repeat(
+                        bottom_bar_area.width.saturating_sub(
+                            12 + app.session_id.len() as u16 + 1 + keybindings_text.len() as u16 + 2
+                        ) as usize
+                    ),
+                    Style::default().bg(BG_SECONDARY),
+                ),
+                Span::styled(keybindings_text, Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
+                Span::styled(" ", Style::default().bg(BG_SECONDARY)),
+            ]);
+
+            let footer = Paragraph::new(footer_line)
+                .style(Style::default().bg(BG_SECONDARY));
+
+            frame.render_widget(footer, bottom_bar_area);
         })?;
 
         // Handle input - allow quit during delay
