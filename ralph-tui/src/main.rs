@@ -603,7 +603,6 @@ fn render_stat_cards(
 enum StoryState {
     Completed,
     Active,
-    #[allow(dead_code)]
     Pending,
 }
 
