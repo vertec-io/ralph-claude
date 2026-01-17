@@ -46,9 +46,49 @@ Update the playwright MCP entry to include `--executable-path`:
 }
 ```
 
-## Setup
+## Installation
 
-### Option 1: Copy to your project
+### Option 1: Install Ralph TUI (Recommended)
+
+Ralph TUI is a native terminal interface that provides a better experience than the bash scripts.
+
+**Using the installer (requires Rust):**
+
+```bash
+git clone https://github.com/apino/ralph-claude.git
+cd ralph-claude
+./install.sh
+```
+
+This installs:
+- `ralph-tui` binary to `~/.local/bin/`
+- `/prd` and `/ralph` skills to `~/.claude/skills/`
+- Default `prompt.md` to `~/.config/ralph/`
+
+**Using cargo (Rust users):**
+
+```bash
+cargo install --git https://github.com/apino/ralph-claude ralph-tui
+```
+
+Note: With cargo install, you'll need to manually copy skills and prompt.md:
+
+```bash
+git clone https://github.com/apino/ralph-claude.git
+cp -r ralph-claude/skills/prd ~/.claude/skills/
+cp -r ralph-claude/skills/ralph ~/.claude/skills/
+mkdir -p ~/.config/ralph
+cp ralph-claude/prompt.md ~/.config/ralph/
+```
+
+**Verify installation:**
+
+```bash
+ralph-tui --version
+ralph-tui --help
+```
+
+### Option 2: Use bash scripts (no Rust required)
 
 Copy the ralph files into your project:
 
@@ -60,15 +100,12 @@ cp /path/to/ralph-claude/prompt.md scripts/ralph/
 chmod +x scripts/ralph/ralph.sh
 ```
 
-### Option 2: Install skills globally
+### Installing skills globally
 
-Copy the skills to your Claude Code config for use across all projects:
+The `/prd` and `/ralph` Claude Code skills are installed automatically with `install.sh`. To install manually:
 
 ```bash
-# Create the skills directory if it doesn't exist
 mkdir -p ~/.claude/skills
-
-# Copy the skills
 cp -r skills/prd ~/.claude/skills/
 cp -r skills/ralph ~/.claude/skills/
 ```
@@ -124,6 +161,27 @@ Use the Ralph skill to convert the markdown PRD to JSON:
 This creates `tasks/{effort-name}/prd.json` with user stories structured for autonomous execution.
 
 ### 3. Run Ralph
+
+**Using Ralph TUI (recommended):**
+
+```bash
+# Interactive - select task from list
+ralph-tui
+
+# Run specific task
+ralph-tui tasks/device-system-refactor
+
+# With options
+ralph-tui tasks/fix-auth-timeout -i 20 --rotate-at 300
+```
+
+Ralph TUI provides:
+- Split-screen view: status panel + Claude Code output
+- Real-time progress tracking
+- Modal input (press `i` to interact with Claude)
+- Automatic iteration management
+
+**Using bash script:**
 
 ```bash
 ./scripts/ralph/ralph.sh [task-directory] [-i iterations] [-I|--interactive] [--rotate-at N]
@@ -386,10 +444,24 @@ ls -la tasks/
 
 ## Customizing prompt.md
 
-Edit `prompt.md` to customize Ralph's behavior for your project:
+Ralph uses `prompt.md` to instruct Claude on how to work. Edit it to customize behavior for your project:
 - Add project-specific quality check commands
 - Include codebase conventions
 - Add common gotchas for your stack
+
+**Prompt locations (Ralph TUI checks in order):**
+
+1. `./ralph/prompt.md` - Project-specific customization
+2. `~/.config/ralph/prompt.md` - Global user default
+3. Embedded fallback - Built into the binary
+
+To customize per-project, create `ralph/prompt.md` in your project root:
+
+```bash
+mkdir -p ralph
+cp ~/.config/ralph/prompt.md ralph/prompt.md
+# Edit ralph/prompt.md with project-specific instructions
+```
 
 ## References
 

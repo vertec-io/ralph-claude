@@ -247,32 +247,39 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
 
 /// Build the Ralph prompt from task directory and prompt.md
 /// Returns the full prompt string to be piped to Claude Code stdin
-fn build_ralph_prompt(task_dir: &PathBuf) -> io::Result<String> {
-    // Find the project root (where prompt.md lives)
-    // Walk up from task_dir until we find prompt.md or hit filesystem root
-    let mut prompt_path = task_dir.clone();
-    loop {
-        let candidate = prompt_path.join("prompt.md");
-        if candidate.exists() {
-            break;
-        }
-        if !prompt_path.pop() {
-            // Reached filesystem root without finding prompt.md
-            // Try relative to current directory
-            let cwd_prompt = PathBuf::from("prompt.md");
-            if cwd_prompt.exists() {
-                prompt_path = PathBuf::from(".");
-                break;
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                "Could not find prompt.md in task directory ancestors or current directory",
-            ));
+/// Embedded default prompt.md as fallback
+const EMBEDDED_PROMPT: &str = include_str!("../../prompt.md");
+
+/// Find prompt.md in order of priority:
+/// 1. ./ralph/prompt.md (local project customization)
+/// 2. ~/.config/ralph/prompt.md (global user config)
+/// 3. Embedded fallback (with warning)
+fn find_prompt_content() -> (String, Option<String>) {
+    // 1. Check local ./ralph/prompt.md
+    let local_path = PathBuf::from("ralph/prompt.md");
+    if local_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&local_path) {
+            return (content, Some(local_path.display().to_string()));
         }
     }
 
-    let prompt_file = prompt_path.join("prompt.md");
-    let prompt_content = std::fs::read_to_string(&prompt_file)?;
+    // 2. Check global ~/.config/ralph/prompt.md
+    if let Some(home) = std::env::var_os("HOME") {
+        let global_path = PathBuf::from(home).join(".config/ralph/prompt.md");
+        if global_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&global_path) {
+                return (content, Some(global_path.display().to_string()));
+            }
+        }
+    }
+
+    // 3. Fall back to embedded prompt
+    eprintln!("Warning: No prompt.md found in ./ralph/ or ~/.config/ralph/, using embedded default");
+    (EMBEDDED_PROMPT.to_string(), None)
+}
+
+fn build_ralph_prompt(task_dir: &PathBuf) -> io::Result<String> {
+    let (prompt_content, _source) = find_prompt_content();
 
     // Build the full prompt matching ralph.sh format
     let prompt = format!(
