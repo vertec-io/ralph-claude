@@ -226,8 +226,8 @@
         "cargo build --release succeeds"
       ],
       "priority": 14,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Activity struct stores action_type and target. parse_activities() scans output for tool patterns. PtyState.activities Vec stores last 10 activities. Display shows 5 most recent in status panel with bullet points."
     },
     {
       "id": "US-015",

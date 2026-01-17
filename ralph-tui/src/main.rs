@@ -174,6 +174,90 @@ impl TokenStats {
     }
 }
 
+/// Recent activity from Claude Code (tool calls, actions)
+#[derive(Debug, Clone)]
+struct Activity {
+    action_type: String,
+    target: String,
+}
+
+impl Activity {
+    fn new(action_type: &str, target: &str) -> Self {
+        Self {
+            action_type: action_type.to_string(),
+            target: target.to_string(),
+        }
+    }
+
+    /// Format for display (truncate target if too long)
+    fn format(&self, max_width: usize) -> String {
+        let prefix = format!("{}: ", self.action_type);
+        let available = max_width.saturating_sub(prefix.len());
+        let target = if self.target.len() > available {
+            format!("...{}", &self.target[self.target.len().saturating_sub(available.saturating_sub(3))..])
+        } else {
+            self.target.clone()
+        };
+        format!("{}{}", prefix, target)
+    }
+}
+
+/// Parse activities from Claude output
+/// Looks for tool call patterns in the output
+fn parse_activities(text: &str) -> Vec<Activity> {
+    let mut activities = Vec::new();
+
+    // Patterns to look for (case-insensitive matching in output)
+    // Claude Code typically shows tool usage in various formats
+    let patterns: &[(&str, &[&str])] = &[
+        ("Read", &["reading ", "read file", "read("]),
+        ("Edit", &["editing ", "edit file", "edit("]),
+        ("Write", &["writing ", "write file", "write("]),
+        ("Bash", &["running ", "$ ", "bash(", "executing "]),
+        ("Grep", &["searching ", "grep(", "grep for"]),
+        ("Glob", &["finding files", "glob(", "globbing"]),
+        ("TodoWrite", &["updating todos", "todowrite(", "adding todo"]),
+    ];
+
+    for line in text.lines() {
+        let line_lower = line.to_lowercase();
+
+        for (action_type, prefixes) in patterns {
+            for prefix in *prefixes {
+                if let Some(pos) = line_lower.find(prefix) {
+                    // Extract target (rest of line after pattern, cleaned up)
+                    let after = &line[pos + prefix.len()..];
+                    let target = after
+                        .trim()
+                        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
+                        .split(|c: char| c == '\n' || c == '\r')
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(100)  // Limit target length
+                        .collect::<String>();
+
+                    if !target.is_empty() {
+                        let activity = Activity::new(action_type, &target);
+                        // Avoid duplicates
+                        if !activities.iter().any(|a: &Activity|
+                            a.action_type == activity.action_type && a.target == activity.target
+                        ) {
+                            activities.push(activity);
+                        }
+                    }
+                    break;  // Only match first pattern per line
+                }
+            }
+        }
+    }
+
+    activities
+}
+
+/// Maximum number of activities to track
+const MAX_ACTIVITIES: usize = 10;
+
 /// Shared state for PTY with VT100 parser
 struct PtyState {
     parser: vt100::Parser,
@@ -182,6 +266,10 @@ struct PtyState {
     recent_output: String,
     /// Token stats for current iteration
     iteration_tokens: TokenStats,
+    /// Recent activities parsed from output
+    activities: Vec<Activity>,
+    /// Last parsed output position (to avoid re-parsing)
+    last_activity_parse_pos: usize,
 }
 
 impl PtyState {
@@ -191,6 +279,8 @@ impl PtyState {
             child_exited: false,
             recent_output: String::new(),
             iteration_tokens: TokenStats::default(),
+            activities: Vec::new(),
+            last_activity_parse_pos: 0,
         }
     }
 
@@ -222,6 +312,8 @@ impl PtyState {
     fn clear_recent_output(&mut self) {
         self.recent_output.clear();
         self.iteration_tokens = TokenStats::default();
+        self.activities.clear();
+        self.last_activity_parse_pos = 0;
     }
 
     /// Parse tokens from recent output and update iteration stats
@@ -237,6 +329,39 @@ impl PtyState {
     /// Get current iteration token stats
     fn get_iteration_tokens(&self) -> TokenStats {
         self.iteration_tokens.clone()
+    }
+
+    /// Parse activities from new output since last parse
+    fn update_activities(&mut self) {
+        if self.recent_output.len() <= self.last_activity_parse_pos {
+            return;
+        }
+
+        // Parse only the new portion of output
+        let new_output = &self.recent_output[self.last_activity_parse_pos..];
+        let new_activities = parse_activities(new_output);
+
+        // Add new activities, avoiding duplicates
+        for activity in new_activities {
+            if !self.activities.iter().any(|a|
+                a.action_type == activity.action_type && a.target == activity.target
+            ) {
+                self.activities.push(activity);
+            }
+        }
+
+        // Keep only the last MAX_ACTIVITIES
+        if self.activities.len() > MAX_ACTIVITIES {
+            let remove_count = self.activities.len() - MAX_ACTIVITIES;
+            self.activities.drain(0..remove_count);
+        }
+
+        self.last_activity_parse_pos = self.recent_output.len();
+    }
+
+    /// Get recent activities (newest first)
+    fn get_activities(&self) -> Vec<Activity> {
+        self.activities.iter().rev().cloned().collect()
     }
 }
 
@@ -305,7 +430,9 @@ impl App {
     /// Reload PRD from disk if flagged
     fn reload_prd_if_needed(&mut self) {
         let needs_reload = {
-            let mut flag = self.prd_needs_reload.lock().unwrap();
+            let Ok(mut flag) = self.prd_needs_reload.lock() else {
+                return;
+            };
             if *flag {
                 *flag = false;
                 true
@@ -1100,7 +1227,8 @@ fn main() -> io::Result<()> {
         // Run the UI loop for current iteration
         let run_result = run(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
 
-        // Clean up current iteration
+        // Clean up current iteration - kill the child process first to avoid blocking
+        let _ = child.kill();
         let _ = child.wait();
         drop(app.master_pty.take());
         drop(app.pty_writer.take());
@@ -1161,9 +1289,9 @@ fn main() -> io::Result<()> {
         }
     };
 
-    // Restore terminal
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    // Always restore terminal, regardless of any errors
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
 
     result
 }
@@ -1181,8 +1309,9 @@ fn setup_prd_watcher(
             if let Ok(event) = res {
                 // Check if the event is for our file
                 if event.paths.iter().any(|p| p == &prd_path_clone) {
-                    let mut flag = needs_reload.lock().unwrap();
-                    *flag = true;
+                    if let Ok(mut flag) = needs_reload.lock() {
+                        *flag = true;
+                    }
                 }
             }
         },
@@ -1304,12 +1433,13 @@ fn run(
             ]));
             status_lines.push(Line::from(""));
 
-            // Token usage - update from PTY output first
-            let iter_tokens = if let Some(ref mut guard) = pty_state_guard {
+            // Token usage and activities - update from PTY output first
+            let (iter_tokens, activities) = if let Some(ref mut guard) = pty_state_guard {
                 guard.update_tokens();
-                guard.get_iteration_tokens()
+                guard.update_activities();
+                (guard.get_iteration_tokens(), guard.get_activities())
             } else {
-                TokenStats::default()
+                (TokenStats::default(), Vec::new())
             };
             let session_tokens = &app.session_tokens;
 
@@ -1341,6 +1471,24 @@ fn run(
                         Span::styled(
                             session_tokens.format_cost(),
                             Style::default().fg(Color::Green),
+                        ),
+                    ]));
+                }
+                status_lines.push(Line::from(""));
+            }
+
+            // Recent activities section
+            if !activities.is_empty() {
+                status_lines.push(Line::from(vec![
+                    Span::styled("Recent Activity:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                ]));
+                let max_activity_width = left_panel_area.width.saturating_sub(6) as usize;
+                for activity in activities.iter().take(5) {
+                    status_lines.push(Line::from(vec![
+                        Span::styled("  • ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            activity.format(max_activity_width),
+                            Style::default().fg(Color::White),
                         ),
                     ]));
                 }
@@ -1490,8 +1638,9 @@ fn run(
             let state_result = app.pty_state.lock();
             let (child_exited, is_complete, iter_tokens) = match state_result {
                 Ok(mut state) => {
-                    // Update tokens one final time before checking exit
+                    // Update tokens and activities one final time before checking exit
                     state.update_tokens();
+                    state.update_activities();
                     let tokens = state.get_iteration_tokens();
                     (state.child_exited, state.has_completion_signal(), tokens)
                 }

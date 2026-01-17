@@ -26,7 +26,23 @@ Started: 2026-01-17
 - Elapsed time: session_start and iteration_start Instant fields; format_duration() for MM:SS format
 - Token tracking: TokenStats struct with parse_from_output(); patterns 'input tokens', 'output tokens'. session_tokens in App accumulates across iterations.
 - Cost calculation: TokenStats.calculate_cost() and format_cost() methods; pricing constants PRICE_PER_M_INPUT/OUTPUT at top of file.
+- Activity tracking: Activity struct with action_type/target. parse_activities() scans for patterns. PtyState.activities Vec with last_activity_parse_pos for incremental parsing.
 
+---
+
+## 2026-01-17 - US-014
+- Implemented: Recent activity log display in status panel
+- Files changed:
+  - ralph-tui/src/main.rs - Added Activity struct, parse_activities() function, activities field in PtyState, display in status panel
+  - tasks/ralph-tui/prd.json - marked US-014 as passes: true
+- **Learnings for future iterations:**
+  - Activity struct stores action_type (Read, Edit, Write, Bash, etc.) and target (file path or command)
+  - parse_activities() scans line-by-line for tool patterns like "reading ", "editing ", "running ", etc.
+  - Use slice type `&[(&str, &[&str])]` for pattern arrays with varying sizes
+  - PtyState.last_activity_parse_pos tracks parsed position to avoid re-parsing entire output
+  - MAX_ACTIVITIES constant (10) limits memory usage; display shows 5 most recent
+  - Activities shown with bullet points and truncated paths for narrow panels
+  - Activity.format() truncates long paths with "..." prefix to fit panel width
 ---
 
 ## 2026-01-17 - US-013
