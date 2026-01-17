@@ -1792,6 +1792,12 @@ fn run(
                 ]));
                 status_lines.push(Line::from(""));
 
+                // User Stories section header
+                status_lines.push(Line::from(vec![
+                    Span::styled("↳ USER STORIES / PHASES", Style::default().fg(TEXT_MUTED)),
+                ]));
+                status_lines.push(Line::from("")); // Spacing below header
+
                 // Current story
                 if let Some(story) = prd.current_story() {
                     status_lines.push(Line::from(vec![
