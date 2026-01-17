@@ -88,6 +88,21 @@ ralph-tui --version
 ralph-tui --help
 ```
 
+**Uninstall:**
+
+```bash
+./uninstall.sh
+```
+
+Or manually:
+
+```bash
+rm ~/.local/bin/ralph-tui
+rm -rf ~/.config/ralph
+# Optionally remove skills:
+rm -rf ~/.claude/skills/prd ~/.claude/skills/ralph
+```
+
 ### Option 2: Use bash scripts (no Rust required)
 
 Copy the ralph files into your project:
