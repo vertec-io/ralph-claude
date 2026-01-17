@@ -210,8 +210,8 @@
         "cargo build --release succeeds"
       ],
       "priority": 13,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Uses Claude 3.5 Sonnet pricing ($3/M input, $15/M output). TokenStats.calculate_cost() and format_cost() methods added. Cost displays in green next to token counts."
     },
     {
       "id": "US-014",

@@ -77,6 +77,11 @@ enum Mode {
     Claude, // Claude mode - focus on right panel, forward input to PTY
 }
 
+/// Claude pricing per million tokens (as of early 2025)
+/// Claude 3.5 Sonnet: $3.00 input, $15.00 output
+const PRICE_PER_M_INPUT: f64 = 3.00;
+const PRICE_PER_M_OUTPUT: f64 = 15.00;
+
 /// Token usage statistics
 #[derive(Debug, Clone, Default)]
 struct TokenStats {
@@ -149,6 +154,23 @@ impl TokenStats {
     fn add(&mut self, other: &TokenStats) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+    }
+
+    /// Calculate cost in USD based on Claude Sonnet pricing
+    fn calculate_cost(&self) -> f64 {
+        let input_cost = (self.input_tokens as f64 / 1_000_000.0) * PRICE_PER_M_INPUT;
+        let output_cost = (self.output_tokens as f64 / 1_000_000.0) * PRICE_PER_M_OUTPUT;
+        input_cost + output_cost
+    }
+
+    /// Format cost as currency string (e.g., "$0.42" or "$1.23")
+    fn format_cost(&self) -> String {
+        let cost = self.calculate_cost();
+        if cost < 0.01 {
+            format!("${:.3}", cost)
+        } else {
+            format!("${:.2}", cost)
+        }
     }
 }
 
@@ -1302,13 +1324,23 @@ fn run(
                         ),
                         Style::default().fg(Color::White),
                     ),
+                    Span::raw("  "),
+                    Span::styled(
+                        iter_tokens.format_cost(),
+                        Style::default().fg(Color::Green),
+                    ),
                 ]));
                 if session_tokens.total() > 0 {
                     status_lines.push(Line::from(vec![
                         Span::styled("Session: ", Style::default().fg(Color::Cyan)),
                         Span::styled(
-                            format!("{}", session_tokens.total()),
+                            format!("{} tokens", session_tokens.total()),
                             Style::default().fg(Color::Yellow),
+                        ),
+                        Span::raw("  "),
+                        Span::styled(
+                            session_tokens.format_cost(),
+                            Style::default().fg(Color::Green),
                         ),
                     ]));
                 }

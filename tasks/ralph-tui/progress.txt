@@ -25,7 +25,21 @@ Started: 2026-01-17
 - CLI config: CliConfig struct holds task_dir, max_iterations, rotate_threshold, skip_prompts
 - Elapsed time: session_start and iteration_start Instant fields; format_duration() for MM:SS format
 - Token tracking: TokenStats struct with parse_from_output(); patterns 'input tokens', 'output tokens'. session_tokens in App accumulates across iterations.
+- Cost calculation: TokenStats.calculate_cost() and format_cost() methods; pricing constants PRICE_PER_M_INPUT/OUTPUT at top of file.
 
+---
+
+## 2026-01-17 - US-013
+- Implemented: Cost estimates based on token usage
+- Files changed:
+  - ralph-tui/src/main.rs - Added PRICE_PER_M_INPUT/OUTPUT constants, calculate_cost() and format_cost() methods to TokenStats, updated status display to show costs
+  - tasks/ralph-tui/prd.json - marked US-013 as passes: true
+- **Learnings for future iterations:**
+  - Pricing constants at module level: PRICE_PER_M_INPUT ($3.00) and PRICE_PER_M_OUTPUT ($15.00) for Claude 3.5 Sonnet
+  - calculate_cost() returns f64 in USD: (input_tokens / 1M * input_price) + (output_tokens / 1M * output_price)
+  - format_cost() returns currency string: "$0.42" for >= $0.01, "$0.003" for smaller amounts
+  - Cost displays in green (Color::Green) next to token counts in status panel
+  - Updates in real-time as token counts update during iteration
 ---
 
 ## 2026-01-17 - US-012
