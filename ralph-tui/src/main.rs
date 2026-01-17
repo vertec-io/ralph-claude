@@ -2009,6 +2009,49 @@ fn run(
                 .border_style(right_border_style)
                 .style(Style::default().bg(BG_PRIMARY));
 
+            // Render the outer block first to get the inner area
+            let right_inner = right_block.inner(right_panel_area);
+            frame.render_widget(right_block, right_panel_area);
+
+            // Split inner area: window chrome header (1 line), terminal content (rest)
+            let right_inner_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Window chrome header
+                    Constraint::Min(0),    // Terminal content
+                ])
+                .split(right_inner);
+
+            let window_chrome_area = right_inner_layout[0];
+            let terminal_content_area = right_inner_layout[1];
+
+            // Window chrome header with traffic light dots and terminal title
+            let terminal_title = ">_ claude-code - ralph-loop";
+            let traffic_lights_width = 6; // "● ● ●" plus spacing
+            let title_width = terminal_title.len() as u16;
+            let available_width = window_chrome_area.width;
+
+            // Calculate padding for centering the title
+            let left_padding = if available_width > traffic_lights_width + title_width {
+                (available_width - title_width) / 2 - traffic_lights_width
+            } else {
+                1
+            };
+            let right_padding = available_width.saturating_sub(traffic_lights_width + left_padding as u16 + title_width);
+
+            let window_chrome_line = Line::from(vec![
+                Span::styled("● ", Style::default().fg(RED_ERROR).bg(BG_TERTIARY)),
+                Span::styled("● ", Style::default().fg(AMBER_WARNING).bg(BG_TERTIARY)),
+                Span::styled("●", Style::default().fg(GREEN_SUCCESS).bg(BG_TERTIARY)),
+                Span::styled(" ".repeat(left_padding as usize), Style::default().bg(BG_TERTIARY)),
+                Span::styled(terminal_title, Style::default().fg(TEXT_SECONDARY).bg(BG_TERTIARY)),
+                Span::styled(" ".repeat(right_padding as usize), Style::default().bg(BG_TERTIARY)),
+            ]);
+
+            let window_chrome = Paragraph::new(window_chrome_line)
+                .style(Style::default().bg(BG_TERTIARY));
+            frame.render_widget(window_chrome, window_chrome_area);
+
             // Render VT100 screen content with proper ANSI colors
             // The screen already shows the most recent content (auto-scroll behavior
             // is handled by the terminal emulator when new content is written)
@@ -2022,9 +2065,8 @@ fn run(
                 ))]
             };
 
-            let right_content = Paragraph::new(lines).block(right_block);
-
-            frame.render_widget(right_content, right_panel_area);
+            let right_content = Paragraph::new(lines);
+            frame.render_widget(right_content, terminal_content_area);
 
             // Bottom footer bar with session ID and keybinding hints
             let keybindings_text = match app.mode {
@@ -2363,6 +2405,50 @@ fn run_delay(
                 .border_style(Style::default().fg(BORDER_SUBTLE))
                 .style(Style::default().bg(BG_PRIMARY));
 
+            // Render the outer block first to get the inner area
+            let right_inner = right_block.inner(right_panel_area);
+            frame.render_widget(right_block, right_panel_area);
+
+            // Split inner area: window chrome header (1 line), terminal content (rest)
+            let right_inner_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1), // Window chrome header
+                    Constraint::Min(0),    // Terminal content
+                ])
+                .split(right_inner);
+
+            let window_chrome_area = right_inner_layout[0];
+            let terminal_content_area = right_inner_layout[1];
+
+            // Window chrome header with traffic light dots and terminal title
+            let terminal_title = ">_ claude-code - ralph-loop";
+            let traffic_lights_width = 6; // "● ● ●" plus spacing
+            let title_width = terminal_title.len() as u16;
+            let available_width = window_chrome_area.width;
+
+            // Calculate padding for centering the title
+            let left_padding = if available_width > traffic_lights_width + title_width {
+                (available_width - title_width) / 2 - traffic_lights_width
+            } else {
+                1
+            };
+            let right_padding = available_width.saturating_sub(traffic_lights_width + left_padding as u16 + title_width);
+
+            let window_chrome_line = Line::from(vec![
+                Span::styled("● ", Style::default().fg(RED_ERROR).bg(BG_TERTIARY)),
+                Span::styled("● ", Style::default().fg(AMBER_WARNING).bg(BG_TERTIARY)),
+                Span::styled("●", Style::default().fg(GREEN_SUCCESS).bg(BG_TERTIARY)),
+                Span::styled(" ".repeat(left_padding as usize), Style::default().bg(BG_TERTIARY)),
+                Span::styled(terminal_title, Style::default().fg(TEXT_SECONDARY).bg(BG_TERTIARY)),
+                Span::styled(" ".repeat(right_padding as usize), Style::default().bg(BG_TERTIARY)),
+            ]);
+
+            let window_chrome = Paragraph::new(window_chrome_line)
+                .style(Style::default().bg(BG_TERTIARY));
+            frame.render_widget(window_chrome, window_chrome_area);
+
+            // Render VT100 screen content
             let lines = if let Ok(pty_state) = app.pty_state.lock() {
                 let screen = pty_state.parser.screen();
                 render_vt100_screen(screen)
@@ -2373,8 +2459,8 @@ fn run_delay(
                 ))]
             };
 
-            let right_content = Paragraph::new(lines).block(right_block);
-            frame.render_widget(right_content, right_panel_area);
+            let right_content = Paragraph::new(lines);
+            frame.render_widget(right_content, terminal_content_area);
 
             // Bottom footer bar with session ID and keybinding hints
             let keybindings_text = "q: Quit | Waiting for next iteration...";
