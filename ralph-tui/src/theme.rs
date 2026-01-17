@@ -96,3 +96,17 @@ pub const SECTION_GAP: u16 = 1;
 
 /// Gap between card widgets (in cells)
 pub const CARD_GAP: u16 = 1;
+
+// ============================================================================
+// Animation Helpers
+// ============================================================================
+
+/// Spinner animation frames using Braille characters
+pub const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Returns the current spinner frame based on the animation tick.
+///
+/// The spinner cycles through 10 frames, creating a smooth loading animation.
+pub fn get_spinner_frame(tick: u64) -> char {
+    SPINNER_FRAMES[(tick % 10) as usize]
+}
