@@ -1,8 +1,9 @@
 mod theme;
 
 use theme::{
-    BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER_SUBTLE, CYAN_PRIMARY, GREEN_ACTIVE, GREEN_SUCCESS,
-    AMBER_WARNING, RED_ERROR, ROUNDED_BORDERS, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
+    get_pulse_color, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER_SUBTLE, CYAN_DIM, CYAN_PRIMARY,
+    GREEN_ACTIVE, GREEN_SUCCESS, AMBER_WARNING, RED_ERROR, ROUNDED_BORDERS, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY,
 };
 
 use std::io::{self, stdout, Read, Write};
@@ -20,7 +21,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Gauge, Paragraph},
 };
 use serde::Deserialize;
 
@@ -601,27 +602,32 @@ fn render_stat_cards(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StoryState {
     Completed,
-    #[allow(dead_code)]
     Active,
     #[allow(dead_code)]
     Pending,
 }
 
 /// Render a single user story card
-/// Returns the height of the card (typically 3 lines: border + content + border)
+/// Returns the height of the card:
+/// - Completed/Pending: 3 lines (border + content + border)
+/// - Active: 5 lines (border + title + progress bar + percentage + border)
 fn render_story_card(
     area: Rect,
     story_id: &str,
     story_title: &str,
     state: StoryState,
-    _tick: u64,
+    tick: u64,
+    progress_percent: u16,
     frame: &mut Frame,
 ) {
-    // Only handle completed state for now (US-013)
-    // Active (US-014) and Pending (US-015) will be added in later stories
+    // Determine colors based on state
+    // For active state, use pulsing indicator color
     let (indicator, indicator_color, text_color, bg_color) = match state {
         StoryState::Completed => ("●", GREEN_SUCCESS, CYAN_PRIMARY, BG_SECONDARY),
-        StoryState::Active => ("●", GREEN_ACTIVE, CYAN_PRIMARY, BG_TERTIARY),
+        StoryState::Active => {
+            let pulse_color = get_pulse_color(tick, GREEN_ACTIVE, CYAN_DIM);
+            ("●", pulse_color, CYAN_PRIMARY, BG_TERTIARY)
+        }
         StoryState::Pending => ("○", TEXT_MUTED, TEXT_SECONDARY, BG_SECONDARY),
     };
 
@@ -648,16 +654,53 @@ fn render_story_card(
         story_title.to_string()
     };
 
-    let card_content = Line::from(vec![
+    let title_line = Line::from(vec![
         Span::styled(format!("{} ", indicator), Style::default().fg(indicator_color)),
         Span::styled(format!("{} ", formatted_id), Style::default().fg(text_color).add_modifier(Modifier::BOLD)),
         Span::styled(truncated_title, Style::default().fg(text_color)),
     ]);
 
-    let paragraph = Paragraph::new(vec![card_content])
-        .block(card_block);
+    // For active state, show progress bar and percentage
+    if state == StoryState::Active {
+        // Render block first to get inner area
+        let inner_area = card_block.inner(area);
+        frame.render_widget(card_block, area);
 
-    frame.render_widget(paragraph, area);
+        // Split inner area: title (1 line), progress bar (1 line), percentage (1 line)
+        let inner_layout = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title line
+                Constraint::Length(1), // Progress bar
+                Constraint::Length(1), // Percentage
+            ])
+            .split(inner_area);
+
+        // Render title
+        let title_paragraph = Paragraph::new(vec![title_line]);
+        frame.render_widget(title_paragraph, inner_layout[0]);
+
+        // Render progress bar (Gauge widget)
+        let gauge = Gauge::default()
+            .gauge_style(Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY))
+            .percent(progress_percent)
+            .label(""); // No label on the gauge itself
+        frame.render_widget(gauge, inner_layout[1]);
+
+        // Render percentage text below the progress bar
+        let percent_text = format!("{}%", progress_percent);
+        let percent_line = Line::from(Span::styled(
+            percent_text,
+            Style::default().fg(TEXT_MUTED),
+        ));
+        let percent_paragraph = Paragraph::new(vec![percent_line]);
+        frame.render_widget(percent_paragraph, inner_layout[2]);
+    } else {
+        // Completed and Pending states - simple single line card
+        let paragraph = Paragraph::new(vec![title_line])
+            .block(card_block);
+        frame.render_widget(paragraph, area);
+    }
 }
 
 /// Render token usage and cost stat cards in a given area
@@ -1888,46 +1931,53 @@ fn run(
 
             // Render story cards if we have a PRD
             if let Some(ref prd) = app.prd {
-                // Calculate how many stories we can show (3 lines per card: border + content + border)
-                let card_height = 3u16;
-                let max_visible_stories = (stories_area.height / card_height) as usize;
+                // Calculate progress percent for active story based on iterations
+                let progress_percent = if app.max_iterations > 0 {
+                    ((app.current_iteration as f32 / app.max_iterations as f32) * 100.0) as u16
+                } else {
+                    0
+                };
 
                 // Get stories sorted by priority
                 let mut stories: Vec<_> = prd.user_stories.iter().collect();
                 stories.sort_by_key(|s| s.priority);
 
-                // Find current story index for display window
-                let current_idx = stories.iter().position(|s| !s.passes).unwrap_or(stories.len());
+                // Find current story for state comparison
+                let current_story = prd.current_story();
 
-                // Show stories around the current one
-                let start_idx = if current_idx > max_visible_stories / 2 {
-                    current_idx.saturating_sub(max_visible_stories / 2)
-                } else {
-                    0
-                };
-                let end_idx = (start_idx + max_visible_stories).min(stories.len());
+                // Card heights: active = 5 lines, others = 3 lines
+                let active_card_height = 5u16;
+                let normal_card_height = 3u16;
 
-                // Render visible story cards
-                for (i, story) in stories[start_idx..end_idx].iter().enumerate() {
-                    let card_y = i as u16 * card_height;
-                    if card_y + card_height > stories_area.height {
+                // Calculate total height needed and visible stories
+                let mut y_offset = 0u16;
+
+                for story in stories.iter() {
+                    // Determine story state
+                    let state = if story.passes {
+                        StoryState::Completed
+                    } else if Some(*story) == current_story {
+                        StoryState::Active
+                    } else {
+                        StoryState::Pending
+                    };
+
+                    let card_height = if state == StoryState::Active {
+                        active_card_height
+                    } else {
+                        normal_card_height
+                    };
+
+                    // Check if card fits in available space
+                    if y_offset + card_height > stories_area.height {
                         break;
                     }
 
                     let card_area = Rect {
                         x: stories_area.x,
-                        y: stories_area.y + card_y,
+                        y: stories_area.y + y_offset,
                         width: stories_area.width,
                         height: card_height,
-                    };
-
-                    // Determine story state
-                    let state = if story.passes {
-                        StoryState::Completed
-                    } else if Some(*story) == prd.current_story() {
-                        StoryState::Active
-                    } else {
-                        StoryState::Pending
                     };
 
                     render_story_card(
@@ -1936,8 +1986,11 @@ fn run(
                         &story.title,
                         state,
                         app.animation_tick,
+                        progress_percent,
                         frame,
                     );
+
+                    y_offset += card_height;
                 }
             }
 
