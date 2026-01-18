@@ -1,7 +1,7 @@
 ---
 name: ralph
 description: "Convert PRDs to prd.json format for the Ralph autonomous agent system. Use when you have an existing PRD and need to convert it to Ralph's JSON format. Triggers on: convert this prd, turn this into ralph format, create prd.json from this, ralph json, start ralph."
-version: "1.0"
+version: "2.0"
 ---
 
 # Ralph PRD Converter
@@ -40,8 +40,11 @@ tasks/
 
 ## Output Format
 
+Generated files use **schemaVersion 2.0** with per-criteria tracking.
+
 ```json
 {
+  "schemaVersion": "2.0",
   "project": "[Project Name]",
   "taskDir": "tasks/[effort-name]",
   "branchName": "ralph/[effort-name]",
@@ -53,9 +56,9 @@ tasks/
       "title": "[Story title]",
       "description": "As a [user], I want [feature] so that [benefit]",
       "acceptanceCriteria": [
-        "Criterion 1",
-        "Criterion 2",
-        "Typecheck passes"
+        { "description": "Criterion 1", "passes": false },
+        { "description": "Criterion 2", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 1,
       "passes": false,
@@ -66,8 +69,10 @@ tasks/
 ```
 
 **Fields:**
+- `schemaVersion`: Always "2.0" for new prd.json files
 - `taskDir`: Path to the task subdirectory (used by ralph.sh)
 - `type`: Either "feature" or "bug-investigation"
+- `acceptanceCriteria`: Array of objects with `description` (string) and `passes` (bool, initially false)
 - `notes`: Scratchpad for passing context between iterations (especially useful for bug investigations)
 
 ---
@@ -158,14 +163,16 @@ Frontend stories are NOT complete until visually verified. Ralph will use browse
 
 ## Conversion Rules
 
-1. **Each user story becomes one JSON entry**
-2. **IDs**: Sequential (US-001, US-002, etc.)
-3. **Priority**: Based on dependency order, then document order
-4. **All stories**: `passes: false` and empty `notes`
-5. **branchName**: Derive from effort name, kebab-case, prefixed with `ralph/`
-6. **taskDir**: Set to the task subdirectory path
-7. **type**: Set based on PRD type (feature or bug-investigation)
-8. **Always add**: "Typecheck passes" to every story's acceptance criteria
+1. **schemaVersion**: Always set to "2.0"
+2. **Each user story becomes one JSON entry**
+3. **IDs**: Sequential (US-001, US-002, etc.)
+4. **Priority**: Based on dependency order, then document order
+5. **All stories**: `passes: false` and empty `notes`
+6. **acceptanceCriteria**: Array of `{ "description": "...", "passes": false }` objects
+7. **branchName**: Derive from effort name, kebab-case, prefixed with `ralph/`
+8. **taskDir**: Set to the task subdirectory path
+9. **type**: Set based on PRD type (feature or bug-investigation)
+10. **Always add**: `{ "description": "Typecheck passes", "passes": false }` to every story's acceptance criteria
 
 ---
 
@@ -206,6 +213,7 @@ Add ability to mark tasks with different statuses.
 **Output:** `tasks/task-status/prd.json`
 ```json
 {
+  "schemaVersion": "2.0",
   "project": "TaskApp",
   "taskDir": "tasks/task-status",
   "branchName": "ralph/task-status",
@@ -217,9 +225,9 @@ Add ability to mark tasks with different statuses.
       "title": "Add status field to tasks table",
       "description": "As a developer, I need to store task status in the database.",
       "acceptanceCriteria": [
-        "Add status column: 'pending' | 'in_progress' | 'done' (default 'pending')",
-        "Generate and run migration successfully",
-        "Typecheck passes"
+        { "description": "Add status column: 'pending' | 'in_progress' | 'done' (default 'pending')", "passes": false },
+        { "description": "Generate and run migration successfully", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 1,
       "passes": false,
@@ -230,10 +238,10 @@ Add ability to mark tasks with different statuses.
       "title": "Display status badge on task cards",
       "description": "As a user, I want to see task status at a glance.",
       "acceptanceCriteria": [
-        "Each task card shows colored status badge",
-        "Badge colors: gray=pending, blue=in_progress, green=done",
-        "Typecheck passes",
-        "Verify in browser"
+        { "description": "Each task card shows colored status badge", "passes": false },
+        { "description": "Badge colors: gray=pending, blue=in_progress, green=done", "passes": false },
+        { "description": "Typecheck passes", "passes": false },
+        { "description": "Verify in browser", "passes": false }
       ],
       "priority": 2,
       "passes": false,
@@ -244,11 +252,11 @@ Add ability to mark tasks with different statuses.
       "title": "Add status toggle to task list rows",
       "description": "As a user, I want to change task status directly from the list.",
       "acceptanceCriteria": [
-        "Each row has status dropdown or toggle",
-        "Changing status saves immediately",
-        "UI updates without page refresh",
-        "Typecheck passes",
-        "Verify in browser"
+        { "description": "Each row has status dropdown or toggle", "passes": false },
+        { "description": "Changing status saves immediately", "passes": false },
+        { "description": "UI updates without page refresh", "passes": false },
+        { "description": "Typecheck passes", "passes": false },
+        { "description": "Verify in browser", "passes": false }
       ],
       "priority": 3,
       "passes": false,
@@ -259,10 +267,10 @@ Add ability to mark tasks with different statuses.
       "title": "Filter tasks by status",
       "description": "As a user, I want to filter the list to see only certain statuses.",
       "acceptanceCriteria": [
-        "Filter dropdown: All | Pending | In Progress | Done",
-        "Filter persists in URL params",
-        "Typecheck passes",
-        "Verify in browser"
+        { "description": "Filter dropdown: All | Pending | In Progress | Done", "passes": false },
+        { "description": "Filter persists in URL params", "passes": false },
+        { "description": "Typecheck passes", "passes": false },
+        { "description": "Verify in browser", "passes": false }
       ],
       "priority": 4,
       "passes": false,
@@ -279,6 +287,7 @@ Add ability to mark tasks with different statuses.
 **Output:** `tasks/fix-auth-timeout/prd.json`
 ```json
 {
+  "schemaVersion": "2.0",
   "project": "TaskApp",
   "taskDir": "tasks/fix-auth-timeout",
   "branchName": "ralph/fix-auth-timeout",
@@ -290,10 +299,10 @@ Add ability to mark tasks with different statuses.
       "title": "Reproduce the auth timeout issue",
       "description": "As a developer, I need to reliably reproduce the bug.",
       "acceptanceCriteria": [
-        "Document exact steps to reproduce",
-        "Identify minimum conditions to trigger timeout",
-        "Create automated test if possible",
-        "Typecheck passes"
+        { "description": "Document exact steps to reproduce", "passes": false },
+        { "description": "Identify minimum conditions to trigger timeout", "passes": false },
+        { "description": "Create automated test if possible", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 1,
       "passes": false,
@@ -304,10 +313,10 @@ Add ability to mark tasks with different statuses.
       "title": "Add logging to auth flow",
       "description": "As a developer, I need visibility into the auth state.",
       "acceptanceCriteria": [
-        "Add logging to session refresh logic",
-        "Log token expiration times",
-        "Capture state when timeout occurs",
-        "Typecheck passes"
+        { "description": "Add logging to session refresh logic", "passes": false },
+        { "description": "Log token expiration times", "passes": false },
+        { "description": "Capture state when timeout occurs", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 2,
       "passes": false,
@@ -318,9 +327,9 @@ Add ability to mark tasks with different statuses.
       "title": "Identify root cause",
       "description": "As a developer, I need to understand why timeouts occur.",
       "acceptanceCriteria": [
-        "Document root cause in notes field",
-        "Identify specific code causing the issue",
-        "Typecheck passes"
+        { "description": "Document root cause in notes field", "passes": false },
+        { "description": "Identify specific code causing the issue", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 3,
       "passes": false,
@@ -331,10 +340,10 @@ Add ability to mark tasks with different statuses.
       "title": "Implement auth timeout fix",
       "description": "As a developer, I need to fix the timeout issue.",
       "acceptanceCriteria": [
-        "Implement fix based on root cause",
-        "Ensure fix handles edge cases",
-        "Typecheck passes",
-        "Tests pass"
+        { "description": "Implement fix based on root cause", "passes": false },
+        { "description": "Ensure fix handles edge cases", "passes": false },
+        { "description": "Typecheck passes", "passes": false },
+        { "description": "Tests pass", "passes": false }
       ],
       "priority": 4,
       "passes": false,
@@ -345,10 +354,10 @@ Add ability to mark tasks with different statuses.
       "title": "Validate auth fix",
       "description": "As a developer, I need to confirm the fix works.",
       "acceptanceCriteria": [
-        "Original reproduction steps no longer cause timeout",
-        "Session persists correctly for extended periods",
-        "Remove debug logging",
-        "Typecheck passes"
+        { "description": "Original reproduction steps no longer cause timeout", "passes": false },
+        { "description": "Session persists correctly for extended periods", "passes": false },
+        { "description": "Remove debug logging", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 5,
       "passes": false,
@@ -397,9 +406,11 @@ Or use the project's archive conventions. The archived folder keeps completed wo
 
 Before writing prd.json, verify:
 
+- [ ] `schemaVersion` is set to "2.0"
 - [ ] prd.json is saved in the same directory as prd.md
 - [ ] `taskDir` field matches the directory path
 - [ ] `type` field is set correctly (feature or bug-investigation)
+- [ ] `acceptanceCriteria` uses object format: `{ "description": "...", "passes": false }`
 - [ ] Each story is completable in one iteration (small enough)
 - [ ] Stories are ordered by dependency (schema → backend → UI)
 - [ ] Every story has "Typecheck passes" as criterion
