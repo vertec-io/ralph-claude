@@ -41,10 +41,19 @@ struct UserStory {
     notes: String,
 }
 
+/// Default schema version for backwards compatibility
+fn default_schema_version() -> String {
+    "1.0".to_string()
+}
+
 /// PRD document structure
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Prd {
+    /// Schema version for format compatibility (default: "1.0")
+    #[allow(dead_code)]
+    #[serde(default = "default_schema_version")]
+    schema_version: String,
     #[allow(dead_code)]
     project: String,
     #[allow(dead_code)]
