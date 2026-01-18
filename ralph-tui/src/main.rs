@@ -2302,7 +2302,7 @@ fn run(
 
             // Bottom footer bar with session ID, mode indicator, and keybinding hints
             let (mode_text, keybindings_text) = match app.mode {
-                Mode::Ralph => ("Ralph Mode", "q/Ctrl+C: Quit | i/Tab: Claude Mode"),
+                Mode::Ralph => ("Ralph Mode", "j/k: Navigate | s/p/r: Details | i: Claude | q: Quit"),
                 Mode::Claude => ("Claude Mode", "Esc: Ralph Mode | Ctrl+C: Quit"),
             };
 
