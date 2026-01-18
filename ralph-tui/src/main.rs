@@ -2168,8 +2168,66 @@ fn run(
                     }
                 }
                 RalphViewMode::Progress => {
-                    // Will be implemented in US-028
-                    vec![Line::from(Span::styled("  [Progress view]", Style::default().fg(TEXT_MUTED)))]
+                    // Show progress.txt entries for selected story
+                    if let Some(ref prd) = app.prd {
+                        let mut stories: Vec<_> = prd.user_stories.iter().collect();
+                        stories.sort_by_key(|s| s.priority);
+                        if let Some(story) = stories.get(app.selected_story_index) {
+                            let progress_path = app.task_dir.join("progress.txt");
+                            if let Ok(content) = std::fs::read_to_string(&progress_path) {
+                                // Find entries containing the story ID
+                                let story_id = &story.id;
+                                let mut matching_lines: Vec<Line> = vec![
+                                    Line::from(vec![
+                                        Span::styled("  Progress for ", Style::default().fg(TEXT_MUTED)),
+                                        Span::styled(story_id.clone(), Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                                    ]),
+                                ];
+
+                                // Find section that mentions this story ID
+                                let mut in_matching_section = false;
+                                let mut found_any = false;
+                                for line in content.lines() {
+                                    if line.contains(story_id) && line.starts_with("##") {
+                                        in_matching_section = true;
+                                        found_any = true;
+                                        continue; // Skip the header line itself
+                                    } else if line.starts_with("##") || line.starts_with("---") {
+                                        in_matching_section = false;
+                                    }
+
+                                    if in_matching_section && !line.is_empty() {
+                                        let truncated = if line.len() > 60 {
+                                            format!("{}...", &line[..57])
+                                        } else {
+                                            line.to_string()
+                                        };
+                                        matching_lines.push(Line::from(Span::styled(
+                                            format!("  {}", truncated),
+                                            Style::default().fg(TEXT_SECONDARY),
+                                        )));
+                                        if matching_lines.len() >= 6 {
+                                            break; // Limit lines shown
+                                        }
+                                    }
+                                }
+
+                                if !found_any {
+                                    matching_lines.push(Line::from(Span::styled(
+                                        "  No progress entries found",
+                                        Style::default().fg(TEXT_MUTED),
+                                    )));
+                                }
+                                matching_lines
+                            } else {
+                                vec![Line::from(Span::styled("  progress.txt not found", Style::default().fg(TEXT_MUTED)))]
+                            }
+                        } else {
+                            vec![Line::from(Span::styled("  No story selected", Style::default().fg(TEXT_MUTED)))]
+                        }
+                    } else {
+                        vec![Line::from(Span::styled("  No PRD loaded", Style::default().fg(TEXT_MUTED)))]
+                    }
                 }
                 RalphViewMode::Requirements => {
                     // Will be implemented in US-029
@@ -2291,6 +2349,22 @@ fn run(
                                     RalphViewMode::Normal
                                 } else {
                                     RalphViewMode::StoryDetails
+                                };
+                            }
+                            // p: Toggle progress view
+                            KeyCode::Char('p') => {
+                                app.ralph_view_mode = if app.ralph_view_mode == RalphViewMode::Progress {
+                                    RalphViewMode::Normal
+                                } else {
+                                    RalphViewMode::Progress
+                                };
+                            }
+                            // r: Toggle requirements view
+                            KeyCode::Char('r') => {
+                                app.ralph_view_mode = if app.ralph_view_mode == RalphViewMode::Requirements {
+                                    RalphViewMode::Normal
+                                } else {
+                                    RalphViewMode::Requirements
                                 };
                             }
                             _ => {}
