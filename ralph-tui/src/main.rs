@@ -337,6 +337,8 @@ struct App {
     ralph_expanded: bool,
     // Idle timeout in seconds (for auto-restart)
     idle_timeout: u64,
+    // When idle countdown started (None = not in countdown, Some = counting down)
+    idle_countdown_start: Option<Instant>,
     // Idle exit state: when the exit sequence was started (None = not started)
     idle_exit_started: Option<Instant>,
     // Whether Ctrl+D has been sent during idle exit sequence
@@ -378,6 +380,7 @@ impl App {
             ralph_view_mode: RalphViewMode::Normal,
             ralph_expanded: false,
             idle_timeout: config.idle_timeout,
+            idle_countdown_start: None,
             idle_exit_started: None,
             idle_ctrl_d_sent: false,
         }
@@ -1757,6 +1760,29 @@ fn run(
                     Style::default().fg(TEXT_MUTED),
                 ),
             ]));
+
+            // Show idle countdown warning if counting down
+            if let Some(countdown_start) = app.idle_countdown_start {
+                let elapsed = countdown_start.elapsed().as_secs();
+                if elapsed < app.idle_timeout {
+                    let remaining = app.idle_timeout - elapsed;
+                    status_lines.push(Line::from(""));
+                    status_lines.push(Line::from(vec![
+                        Span::styled("⚠ ", Style::default().fg(AMBER_WARNING)),
+                        Span::styled(
+                            format!("Claude idle - restarting in {}s...", remaining),
+                            Style::default().fg(AMBER_WARNING).add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                    status_lines.push(Line::from(vec![
+                        Span::styled(
+                            "  Press any key to cancel",
+                            Style::default().fg(TEXT_MUTED),
+                        ),
+                    ]));
+                }
+            }
+
             status_lines.push(Line::from("")); // Gap after active phase
 
             // Elapsed time (iteration-specific)
@@ -2408,7 +2434,7 @@ fn run(
             }
         }
 
-        // Check for idle state and perform graceful exit sequence
+        // Check for idle state and perform graceful exit sequence with countdown
         {
             let is_idle = if let Ok(state) = app.pty_state.lock() {
                 state.is_idle(app.idle_timeout)
@@ -2417,29 +2443,43 @@ fn run(
             };
 
             if is_idle {
-                if app.idle_exit_started.is_none() {
-                    // Step 1: Send /exit command to gracefully exit Claude
-                    app.write_to_pty(b"/exit\n");
-                    app.idle_exit_started = Some(Instant::now());
-                    app.idle_ctrl_d_sent = false;
-                } else if let Some(exit_start) = app.idle_exit_started {
-                    let elapsed = exit_start.elapsed();
+                // Start countdown if not already started
+                if app.idle_countdown_start.is_none() {
+                    app.idle_countdown_start = Some(Instant::now());
+                }
 
-                    if !app.idle_ctrl_d_sent && elapsed >= Duration::from_secs(2) {
-                        // Step 2: After 2 seconds, send Ctrl+D (EOF)
-                        app.write_to_pty(&[0x04]); // Ctrl+D = EOT (End of Transmission)
-                        app.idle_ctrl_d_sent = true;
-                    } else if elapsed >= Duration::from_secs(4) {
-                        // Step 3: After 4 seconds total, force child_exited
-                        if let Ok(mut state) = app.pty_state.lock() {
-                            state.child_exited = true;
+                // Check if countdown has elapsed (show countdown for idle_timeout seconds)
+                if let Some(countdown_start) = app.idle_countdown_start {
+                    let countdown_elapsed = countdown_start.elapsed().as_secs();
+
+                    // Only proceed with exit sequence after countdown reaches 0
+                    if countdown_elapsed >= app.idle_timeout {
+                        if app.idle_exit_started.is_none() {
+                            // Step 1: Send /exit command to gracefully exit Claude
+                            app.write_to_pty(b"/exit\n");
+                            app.idle_exit_started = Some(Instant::now());
+                            app.idle_ctrl_d_sent = false;
+                        } else if let Some(exit_start) = app.idle_exit_started {
+                            let elapsed = exit_start.elapsed();
+
+                            if !app.idle_ctrl_d_sent && elapsed >= Duration::from_secs(2) {
+                                // Step 2: After 2 seconds, send Ctrl+D (EOF)
+                                app.write_to_pty(&[0x04]); // Ctrl+D = EOT (End of Transmission)
+                                app.idle_ctrl_d_sent = true;
+                            } else if elapsed >= Duration::from_secs(4) {
+                                // Step 3: After 4 seconds total, force child_exited
+                                if let Ok(mut state) = app.pty_state.lock() {
+                                    state.child_exited = true;
+                                }
+                                app.iteration_state = IterationState::NeedsRestart;
+                                break;
+                            }
                         }
-                        app.iteration_state = IterationState::NeedsRestart;
-                        break;
                     }
                 }
             } else {
-                // Reset idle exit state if output is received (no longer idle)
+                // Reset idle countdown and exit state if output is received (no longer idle)
+                app.idle_countdown_start = None;
                 app.idle_exit_started = None;
                 app.idle_ctrl_d_sent = false;
             }
@@ -2463,6 +2503,15 @@ fn run(
                     Mode::Ralph => {
                         // In Ralph mode: handle TUI controls
                         let story_count = app.prd.as_ref().map(|p| p.user_stories.len()).unwrap_or(0);
+
+                        // Cancel idle countdown on any key press (reset the timer)
+                        if app.idle_countdown_start.is_some() {
+                            app.idle_countdown_start = None;
+                            // Reset last_output_time to simulate recent activity
+                            if let Ok(mut state) = app.pty_state.lock() {
+                                state.last_output_time = Instant::now();
+                            }
+                        }
 
                         match key.code {
                             KeyCode::Char('q') => {
