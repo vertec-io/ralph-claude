@@ -402,7 +402,8 @@ struct App {
     iteration_start: Instant,
     // Token usage tracking
     session_tokens: TokenStats,
-    // Progress rotation
+    // Progress rotation (reserved for future progress file rotation feature)
+    #[allow(dead_code)]
     rotate_threshold: u32,
     #[allow(dead_code)]
     skip_prompts: bool,
