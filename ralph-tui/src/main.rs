@@ -2090,10 +2090,15 @@ fn run(
             // Ralph terminal content (based on view mode)
             let ralph_content_lines: Vec<Line> = match app.ralph_view_mode {
                 RalphViewMode::Normal => {
-                    // Default: show status or placeholder
+                    // Show ASCII logo and status
                     vec![
+                        Line::from(vec![
+                            Span::styled("  ▶▶ ", Style::default().fg(GREEN_ACTIVE)),
+                            Span::styled("RALPH LOOP", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                            Span::styled(" ◀◀", Style::default().fg(GREEN_ACTIVE)),
+                        ]),
                         Line::from(Span::styled(
-                            format!("  Iteration {}/{} | Press s/p/r for details", app.current_iteration, app.max_iterations),
+                            format!("     Iteration {}/{} | j/k: Navigate | s/p/r: Details", app.current_iteration, app.max_iterations),
                             Style::default().fg(TEXT_MUTED),
                         )),
                     ]
