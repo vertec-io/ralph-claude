@@ -540,6 +540,7 @@ fn render_story_card(
     state: StoryState,
     tick: u64,
     progress_percent: u16,
+    selected: bool,
     frame: &mut Frame,
 ) {
     // Determine colors based on state
@@ -553,11 +554,14 @@ fn render_story_card(
         StoryState::Pending => ("○", TEXT_MUTED, TEXT_SECONDARY, BG_SECONDARY),
     };
 
+    // Use highlight border for selected card, normal for others
+    let border_color = if selected { CYAN_PRIMARY } else { BORDER_SUBTLE };
+
     // Create card block with rounded borders
     let card_block = Block::default()
         .borders(Borders::ALL)
         .border_set(ROUNDED_BORDERS)
-        .border_style(Style::default().fg(BORDER_SUBTLE))
+        .border_style(Style::default().fg(border_color))
         .style(Style::default().bg(bg_color));
 
     // Format story ID as #XX (extract numeric part)
@@ -1835,7 +1839,22 @@ fn run(
                 let active_card_height = 5u16;
                 let normal_card_height = 3u16;
 
-                // Clamp scroll offset to valid range
+                // Ensure selected_story_index is valid
+                if app.selected_story_index >= stories.len() && !stories.is_empty() {
+                    app.selected_story_index = stories.len() - 1;
+                }
+
+                // Make scroll follow selection: adjust scroll_offset so selected story is visible
+                // If selected < scroll_offset, scroll up
+                if app.selected_story_index < app.story_scroll_offset {
+                    app.story_scroll_offset = app.selected_story_index;
+                }
+                // Estimate visible stories (assuming average card height of 3 lines)
+                let estimated_visible = (stories_area.height / normal_card_height) as usize;
+                if estimated_visible > 0 && app.selected_story_index >= app.story_scroll_offset + estimated_visible {
+                    // Selected story is below visible area, scroll down
+                    app.story_scroll_offset = app.selected_story_index.saturating_sub(estimated_visible - 1);
+                }
                 let max_scroll = stories.len().saturating_sub(1);
                 if app.story_scroll_offset > max_scroll {
                     app.story_scroll_offset = max_scroll;
@@ -1919,6 +1938,9 @@ fn run(
                         height: card_height,
                     };
 
+                    // Check if this story is selected
+                    let is_selected = idx == app.selected_story_index;
+
                     render_story_card(
                         card_area,
                         &story.id,
@@ -1926,6 +1948,7 @@ fn run(
                         state,
                         app.animation_tick,
                         progress_percent,
+                        is_selected,
                         frame,
                     );
 
@@ -2194,6 +2217,8 @@ fn run(
                 match app.mode {
                     Mode::Ralph => {
                         // In Ralph mode: handle TUI controls
+                        let story_count = app.prd.as_ref().map(|p| p.user_stories.len()).unwrap_or(0);
+
                         match key.code {
                             KeyCode::Char('q') => {
                                 app.iteration_state = IterationState::Completed;
@@ -2202,14 +2227,26 @@ fn run(
                             KeyCode::Char('i') | KeyCode::Tab => {
                                 app.mode = Mode::Claude;
                             }
-                            KeyCode::Up => {
-                                if app.story_scroll_offset > 0 {
-                                    app.story_scroll_offset -= 1;
+                            // j/k and arrow keys for story navigation
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if story_count > 0 {
+                                    if app.selected_story_index > 0 {
+                                        app.selected_story_index -= 1;
+                                    } else {
+                                        // Wrap to bottom
+                                        app.selected_story_index = story_count - 1;
+                                    }
                                 }
                             }
-                            KeyCode::Down => {
-                                // Increment with bounds check (clamped in render)
-                                app.story_scroll_offset += 1;
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if story_count > 0 {
+                                    if app.selected_story_index < story_count - 1 {
+                                        app.selected_story_index += 1;
+                                    } else {
+                                        // Wrap to top
+                                        app.selected_story_index = 0;
+                                    }
+                                }
                             }
                             _ => {}
                         }
