@@ -337,6 +337,10 @@ struct App {
     ralph_expanded: bool,
     // Idle timeout in seconds (for auto-restart)
     idle_timeout: u64,
+    // Idle exit state: when the exit sequence was started (None = not started)
+    idle_exit_started: Option<Instant>,
+    // Whether Ctrl+D has been sent during idle exit sequence
+    idle_ctrl_d_sent: bool,
 }
 
 impl App {
@@ -374,6 +378,8 @@ impl App {
             ralph_view_mode: RalphViewMode::Normal,
             ralph_expanded: false,
             idle_timeout: config.idle_timeout,
+            idle_exit_started: None,
+            idle_ctrl_d_sent: false,
         }
     }
 
@@ -2399,6 +2405,43 @@ fn run(
                     app.iteration_state = IterationState::NeedsRestart;
                 }
                 break;
+            }
+        }
+
+        // Check for idle state and perform graceful exit sequence
+        {
+            let is_idle = if let Ok(state) = app.pty_state.lock() {
+                state.is_idle(app.idle_timeout)
+            } else {
+                false
+            };
+
+            if is_idle {
+                if app.idle_exit_started.is_none() {
+                    // Step 1: Send /exit command to gracefully exit Claude
+                    app.write_to_pty(b"/exit\n");
+                    app.idle_exit_started = Some(Instant::now());
+                    app.idle_ctrl_d_sent = false;
+                } else if let Some(exit_start) = app.idle_exit_started {
+                    let elapsed = exit_start.elapsed();
+
+                    if !app.idle_ctrl_d_sent && elapsed >= Duration::from_secs(2) {
+                        // Step 2: After 2 seconds, send Ctrl+D (EOF)
+                        app.write_to_pty(&[0x04]); // Ctrl+D = EOT (End of Transmission)
+                        app.idle_ctrl_d_sent = true;
+                    } else if elapsed >= Duration::from_secs(4) {
+                        // Step 3: After 4 seconds total, force child_exited
+                        if let Ok(mut state) = app.pty_state.lock() {
+                            state.child_exited = true;
+                        }
+                        app.iteration_state = IterationState::NeedsRestart;
+                        break;
+                    }
+                }
+            } else {
+                // Reset idle exit state if output is received (no longer idle)
+                app.idle_exit_started = None;
+                app.idle_ctrl_d_sent = false;
             }
         }
 
