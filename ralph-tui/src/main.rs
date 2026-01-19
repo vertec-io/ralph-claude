@@ -94,6 +94,11 @@ impl Prd {
         self.user_stories.iter().filter(|s| s.passes).count()
     }
 
+    /// Check if all stories pass (project complete)
+    fn all_stories_pass(&self) -> bool {
+        !self.user_stories.is_empty() && self.user_stories.iter().all(|s| s.passes)
+    }
+
     /// Get current story (first with passes: false, sorted by priority)
     fn current_story(&self) -> Option<&UserStory> {
         self.user_stories
@@ -280,6 +285,13 @@ impl PtyState {
     /// Check if completion signal is present in recent output
     fn has_completion_signal(&self) -> bool {
         self.recent_output.contains("<promise>COMPLETE</promise>")
+    }
+
+    /// Check if stop hook fired (iteration complete message in output)
+    /// This is used to detect when Claude's Stop hook runs with continue: false
+    /// Since Claude doesn't exit, we detect the message instead
+    fn has_stop_hook_signal(&self) -> bool {
+        self.recent_output.contains("Iteration complete - ralph-tui will start next iteration")
     }
 
     /// Clear recent output (called when starting new iteration)
@@ -1546,6 +1558,12 @@ fn main() -> io::Result<()> {
 
                 // Reload PRD to get latest state
                 if let Ok(prd) = Prd::load(&app.prd_path) {
+                    // Check if all stories pass - project is complete!
+                    if prd.all_stories_pass() {
+                        app.prd = Some(prd);
+                        app.iteration_state = IterationState::Completed;
+                        break Ok(());
+                    }
                     app.prd = Some(prd);
                 }
 
@@ -1959,10 +1977,13 @@ fn run(
                     app.story_scroll_offset = app.selected_story_index;
                 }
                 // Estimate visible stories (assuming average card height of 3 lines)
-                let estimated_visible = (stories_area.height / normal_card_height) as usize;
-                if estimated_visible > 0 && app.selected_story_index >= app.story_scroll_offset + estimated_visible {
+                // Subtract 2 lines for potential scroll indicators (above/below)
+                let effective_height = stories_area.height.saturating_sub(2);
+                let estimated_visible = (effective_height / normal_card_height).max(1) as usize;
+                if app.selected_story_index >= app.story_scroll_offset + estimated_visible {
                     // Selected story is below visible area, scroll down
-                    app.story_scroll_offset = app.selected_story_index.saturating_sub(estimated_visible - 1);
+                    // Put selected story at the bottom of visible area
+                    app.story_scroll_offset = app.selected_story_index.saturating_sub(estimated_visible.saturating_sub(1));
                 }
                 let max_scroll = stories.len().saturating_sub(1);
                 if app.story_scroll_offset > max_scroll {
@@ -2391,18 +2412,21 @@ fn run(
             frame.render_widget(footer, bottom_bar_area);
         })?;
 
-        // Check if child exited
+        // Check if child exited or stop hook fired
         {
             let state_result = app.pty_state.lock();
-            let (child_exited, is_complete) = match state_result {
+            let (child_exited, is_complete, stop_hook_fired) = match state_result {
                 Ok(mut state) => {
                     // Update activities one final time before checking exit
                     state.update_activities();
-                    (state.child_exited, state.has_completion_signal())
+                    (state.child_exited, state.has_completion_signal(), state.has_stop_hook_signal())
                 }
-                Err(_) => (true, false), // Treat poisoned mutex as child exited
+                Err(_) => (true, false, false), // Treat poisoned mutex as child exited
             };
-            if child_exited {
+
+            // Stop hook fires when Claude's response completes - triggers new iteration
+            // Claude doesn't actually exit, so we detect the hook message in output
+            if child_exited || stop_hook_fired {
                 // Wait a moment before proceeding so user can see final output
                 std::thread::sleep(std::time::Duration::from_millis(500));
 
