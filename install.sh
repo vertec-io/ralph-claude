@@ -1,10 +1,16 @@
 #!/bin/bash
-# Ralph TUI Installer
-# Installs ralph-tui binary and Claude Code skills
+# Ralph Installation Script
+# Installs skills, prompt.md, and hooks with version detection
+# Usage: ./install.sh [--force]
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Installation paths
+SKILLS_INSTALL_DIR="$HOME/.claude/skills"
+PROMPT_INSTALL_DIR="$HOME/.config/ralph"
+BIN_INSTALL_DIR="$HOME/.local/bin"
 
 # Colors for output
 RED='\033[0;31m'
@@ -13,163 +19,351 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-print_header() {
-    echo ""
-    echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║  Ralph TUI Installer                                          ║${NC}"
-    echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
+# Parse command line arguments
+FORCE_UPGRADE=false
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -f|--force)
+      FORCE_UPGRADE=true
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: ./install.sh [OPTIONS]"
+      echo ""
+      echo "Options:"
+      echo "  -f, --force    Skip version prompts and always upgrade"
+      echo "  -h, --help     Show this help message"
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1"
+      echo "Usage: ./install.sh [--force]"
+      exit 1
+      ;;
+  esac
+done
+
+# Parse version from SKILL.md YAML frontmatter
+# Looks for: version: "X.Y" or version: X.Y between --- delimiters
+# Returns 0.0 if not found
+parse_skill_version() {
+  local skill_file="$1"
+
+  if [ ! -f "$skill_file" ]; then
+    echo "0.0"
+    return
+  fi
+
+  # Extract YAML frontmatter (between first two ---) and find version field
+  local version
+  version=$(awk '
+    BEGIN { in_frontmatter=0; found_start=0 }
+    /^---$/ {
+      if (!found_start) { found_start=1; in_frontmatter=1; next }
+      else { exit }
+    }
+    in_frontmatter && /^version:/ {
+      # Extract version value, handling quotes
+      gsub(/version:[ \t]*/, "")
+      gsub(/["'"'"']/, "")
+      gsub(/[ \t\r\n]/, "")
+      print
+      exit
+    }
+  ' "$skill_file" 2>/dev/null)
+
+  if [ -z "$version" ]; then
+    echo "0.0"
+  else
+    echo "$version"
+  fi
 }
 
-print_success() {
-    echo -e "${GREEN}✓${NC} $1"
+# Parse version from prompt.md HTML comment
+# Looks for: <!-- version: X.Y -->
+# Returns 0.0 if not found
+parse_prompt_version() {
+  local prompt_file="$1"
+
+  if [ ! -f "$prompt_file" ]; then
+    echo "0.0"
+    return
+  fi
+
+  # Extract version from HTML comment
+  local version
+  version=$(grep -oP '<!--\s*version:\s*\K[0-9]+\.[0-9]+' "$prompt_file" 2>/dev/null | head -1)
+
+  if [ -z "$version" ]; then
+    echo "0.0"
+  else
+    echo "$version"
+  fi
 }
 
-print_warning() {
-    echo -e "${YELLOW}!${NC} $1"
+# Compare two version strings
+# Returns: 0 if equal, 1 if v1 > v2, 2 if v1 < v2
+compare_versions() {
+  local v1="$1"
+  local v2="$2"
+
+  # Extract major and minor parts
+  local v1_major="${v1%%.*}"
+  local v1_minor="${v1#*.}"
+  local v2_major="${v2%%.*}"
+  local v2_minor="${v2#*.}"
+
+  # Handle cases where there's no minor version
+  [ -z "$v1_minor" ] || [ "$v1_minor" = "$v1" ] && v1_minor="0"
+  [ -z "$v2_minor" ] || [ "$v2_minor" = "$v2" ] && v2_minor="0"
+
+  # Compare major versions
+  if [ "$v1_major" -gt "$v2_major" ] 2>/dev/null; then
+    return 1
+  elif [ "$v1_major" -lt "$v2_major" ] 2>/dev/null; then
+    return 2
+  fi
+
+  # Major versions equal, compare minor
+  if [ "$v1_minor" -gt "$v2_minor" ] 2>/dev/null; then
+    return 1
+  elif [ "$v1_minor" -lt "$v2_minor" ] 2>/dev/null; then
+    return 2
+  fi
+
+  return 0
 }
 
-print_error() {
-    echo -e "${RED}✗${NC} $1"
-}
+# Check if upgrade is needed and prompt user
+# Returns 0 if should install, 1 if should skip
+check_and_prompt_upgrade() {
+  local name="$1"
+  local installed_version="$2"
+  local repo_version="$3"
 
-print_info() {
-    echo -e "${BLUE}→${NC} $1"
-}
+  compare_versions "$installed_version" "$repo_version"
+  local cmp_result=$?
 
-# Check if a command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
-print_header
-
-# Determine install locations
-INSTALL_BIN="${HOME}/.local/bin"
-CARGO_BIN="${HOME}/.cargo/bin"
-INSTALL_CONFIG="${HOME}/.config/ralph"
-INSTALL_SKILLS="${HOME}/.claude/skills"
-
-# Check for existing installations
-EXISTING_LOCAL=false
-EXISTING_CARGO=false
-[ -f "$INSTALL_BIN/ralph-tui" ] && EXISTING_LOCAL=true
-[ -f "$CARGO_BIN/ralph-tui" ] && EXISTING_CARGO=true
-
-if [ "$EXISTING_CARGO" = true ]; then
-    print_warning "ralph-tui is already installed via cargo at $CARGO_BIN/ralph-tui"
-    echo ""
-    echo "Options:"
-    echo "  1. Uninstall cargo version first: cargo uninstall ralph-tui"
-    echo "  2. Continue anyway (will have two installations)"
-    echo ""
-    read -p "Continue with install? [y/N]: " CONTINUE
-    if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
-        echo "Cancelled. Run 'cargo uninstall ralph-tui' first if you want to switch."
-        exit 0
+  if [ $cmp_result -eq 0 ]; then
+    # Versions match
+    echo -e "${GREEN}✓${NC} $name is up to date (v$repo_version)"
+    return 1
+  elif [ $cmp_result -eq 1 ]; then
+    # Installed is newer (shouldn't happen normally)
+    echo -e "${YELLOW}⚠${NC} $name: installed (v$installed_version) is newer than repo (v$repo_version)"
+    if [ "$FORCE_UPGRADE" = true ]; then
+      return 0
     fi
-    echo ""
-fi
+    read -p "  Overwrite with repo version? [y/N] " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]] && return 0 || return 1
+  else
+    # Repo is newer
+    echo -e "${BLUE}↑${NC} $name: upgrade available (v$installed_version → v$repo_version)"
+    if [ "$FORCE_UPGRADE" = true ]; then
+      return 0
+    fi
+    read -p "  Upgrade? [Y/n] " -n 1 -r
+    echo
+    [[ ! $REPLY =~ ^[Nn]$ ]] && return 0 || return 1
+  fi
+}
 
-if [ "$EXISTING_LOCAL" = true ]; then
-    print_info "Existing installation found at $INSTALL_BIN/ralph-tui - will be replaced"
-    echo ""
-fi
+# Create backup of a file
+create_backup() {
+  local file="$1"
+  if [ -f "$file" ]; then
+    local backup="${file}.backup-$(date +%Y%m%d-%H%M%S)"
+    cp "$file" "$backup"
+    echo -e "  ${YELLOW}Backed up to:${NC} $backup"
+  fi
+}
 
-echo "Installation paths:"
-echo "  Binary:  $INSTALL_BIN/ralph-tui"
-echo "  Config:  $INSTALL_CONFIG/"
-echo "  Skills:  $INSTALL_SKILLS/"
-echo ""
+# Install a skill directory
+install_skill() {
+  local skill_name="$1"
+  local repo_skill_dir="$SCRIPT_DIR/skills/$skill_name"
+  local install_skill_dir="$SKILLS_INSTALL_DIR/$skill_name"
 
-# Check for Rust/Cargo
-if ! command_exists cargo; then
-    print_error "Cargo (Rust) not found!"
-    echo ""
-    echo "Options:"
-    echo "  1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-    echo "  2. Use cargo install: cargo install --git https://github.com/anthropics/ralph-claude ralph-tui"
-    echo "  3. Download pre-built binary from releases (coming soon)"
-    echo ""
-    exit 1
-fi
+  if [ ! -d "$repo_skill_dir" ]; then
+    echo -e "${RED}✗${NC} Skill '$skill_name' not found in repo"
+    return 1
+  fi
 
-print_success "Found cargo: $(cargo --version)"
+  local repo_version
+  repo_version=$(parse_skill_version "$repo_skill_dir/SKILL.md")
 
-# Build ralph-tui
-print_info "Building ralph-tui (release mode)..."
-cd "$SCRIPT_DIR/ralph-tui"
-cargo build --release
+  local installed_version="0.0"
+  if [ -f "$install_skill_dir/SKILL.md" ]; then
+    installed_version=$(parse_skill_version "$install_skill_dir/SKILL.md")
+  fi
 
-if [ ! -f "target/release/ralph-tui" ]; then
-    print_error "Build failed - binary not found"
-    exit 1
-fi
-print_success "Build complete"
+  if check_and_prompt_upgrade "Skill: $skill_name" "$installed_version" "$repo_version"; then
+    # Create backup of existing skill
+    if [ -d "$install_skill_dir" ]; then
+      create_backup "$install_skill_dir/SKILL.md"
+    fi
 
-# Create directories
-print_info "Creating directories..."
-mkdir -p "$INSTALL_BIN"
-mkdir -p "$INSTALL_CONFIG"
-mkdir -p "$INSTALL_SKILLS"
-print_success "Directories created"
-
-# Install binary
-print_info "Installing binary..."
-cp "target/release/ralph-tui" "$INSTALL_BIN/ralph-tui"
-chmod +x "$INSTALL_BIN/ralph-tui"
-print_success "Installed ralph-tui to $INSTALL_BIN/"
+    # Install skill
+    mkdir -p "$install_skill_dir"
+    cp -r "$repo_skill_dir"/* "$install_skill_dir/"
+    echo -e "  ${GREEN}Installed${NC} $skill_name to $install_skill_dir"
+  fi
+}
 
 # Install prompt.md
-print_info "Installing prompt.md..."
-if [ -f "$INSTALL_CONFIG/prompt.md" ]; then
-    print_warning "prompt.md already exists at $INSTALL_CONFIG/prompt.md - skipping"
-else
-    cp "$SCRIPT_DIR/prompt.md" "$INSTALL_CONFIG/prompt.md"
-    print_success "Installed prompt.md to $INSTALL_CONFIG/"
-fi
+install_prompt() {
+  local repo_prompt="$SCRIPT_DIR/prompt.md"
+  local install_prompt="$PROMPT_INSTALL_DIR/prompt.md"
 
-# Install skills
-print_info "Installing Claude Code skills..."
+  if [ ! -f "$repo_prompt" ]; then
+    echo -e "${RED}✗${NC} prompt.md not found in repo"
+    return 1
+  fi
 
-if [ -d "$INSTALL_SKILLS/prd" ]; then
-    print_warning "prd skill already exists - skipping"
-else
-    cp -r "$SCRIPT_DIR/skills/prd" "$INSTALL_SKILLS/"
-    print_success "Installed /prd skill"
-fi
+  local repo_version
+  repo_version=$(parse_prompt_version "$repo_prompt")
 
-if [ -d "$INSTALL_SKILLS/ralph" ]; then
-    print_warning "ralph skill already exists - skipping"
-else
-    cp -r "$SCRIPT_DIR/skills/ralph" "$INSTALL_SKILLS/"
-    print_success "Installed /ralph skill"
-fi
+  local installed_version="0.0"
+  if [ -f "$install_prompt" ]; then
+    installed_version=$(parse_prompt_version "$install_prompt")
+  fi
 
-# Check PATH
-echo ""
-if [[ ":$PATH:" != *":$INSTALL_BIN:"* ]]; then
-    print_warning "$INSTALL_BIN is not in your PATH"
+  if check_and_prompt_upgrade "prompt.md" "$installed_version" "$repo_version"; then
+    # Create backup
+    create_backup "$install_prompt"
+
+    # Install prompt
+    mkdir -p "$PROMPT_INSTALL_DIR"
+    cp "$repo_prompt" "$install_prompt"
+    echo -e "  ${GREEN}Installed${NC} prompt.md to $install_prompt"
+  fi
+}
+
+# Install hooks and settings for ralph-tui
+install_hooks() {
+  local hooks_dir="$PROMPT_INSTALL_DIR/hooks"
+  local settings_file="$PROMPT_INSTALL_DIR/settings.json"
+
+  echo "Installing hooks..."
+
+  # Create hooks directory
+  mkdir -p "$hooks_dir"
+
+  # Install stop-iteration hook
+  if [ -f "$SCRIPT_DIR/hooks/stop-iteration.sh" ]; then
+    cp "$SCRIPT_DIR/hooks/stop-iteration.sh" "$hooks_dir/"
+    chmod +x "$hooks_dir/stop-iteration.sh"
+    echo -e "  ${GREEN}Installed${NC} stop-iteration.sh to $hooks_dir"
+  fi
+
+  # Install settings.json (always overwrite - it's generated, not user-customized)
+  if [ -f "$SCRIPT_DIR/hooks/settings.json" ]; then
+    cp "$SCRIPT_DIR/hooks/settings.json" "$settings_file"
+    echo -e "  ${GREEN}Installed${NC} settings.json to $settings_file"
+  fi
+}
+
+# Build and install ralph-tui binary
+install_ralph_tui() {
+  local tui_dir="$SCRIPT_DIR/ralph-tui"
+  local binary_name="ralph-tui"
+  local install_path="$BIN_INSTALL_DIR/$binary_name"
+
+  echo "Building ralph-tui..."
+
+  # Check if ralph-tui directory exists
+  if [ ! -d "$tui_dir" ]; then
+    echo -e "${RED}✗${NC} ralph-tui directory not found"
+    return 1
+  fi
+
+  # Check if cargo is installed
+  if ! command -v cargo &> /dev/null; then
+    echo -e "${RED}✗${NC} cargo not found. Please install Rust: https://rustup.rs"
+    return 1
+  fi
+
+  # Build release version
+  echo -e "  ${BLUE}Building release binary...${NC}"
+  if ! (cd "$tui_dir" && cargo build --release 2>&1 | tail -5); then
+    echo -e "${RED}✗${NC} Build failed"
+    return 1
+  fi
+
+  # Check if binary was created
+  local built_binary="$tui_dir/target/release/$binary_name"
+  if [ ! -f "$built_binary" ]; then
+    echo -e "${RED}✗${NC} Binary not found after build"
+    return 1
+  fi
+
+  # Create bin directory if needed
+  mkdir -p "$BIN_INSTALL_DIR"
+
+  # Copy binary
+  cp "$built_binary" "$install_path"
+  chmod +x "$install_path"
+  echo -e "  ${GREEN}Installed${NC} $binary_name to $install_path"
+
+  # Check if ~/.local/bin is in PATH
+  if [[ ":$PATH:" != *":$BIN_INSTALL_DIR:"* ]]; then
     echo ""
-    echo "Add this to your shell config (~/.bashrc, ~/.zshrc, etc.):"
-    echo ""
-    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-    echo ""
-    echo "Then restart your shell or run: source ~/.bashrc"
-else
-    print_success "$INSTALL_BIN is in PATH"
-fi
+    echo -e "  ${YELLOW}Note:${NC} $BIN_INSTALL_DIR is not in your PATH"
+    echo -e "  Add this to your shell config (.bashrc, .zshrc, etc.):"
+    echo -e "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+  fi
+}
 
-echo ""
-echo -e "${GREEN}Installation complete!${NC}"
-echo ""
-echo "Usage:"
-echo "  ralph-tui                    # Interactive task selection"
-echo "  ralph-tui tasks/my-feature   # Run specific task"
-echo "  ralph-tui --help             # Show all options"
-echo ""
-echo "To create a new task:"
-echo "  1. Use /prd in Claude Code to create a PRD"
-echo "  2. Use /ralph to convert it to prd.json"
-echo "  3. Run: ralph-tui"
-echo ""
+# Main installation
+main() {
+  echo ""
+  echo "╔═══════════════════════════════════════════════════════════════╗"
+  echo "║  Ralph Installation                                           ║"
+  echo "╚═══════════════════════════════════════════════════════════════╝"
+  echo ""
+
+  # Create directories if needed
+  mkdir -p "$SKILLS_INSTALL_DIR"
+  mkdir -p "$PROMPT_INSTALL_DIR"
+  mkdir -p "$BIN_INSTALL_DIR"
+
+  # Build and install ralph-tui binary
+  install_ralph_tui
+
+  echo ""
+
+  # Install skills
+  echo "Installing skills to $SKILLS_INSTALL_DIR..."
+  echo ""
+
+  for skill_dir in "$SCRIPT_DIR/skills"/*/; do
+    if [ -d "$skill_dir" ]; then
+      skill_name=$(basename "$skill_dir")
+      install_skill "$skill_name"
+    fi
+  done
+
+  echo ""
+
+  # Install prompt.md
+  echo "Installing prompt.md to $PROMPT_INSTALL_DIR..."
+  echo ""
+  install_prompt
+
+  echo ""
+
+  # Install hooks
+  install_hooks
+
+  echo ""
+  echo -e "${GREEN}Installation complete!${NC}"
+  echo ""
+  echo "Binary installed to:  $BIN_INSTALL_DIR/ralph-tui"
+  echo "Skills installed to:  $SKILLS_INSTALL_DIR"
+  echo "Prompt installed to:  $PROMPT_INSTALL_DIR/prompt.md"
+  echo "Hooks installed to:   $PROMPT_INSTALL_DIR/hooks/"
+}
+
+main
