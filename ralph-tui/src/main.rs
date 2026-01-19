@@ -156,8 +156,12 @@ impl Activity {
     fn format(&self, max_width: usize) -> String {
         let prefix = format!("{}: ", self.action_type);
         let available = max_width.saturating_sub(prefix.len());
-        let target = if self.target.len() > available {
-            format!("...{}", &self.target[self.target.len().saturating_sub(available.saturating_sub(3))..])
+        let char_count = self.target.chars().count();
+        let target = if char_count > available {
+            // Safely truncate from the end using character boundaries
+            let skip_chars = char_count.saturating_sub(available.saturating_sub(3));
+            let truncated: String = self.target.chars().skip(skip_chars).collect();
+            format!("...{}", truncated)
         } else {
             self.target.clone()
         };
@@ -189,7 +193,12 @@ fn parse_activities(text: &str) -> Vec<Activity> {
             for prefix in *prefixes {
                 if let Some(pos) = line_lower.find(prefix) {
                     // Extract target (rest of line after pattern, cleaned up)
-                    let after = &line[pos + prefix.len()..];
+                    // Use get() to safely handle potential UTF-8 boundary issues
+                    let start_idx = pos + prefix.len();
+                    let after = match line.get(start_idx..) {
+                        Some(s) => s,
+                        None => continue, // Skip if index is invalid
+                    };
                     let target = after
                         .trim()
                         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`')
@@ -251,14 +260,19 @@ impl PtyState {
             // Keep only last 10KB to limit memory
             if self.recent_output.len() > 10 * 1024 {
                 let target_start = self.recent_output.len() - 8 * 1024;
-                // Find a valid UTF-8 character boundary
-                let start = self
+                // Find a valid UTF-8 character boundary using char_indices
+                // char_indices always returns valid byte boundaries
+                if let Some((start, _)) = self
                     .recent_output
                     .char_indices()
                     .find(|(i, _)| *i >= target_start)
-                    .map(|(i, _)| i)
-                    .unwrap_or(target_start);
-                self.recent_output = self.recent_output[start..].to_string();
+                {
+                    // Use safe get() to avoid any potential panic
+                    if let Some(trimmed) = self.recent_output.get(start..) {
+                        self.recent_output = trimmed.to_string();
+                    }
+                }
+                // If we can't find a valid boundary, just clear (shouldn't happen)
             }
         }
     }
@@ -281,8 +295,15 @@ impl PtyState {
             return;
         }
 
-        // Parse only the new portion of output
-        let new_output = &self.recent_output[self.last_activity_parse_pos..];
+        // Parse only the new portion of output (safe slice access)
+        let new_output = match self.recent_output.get(self.last_activity_parse_pos..) {
+            Some(s) => s,
+            None => {
+                // Position is invalid (maybe string was trimmed), reset
+                self.last_activity_parse_pos = 0;
+                return;
+            }
+        };
         let new_activities = parse_activities(new_output);
 
         // Add new activities, avoiding duplicates
@@ -621,8 +642,12 @@ fn render_story_card(
     let prefix_len = prefix.chars().count();
     let available_title_width = inner_width.saturating_sub(prefix_len);
 
-    let truncated_title = if story_title.len() > available_title_width {
-        format!("{}...", &story_title[..available_title_width.saturating_sub(3)])
+    let title_char_count = story_title.chars().count();
+    let truncated_title = if title_char_count > available_title_width {
+        // Safely truncate using character boundaries
+        let take_chars = available_title_width.saturating_sub(3);
+        let truncated: String = story_title.chars().take(take_chars).collect();
+        format!("{}...", truncated)
     } else {
         story_title.to_string()
     };
