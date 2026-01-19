@@ -352,13 +352,30 @@ impl PtyState {
     /// Since Claude doesn't exit, we detect the message instead
     /// We check for multiple possible patterns since ANSI codes may interfere
     fn has_stop_hook_signal(&self) -> bool {
-        // Strip ANSI escape sequences for reliable matching
+        // Check raw output first (with ANSI stripping)
         let stripped = strip_ansi_codes(&self.recent_output);
+        let stripped_lower = stripped.to_lowercase();
 
-        // Check for the stop hook message (may have varying formatting)
-        stripped.contains("Iteration complete - ralph-tui will start next iteration")
-            || stripped.contains("ralph-tui will start next iteration")
-            || self.recent_output.contains("Ran 1 stop hook")
+        if stripped_lower.contains("iteration complete")
+            || stripped_lower.contains("ralph-tui will start next iteration")
+            || stripped_lower.contains("ran 1 stop hook")
+            || stripped_lower.contains("stop hook")
+        {
+            return true;
+        }
+
+        // Also check the VT100 screen content (rendered text)
+        let screen = self.parser.screen();
+        let (rows, _cols) = screen.size();
+        for row in 0..rows {
+            let row_text = screen.contents_between(row, 0, row, 200);
+            let row_lower = row_text.to_lowercase();
+            if row_lower.contains("stop hook") || row_lower.contains("iteration complete") {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Clear recent output (called when starting new iteration)
@@ -2550,14 +2567,38 @@ fn run(
         // Check if child exited or stop hook fired
         {
             let state_result = app.pty_state.lock();
-            let (child_exited, is_complete, stop_hook_fired) = match state_result {
+            let (child_exited, is_complete, stop_hook_fired, debug_info) = match state_result {
                 Ok(mut state) => {
                     // Update activities one final time before checking exit
                     state.update_activities();
-                    (state.child_exited, state.has_completion_signal(), state.has_stop_hook_signal())
+                    let stop_signal = state.has_stop_hook_signal();
+                    // Debug: capture last 500 chars of recent_output for logging
+                    let debug = if stop_signal {
+                        format!("STOP HOOK DETECTED! Buffer len: {}", state.recent_output.len())
+                    } else {
+                        let stripped = strip_ansi_codes(&state.recent_output);
+                        let lower = stripped.to_lowercase();
+                        format!(
+                            "No stop hook. Buffer len: {}. Contains 'stop hook': {}, 'iteration complete': {}",
+                            state.recent_output.len(),
+                            lower.contains("stop hook"),
+                            lower.contains("iteration complete")
+                        )
+                    };
+                    (state.child_exited, state.has_completion_signal(), stop_signal, debug)
                 }
-                Err(_) => (true, false, false), // Treat poisoned mutex as child exited
+                Err(_) => (true, false, false, "Mutex poisoned".to_string()),
             };
+
+            // Write debug info periodically (every ~5 seconds based on loop timing)
+            static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count % 100 == 0 || stop_hook_fired {
+                let _ = std::fs::write("/tmp/ralph-tui-debug.log", format!(
+                    "Count: {}\nchild_exited: {}\nstop_hook_fired: {}\nis_complete: {}\nDebug: {}\n",
+                    count, child_exited, stop_hook_fired, is_complete, debug_info
+                ));
+            }
 
             // Stop hook fires when Claude's response completes - triggers new iteration
             // Claude doesn't actually exit, so we detect the hook message in output
