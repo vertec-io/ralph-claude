@@ -350,8 +350,15 @@ impl PtyState {
     /// Check if stop hook fired (iteration complete message in output)
     /// This is used to detect when Claude's Stop hook runs with continue: false
     /// Since Claude doesn't exit, we detect the message instead
+    /// We check for multiple possible patterns since ANSI codes may interfere
     fn has_stop_hook_signal(&self) -> bool {
-        self.recent_output.contains("Iteration complete - ralph-tui will start next iteration")
+        // Strip ANSI escape sequences for reliable matching
+        let stripped = strip_ansi_codes(&self.recent_output);
+
+        // Check for the stop hook message (may have varying formatting)
+        stripped.contains("Iteration complete - ralph-tui will start next iteration")
+            || stripped.contains("ralph-tui will start next iteration")
+            || self.recent_output.contains("Ran 1 stop hook")
     }
 
     /// Clear recent output (called when starting new iteration)
@@ -975,6 +982,41 @@ fn render_vt100_screen(screen: &vt100::Screen) -> Vec<Line<'static>> {
     }
 
     lines
+}
+
+/// Strip ANSI escape sequences from a string for reliable text matching
+fn strip_ansi_codes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC and the following sequence
+            if let Some(&next) = chars.peek() {
+                if next == '[' {
+                    chars.next(); // consume '['
+                    // Skip until we hit a letter (the terminator)
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else if next == ']' {
+                    // OSC sequence - skip until BEL or ST
+                    chars.next();
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' || ch == '\\' {
+                            break;
+                        }
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 /// Forward a key event to the PTY
