@@ -1657,14 +1657,35 @@ fn setup_prd_watcher(
     prd_path: PathBuf,
     needs_reload: Arc<Mutex<bool>>,
 ) -> Option<RecommendedWatcher> {
-    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+    // Use a shorter poll interval for more responsive updates
+    let config = Config::default().with_poll_interval(Duration::from_millis(500));
 
-    let prd_path_clone = prd_path.clone();
+    // Canonicalize the path for reliable comparison
+    let canonical_prd = prd_path.canonicalize().unwrap_or_else(|_| prd_path.clone());
+    let prd_filename = prd_path.file_name().map(|s| s.to_os_string());
+
     let watcher_result = RecommendedWatcher::new(
         move |res: Result<notify::Event, notify::Error>| {
             if let Ok(event) = res {
-                // Check if the event is for our file
-                if event.paths.iter().any(|p| p == &prd_path_clone) {
+                // Check if any event path matches our prd.json file
+                // Compare by filename since paths may differ in representation
+                let matches = event.paths.iter().any(|p| {
+                    // Try canonical path comparison first
+                    if let Ok(canonical) = p.canonicalize() {
+                        if canonical == canonical_prd {
+                            return true;
+                        }
+                    }
+                    // Fall back to filename comparison
+                    if let Some(ref expected_name) = prd_filename {
+                        if let Some(event_name) = p.file_name() {
+                            return event_name == expected_name;
+                        }
+                    }
+                    false
+                });
+
+                if matches {
                     if let Ok(mut flag) = needs_reload.lock() {
                         *flag = true;
                     }
