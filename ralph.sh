@@ -30,6 +30,14 @@ fi
 # Valid agents list
 VALID_AGENTS="claude opencode"
 
+# Failure tracking (associative arrays for per-agent tracking)
+declare -A FAILURE_COUNT
+declare -A LAST_FAILURE_MSG
+for agent in $VALID_AGENTS; do
+  FAILURE_COUNT[$agent]=0
+  LAST_FAILURE_MSG[$agent]=""
+done
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     -i|--iterations)
@@ -305,6 +313,78 @@ EOF
   fi
 }
 
+# Function to detect if an iteration failed
+# Uses exit code and output content to determine failure
+# Args:
+#   $1 - Exit code from agent
+#   $2 - Output content from agent
+# Returns: 0 if iteration failed, 1 if successful
+detect_iteration_failure() {
+  local exit_code="$1"
+  local output="$2"
+  
+  # Non-zero exit code is a failure
+  if [ "$exit_code" -ne 0 ]; then
+    return 0
+  fi
+  
+  # Empty output is a failure
+  if [ -z "$output" ]; then
+    return 0
+  fi
+  
+  # Use common.sh error detection patterns
+  if detect_error_patterns "$output"; then
+    # Check if the error is in the agent's own operation (not in the code it's working on)
+    # Agent-level errors typically contain these patterns
+    local agent_error_patterns=(
+      "API error"
+      "rate limit"
+      "quota exceeded"
+      "authentication failed"
+      "Connection refused"
+      "timeout"
+      "503"
+      "502"
+      "429"
+      "overloaded"
+    )
+    
+    for pattern in "${agent_error_patterns[@]}"; do
+      if echo "$output" | grep -qi "$pattern"; then
+        return 0
+      fi
+    done
+  fi
+  
+  # If we get here, iteration was successful (or at least not a critical failure)
+  return 1
+}
+
+# Function to log failure to progress.txt
+# Args:
+#   $1 - Agent name
+#   $2 - Story ID
+#   $3 - Error message
+#   $4 - Iteration number
+log_failure_to_progress() {
+  local agent="$1"
+  local story_id="$2"
+  local error_msg="$3"
+  local iteration="$4"
+  local failure_count="${FAILURE_COUNT[$agent]}"
+  
+  cat >> "$PROGRESS_FILE" << EOF
+
+## $(date '+%Y-%m-%d %H:%M') - FAILURE (Iteration $iteration)
+- **Agent:** $agent
+- **Story:** $story_id
+- **Consecutive failures:** $failure_count
+- **Error:** $error_msg
+---
+EOF
+}
+
 # Get info from prd.json for display
 DESCRIPTION=$(jq -r '.description // "No description"' "$PRD_FILE" 2>/dev/null || echo "Unknown")
 BRANCH_NAME=$(jq -r '.branchName // "unknown"' "$PRD_FILE" 2>/dev/null || echo "unknown")
@@ -458,8 +538,9 @@ $PROCESSED_PROMPT_CONTENT
     done
   done
 
-  # Wait for agent to finish and get exit code
-  wait $AGENT_PID || true
+  # Wait for agent to finish and capture exit code
+  AGENT_EXIT_CODE=0
+  wait $AGENT_PID || AGENT_EXIT_CODE=$?
 
   # Clear spinner line and show completion
   ELAPSED=$(($(date +%s) - START_TIME))
@@ -478,6 +559,30 @@ $PROCESSED_PROMPT_CONTENT
   fi
 
   rm -f "$OUTPUT_FILE" $STATUS_FILE
+
+  # Check for iteration failure using exit code and output patterns
+  if detect_iteration_failure "$AGENT_EXIT_CODE" "$OUTPUT"; then
+    # Increment failure count for this agent
+    FAILURE_COUNT[$ITERATION_AGENT]=$((${FAILURE_COUNT[$ITERATION_AGENT]} + 1))
+    
+    # Extract error message for logging
+    ERROR_MSG=$(extract_error_message "$OUTPUT")
+    if [ "$AGENT_EXIT_CODE" -ne 0 ]; then
+      ERROR_MSG="Exit code $AGENT_EXIT_CODE: $ERROR_MSG"
+    fi
+    LAST_FAILURE_MSG[$ITERATION_AGENT]="$ERROR_MSG"
+    
+    # Log failure to progress.txt
+    log_failure_to_progress "$ITERATION_AGENT" "$NEXT_STORY_ID" "$ERROR_MSG" "$i"
+    
+    echo ""
+    echo "  ⚠ Iteration failed (${FAILURE_COUNT[$ITERATION_AGENT]} consecutive failures for $ITERATION_AGENT)"
+    echo "  Error: $ERROR_MSG"
+  else
+    # Successful iteration - reset failure count for this agent
+    FAILURE_COUNT[$ITERATION_AGENT]=0
+    LAST_FAILURE_MSG[$ITERATION_AGENT]=""
+  fi
 
   # Show output
   echo ""
