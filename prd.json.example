@@ -6,6 +6,7 @@
   "type": "feature",
   "description": "Task Priority System - Add priority levels to tasks",
   "agent": "claude",
+  "failoverThreshold": 3,
   "userStories": [
     {
       "id": "US-001",

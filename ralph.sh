@@ -39,7 +39,17 @@ for agent in $VALID_AGENTS; do
 done
 
 # Failover configuration
+# Precedence: CLI --failover-threshold > RALPH_FAILOVER_THRESHOLD env > prd.json failoverThreshold > default (3)
 FAILOVER_THRESHOLD=3
+FAILOVER_THRESHOLD_SOURCE="default"
+if [ -n "$RALPH_FAILOVER_THRESHOLD" ]; then
+  if [[ "$RALPH_FAILOVER_THRESHOLD" =~ ^[0-9]+$ ]]; then
+    FAILOVER_THRESHOLD="$RALPH_FAILOVER_THRESHOLD"
+    FAILOVER_THRESHOLD_SOURCE="env"
+  else
+    echo "Warning: Invalid RALPH_FAILOVER_THRESHOLD value '$RALPH_FAILOVER_THRESHOLD', using default of 3"
+  fi
+fi
 FAILOVER_ENABLED=true
 
 while [[ $# -gt 0 ]]; do
@@ -61,27 +71,39 @@ while [[ $# -gt 0 ]]; do
       AGENT_SOURCE="cli"
       shift 2
       ;;
+    --failover-threshold)
+      if [[ "$2" =~ ^[0-9]+$ ]]; then
+        FAILOVER_THRESHOLD="$2"
+        FAILOVER_THRESHOLD_SOURCE="cli"
+      else
+        echo "Error: --failover-threshold requires a positive integer"
+        exit 1
+      fi
+      shift 2
+      ;;
     -h|--help)
       echo "Ralph Wiggum - Autonomous Agent Loop"
       echo ""
       echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
       echo ""
       echo "Options:"
-      echo "  -i, --iterations N   Max iterations (default: 10)"
-      echo "  --agent <agent>      Select agent: claude, opencode (default: claude)"
-      echo "  -y, --yes            Skip confirmation prompts"
-      echo "  --rotate-at N        Rotate progress file at N lines (default: 300)"
-      echo "  -h, --help           Show this help message"
+      echo "  -i, --iterations N        Max iterations (default: 10)"
+      echo "  --agent <agent>           Select agent: claude, opencode (default: claude)"
+      echo "  --failover-threshold N    Failures before automatic agent failover (default: 3)"
+      echo "  -y, --yes                 Skip confirmation prompts"
+      echo "  --rotate-at N             Rotate progress file at N lines (default: 300)"
+      echo "  -h, --help                Show this help message"
       echo ""
       echo "Environment variables:"
-      echo "  RALPH_AGENT          Set default agent (overridden by --agent flag)"
+      echo "  RALPH_AGENT               Set default agent (overridden by --agent flag)"
+      echo "  RALPH_FAILOVER_THRESHOLD  Set failover threshold (overridden by --failover-threshold)"
       echo ""
       echo "For interactive mode with tmux, use: ./ralph-i.sh"
       exit 0
       ;;
     -*)
       echo "Unknown option: $1"
-      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--failover-threshold N] [--rotate-at N]"
       echo ""
       echo "For interactive mode, use: ./ralph-i.sh"
       exit 1
@@ -213,6 +235,20 @@ if [ "$AGENT_SOURCE" = "default" ]; then
   if [ -n "$PRD_AGENT" ]; then
     AGENT="$PRD_AGENT"
     AGENT_SOURCE="prd"
+  fi
+fi
+
+# Read failoverThreshold from prd.json if not already set by CLI or env var
+# Precedence: CLI > env var > prd.json > default
+if [ "$FAILOVER_THRESHOLD_SOURCE" = "default" ]; then
+  PRD_FAILOVER_THRESHOLD=$(jq -r '.failoverThreshold // empty' "$PRD_FILE" 2>/dev/null)
+  if [ -n "$PRD_FAILOVER_THRESHOLD" ]; then
+    if [[ "$PRD_FAILOVER_THRESHOLD" =~ ^[0-9]+$ ]]; then
+      FAILOVER_THRESHOLD="$PRD_FAILOVER_THRESHOLD"
+      FAILOVER_THRESHOLD_SOURCE="prd"
+    else
+      echo "Warning: Invalid failoverThreshold value '$PRD_FAILOVER_THRESHOLD' in prd.json, using default of 3"
+    fi
   fi
 fi
 
