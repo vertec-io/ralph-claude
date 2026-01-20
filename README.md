@@ -2,18 +2,21 @@
 
 ![Ralph](ralph.webp)
 
-Ralph is an autonomous AI agent loop that runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code) repeatedly until all PRD items are complete. Each iteration is a fresh Claude Code instance with clean context. Memory persists via git history, `progress.txt`, and `prd.json`.
+Ralph is an autonomous AI agent loop that runs AI coding agents ([Claude Code](https://docs.anthropic.com/en/docs/claude-code) or [OpenCode](https://opencode.ai)) repeatedly until all PRD items are complete. Each iteration is a fresh agent instance with clean context. Memory persists via git history, `progress.txt`, and `prd.json`.
 
 **Supports both feature development AND bug investigations.**
+
+**Supports multiple AI agents with automatic failover.**
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
 ## Prerequisites
 
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (or [OpenCode](https://opencode.ai) for multi-provider support)
 - `jq` installed (`brew install jq` on macOS)
 - A git repository for your project
 - (Optional) `tmux` for interactive mode (`sudo apt install tmux` or `brew install tmux`)
+- (Optional) Docker for remote/containerized execution
 
 ### Optional: Playwright MCP (for browser testing)
 
@@ -192,7 +195,7 @@ Ralph TUI provides:
 **Using bash script:**
 
 ```bash
-./scripts/ralph/ralph.sh [task-directory] [-i iterations] [-I|--interactive] [--rotate-at N]
+./scripts/ralph/ralph.sh [task-directory] [-i iterations] [-I|--interactive] [--agent <claude|opencode>] [--rotate-at N]
 ```
 
 **Options:**
@@ -200,6 +203,8 @@ Ralph TUI provides:
 |------|-------------|
 | `-i N` | Set max iterations (default: 10) |
 | `-I` or `--interactive` | Enable interactive mode (requires tmux) |
+| `--agent <claude\|opencode>` | Select AI agent (default: claude) |
+| `--failover-threshold N` | Failures before switching agents (default: 3) |
 | `--rotate-at N` | Set progress.txt rotation threshold in lines (default: 500) |
 | `-y` | Skip all confirmation prompts |
 
@@ -213,6 +218,9 @@ Examples:
 
 # Run with explicit iteration count (no prompts)
 ./ralph.sh tasks/fix-auth-timeout -i 20
+
+# Use OpenCode agent instead of Claude
+./ralph.sh tasks/my-task --agent opencode
 
 # Interactive mode - allows sending messages mid-iteration
 ./ralph.sh tasks/fix-auth-timeout -I
@@ -267,11 +275,89 @@ This keeps the active `tasks/` directory clean while preserving completed work.
 
 | File | Purpose |
 |------|---------|
-| `ralph.sh` | The bash loop that spawns fresh Claude Code instances |
-| `prompt.md` | Instructions given to each Claude Code instance |
+| `ralph.sh` | The bash loop that spawns fresh agent instances |
+| `prompt.md` | Instructions given to each agent instance |
 | `skills/prd/` | Skill for generating PRDs (features and bugs) |
 | `skills/ralph/` | Skill for converting PRDs to JSON |
 | `prd.json.example` | Example PRD format |
+| `agents/` | Agent wrapper scripts (claude.sh, opencode.sh) |
+| `Dockerfile` | Container image for remote execution |
+
+## Multi-Agent Support
+
+Ralph supports multiple AI agents with automatic failover between them.
+
+### Available Agents
+
+| Agent | Description | Model Selection |
+|-------|-------------|-----------------|
+| `claude` | Claude Code CLI (Anthropic) | No (uses subscription) |
+| `opencode` | Multi-provider CLI | Yes (`--model provider/model`) |
+
+### Agent Selection
+
+Agent selection follows this precedence (highest to lowest):
+
+1. **Per-story override** - `agent` field in a specific user story
+2. **CLI flag** - `--agent <claude|opencode>`
+3. **Environment variable** - `RALPH_AGENT=<claude|opencode>`
+4. **PRD configuration** - `agent` field in prd.json
+5. **Default** - `claude`
+
+**Examples:**
+
+```bash
+# CLI flag
+./ralph.sh tasks/my-task --agent opencode
+
+# Environment variable
+RALPH_AGENT=opencode ./ralph.sh tasks/my-task
+```
+
+**PRD configuration:**
+```json
+{
+  "agent": "opencode",
+  "userStories": [...]
+}
+```
+
+**Per-story override (for cost optimization):**
+```json
+{
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Complex architecture work",
+      "agent": "opencode",
+      "model": "anthropic/claude-sonnet-4"
+    },
+    {
+      "id": "US-002",
+      "title": "Simple documentation",
+      "agent": "opencode",
+      "model": "anthropic/claude-haiku-4"
+    }
+  ]
+}
+```
+
+### Automatic Failover
+
+Ralph automatically switches agents after consecutive failures:
+
+- Default threshold: 3 consecutive failures
+- Detects: exit codes, empty output, rate limits, API errors
+- If both agents fail, Ralph stops with a detailed error
+
+Configure the threshold:
+```bash
+./ralph.sh tasks/my-task --failover-threshold 5
+# or
+RALPH_FAILOVER_THRESHOLD=5 ./ralph.sh tasks/my-task
+```
+
+See [docs/opencode-integration.md](docs/opencode-integration.md) for detailed OpenCode configuration.
 
 ## PRD Types
 
@@ -299,7 +385,7 @@ The `notes` field in each story passes context between iterations.
 
 ### Each Iteration = Fresh Context
 
-Each iteration spawns a **new Claude Code instance** with clean context. The only memory between iterations is:
+Each iteration spawns a **new agent instance** with clean context. The only memory between iterations is:
 - Git history (commits from previous iterations)
 - `progress.txt` (learnings and context)
 - `prd.json` (which stories are done, plus notes)
@@ -471,7 +557,70 @@ cp ~/.config/ralph/prompt.md ralph/prompt.md
 # Edit ralph/prompt.md with project-specific instructions
 ```
 
+## Docker / Remote Execution
+
+Ralph can run in a Docker container for remote, isolated execution.
+
+### Quick Start
+
+```bash
+# 1. Copy environment template and set your API key
+cp docker/.env.example .env
+# Edit .env and set ANTHROPIC_API_KEY
+
+# 2. Build and run
+docker-compose up --build -d
+
+# 3. Execute Ralph
+docker-compose exec ralph ralph.sh tasks/my-task
+```
+
+### Running with Different Agents
+
+```bash
+# Use OpenCode agent in Docker
+docker-compose exec ralph ralph.sh tasks/my-task --agent opencode
+
+# Or set in .env
+# RALPH_AGENT=opencode
+```
+
+### Remote Session Attachment
+
+**For Claude** (via SSH + tmux):
+```bash
+# Build with SSH enabled
+docker build --build-arg ENABLE_SSH=true -t ralph-ssh .
+
+# SSH in and attach to tmux session
+ssh -p 2222 ralph@localhost
+ralph-attach.sh
+```
+
+**For OpenCode** (native server mode):
+```bash
+# Enable server mode in .env
+# RALPH_OPENCODE_SERVE=true
+
+# Attach from remote client
+opencode attach http://docker-host:4096
+```
+
+### Status API
+
+Ralph includes an HTTP status API for monitoring:
+
+```bash
+# Check task progress
+curl http://localhost:8080/status
+```
+
+Returns JSON with task info, story progress, and current status.
+
+See [docs/remote-execution.md](docs/remote-execution.md) for complete Docker documentation.
+
 ## References
 
 - [Geoffrey Huntley's Ralph article](https://ghuntley.com/ralph/)
 - [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-code)
+- [OpenCode documentation](https://opencode.ai/docs/)
