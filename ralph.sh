@@ -345,6 +345,13 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     | .id // empty
   ' "$PRD_FILE" 2>/dev/null)
   
+  NEXT_STORY_MODEL=$(jq -r '
+    [.userStories[] | select(.passes == false)] 
+    | sort_by(.priority) 
+    | first 
+    | .model // empty
+  ' "$PRD_FILE" 2>/dev/null)
+  
   # Use story-level agent if set, otherwise fall back to task-level AGENT
   ITERATION_AGENT="$AGENT"
   ITERATION_AGENT_SOURCE="$AGENT_SOURCE"
@@ -358,6 +365,12 @@ for i in $(seq 1 $MAX_ITERATIONS); do
     fi
   fi
   
+  # Use story-level model if set (e.g., "anthropic/claude-haiku-4")
+  ITERATION_MODEL=""
+  if [ -n "$NEXT_STORY_MODEL" ]; then
+    ITERATION_MODEL="$NEXT_STORY_MODEL"
+  fi
+  
   # Update agent script path for this iteration
   ITERATION_AGENT_SCRIPT="$SCRIPT_DIR/agents/$ITERATION_AGENT.sh"
 
@@ -366,6 +379,9 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   echo "  Iteration $i of $MAX_ITERATIONS ($COMPLETED_STORIES/$TOTAL_STORIES complete)"
   if [ "$ITERATION_AGENT" != "$AGENT" ]; then
     echo "  Agent: $ITERATION_AGENT (story override for $NEXT_STORY_ID)"
+  fi
+  if [ -n "$ITERATION_MODEL" ]; then
+    echo "  Model: $ITERATION_MODEL (story override for $NEXT_STORY_ID)"
   fi
   echo "═══════════════════════════════════════════════════════════════"
 
@@ -390,6 +406,7 @@ $(cat "$PROMPT_FILE")
   SKIP_PERMISSIONS=true \
   OUTPUT_FORMAT=stream-json \
   RALPH_VERBOSE=true \
+  MODEL="$ITERATION_MODEL" \
   echo "$PROMPT" | "$ITERATION_AGENT_SCRIPT" > "$OUTPUT_FILE" 2>&1 &
   AGENT_PID=$!
 

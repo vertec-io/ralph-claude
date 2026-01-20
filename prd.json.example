@@ -19,7 +19,8 @@
       "priority": 1,
       "passes": false,
       "notes": "",
-      "agent": "claude"
+      "agent": "claude",
+      "model": "anthropic/claude-sonnet-4"
     },
     {
       "id": "US-002",
@@ -34,7 +35,8 @@
       "priority": 2,
       "passes": false,
       "notes": "",
-      "agent": "opencode"
+      "agent": "opencode",
+      "model": "anthropic/claude-haiku-4"
     },
     {
       "id": "US-003",

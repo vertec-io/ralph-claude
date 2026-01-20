@@ -5,12 +5,20 @@
 # Usage: echo "prompt" | ./claude.sh [options]
 #
 # Environment variables:
-#   MODEL              - Model override (not currently supported by Claude CLI)
+#   MODEL              - Model override (NOTE: Claude CLI does not support model selection;
+#                        this env var is accepted for interface compatibility with other agents
+#                        but a warning will be logged if set. Use OpenCode for model control.)
 #   RALPH_VERBOSE      - Set to "true" for verbose output
 #
 # Supported options (via environment):
 #   SKIP_PERMISSIONS   - Set to "true" to use --dangerously-skip-permissions
 #   OUTPUT_FORMAT      - Output format: "stream-json" (default) or "text"
+#
+# Model Selection Limitation:
+#   Unlike OpenCode, the Claude CLI does not provide a --model flag.
+#   Model selection for Claude Code is controlled via the Claude subscription/account.
+#   If you need to use a specific model (e.g., claude-haiku for cost optimization),
+#   consider using the OpenCode agent with `agent: "opencode"` and setting the model field.
 
 set -e
 
