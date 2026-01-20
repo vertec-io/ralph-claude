@@ -16,7 +16,15 @@ SKIP_PROMPTS=false
 ROTATE_THRESHOLD=300
 
 # Agent configuration (default to claude for backwards compatibility)
+# CLI --agent flag takes precedence over AGENT env var
 AGENT="${AGENT:-claude}"
+AGENT_SOURCE="default"
+if [ -n "$AGENT" ] && [ "$AGENT" != "claude" ]; then
+  AGENT_SOURCE="env"
+fi
+
+# Valid agents list
+VALID_AGENTS="claude opencode"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -32,23 +40,32 @@ while [[ $# -gt 0 ]]; do
       ROTATE_THRESHOLD="$2"
       shift 2
       ;;
+    --agent)
+      AGENT="$2"
+      AGENT_SOURCE="cli"
+      shift 2
+      ;;
     -h|--help)
       echo "Ralph Wiggum - Autonomous Agent Loop"
       echo ""
-      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--rotate-at N]"
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
       echo ""
       echo "Options:"
       echo "  -i, --iterations N   Max iterations (default: 10)"
+      echo "  --agent <agent>      Select agent: claude, opencode (default: claude)"
       echo "  -y, --yes            Skip confirmation prompts"
       echo "  --rotate-at N        Rotate progress file at N lines (default: 300)"
       echo "  -h, --help           Show this help message"
+      echo ""
+      echo "Environment variables:"
+      echo "  AGENT                Set default agent (overridden by --agent flag)"
       echo ""
       echo "For interactive mode with tmux, use: ./ralph-i.sh"
       exit 0
       ;;
     -*)
       echo "Unknown option: $1"
-      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--rotate-at N]"
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
       echo ""
       echo "For interactive mode, use: ./ralph-i.sh"
       exit 1
@@ -59,6 +76,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# Validate agent name
+if ! echo "$VALID_AGENTS" | grep -qw "$AGENT"; then
+  echo "Error: Invalid agent '$AGENT'"
+  echo "Valid agents: $VALID_AGENTS"
+  exit 1
+fi
 
 # Function to find active tasks (directories with prd.json, excluding archived)
 find_active_tasks() {
