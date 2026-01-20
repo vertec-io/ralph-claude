@@ -23,6 +23,9 @@ services:
         # USER_GID: ${USER_GID:-1001}
         USER_UID: 1001
         USER_GID: 1001
+        # Enable SSH server for remote Claude session attachment
+        # Build with: ENABLE_SSH=true docker-compose build
+        ENABLE_SSH: ${ENABLE_SSH:-false}
 
     container_name: ralph-agent
 
@@ -86,6 +89,22 @@ services:
       
       # Status API port (future: for status endpoint)
       - RALPH_STATUS_PORT=${RALPH_STATUS_PORT:-8080}
+      
+      # -----------------------------------------------------------------------
+      # SSH Server Configuration (when built with ENABLE_SSH=true)
+      # -----------------------------------------------------------------------
+      # SSH server allows remote Claude session attachment
+      # Build with: ENABLE_SSH=true docker-compose build
+      
+      # Required: Public SSH key(s) for authorized access
+      # Multiple keys can be separated by newlines
+      - RALPH_SSH_AUTHORIZED_KEYS=${RALPH_SSH_AUTHORIZED_KEYS:-}
+      
+      # SSH port (default: 22)
+      - RALPH_SSH_PORT=${RALPH_SSH_PORT:-22}
+      
+      # Passed from build arg for runtime checks
+      - ENABLE_SSH=${ENABLE_SSH:-false}
 
     # =========================================================================
     # Volumes
@@ -110,6 +129,11 @@ services:
       
       # Status API port (for health checks and monitoring)
       - "${RALPH_STATUS_PORT:-8080}:8080"
+      
+      # SSH port (when ENABLE_SSH=true)
+      # Connect via: ssh -p <port> ralph@localhost
+      # Then attach: tmux attach-session -t ralph
+      - "${RALPH_SSH_PORT:-2222}:22"
 
     # =========================================================================
     # Working Directory

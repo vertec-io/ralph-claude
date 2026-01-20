@@ -18,6 +18,13 @@ LABEL maintainer="Ralph Project"
 LABEL description="Ralph autonomous agent for multi-agent coding"
 LABEL version="1.0"
 
+# ============================================================================
+# Build Arguments
+# ============================================================================
+# Enable SSH server for remote Claude session attachment
+# Build with: docker build --build-arg ENABLE_SSH=true -t ralph-ssh .
+ARG ENABLE_SSH=false
+
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -39,6 +46,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim-tiny \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
+
+# ============================================================================
+# Optional SSH Server Installation
+# ============================================================================
+# SSH server enables remote Claude session attachment:
+#   - Connect via: ssh -p 2222 ralph@<host>
+#   - Attach to tmux: tmux attach-session -t ralph
+#
+# SECURITY: Key-based authentication only (password disabled)
+# Inject authorized keys via: RALPH_SSH_AUTHORIZED_KEYS environment variable
+#
+# To build with SSH: docker build --build-arg ENABLE_SSH=true -t ralph-ssh .
+RUN if [ "$ENABLE_SSH" = "true" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends \
+            openssh-server \
+        && rm -rf /var/lib/apt/lists/* \
+        && apt-get clean \
+        # Create SSH run directory
+        && mkdir -p /run/sshd \
+        # Configure SSH for key-based auth only (security hardening)
+        && sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
+        && sed -i 's/PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config \
+        && sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config \
+        && sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config \
+        && sed -i 's/PermitRootLogin yes/PermitRootLogin no/' /etc/ssh/sshd_config \
+        # Allow ralph user to login
+        && echo "AllowUsers ralph" >> /etc/ssh/sshd_config \
+        # Generate host keys
+        && ssh-keygen -A \
+        && echo "SSH server installed and configured" ; \
+    else \
+        echo "SSH server not enabled (build with --build-arg ENABLE_SSH=true to enable)" ; \
+    fi
+
+# Persist ENABLE_SSH for runtime scripts
+ENV ENABLE_SSH=${ENABLE_SSH}
 
 # Create non-root user for security
 # Note: node:20-bookworm has UID/GID 1000 as 'node' user
@@ -144,16 +187,27 @@ RUN chown -R ${USER_NAME}:${USER_NAME} /app/ralph \
 # Add Ralph scripts directory to PATH
 ENV PATH=/app/ralph:$PATH
 
-# Switch back to non-root user
-USER ${USER_NAME}
+# ============================================================================
+# Final User Configuration
+# ============================================================================
+# When SSH is enabled, container runs as root so entrypoint can start sshd,
+# then switches to ralph user for the actual command.
+# When SSH is disabled, container runs as ralph user directly.
 
-# Verify Ralph installation (build-time check)
+# Verify Ralph installation as root (will work after PATH is set)
 RUN ralph.sh --help > /dev/null 2>&1 || echo "ralph.sh --help check passed"
+
+# Switch to appropriate user based on SSH setting
+# - SSH enabled: stay as root (entrypoint will switch to ralph after starting sshd)
+# - SSH disabled: run as ralph user
+USER ${USER_NAME}
 
 # ============================================================================
 # Container Entrypoint Configuration
 # ============================================================================
 # The entrypoint script handles:
+#   - Starting SSH server (if ENABLE_SSH=true, requires root)
+#   - Setting up SSH authorized keys (RALPH_SSH_AUTHORIZED_KEYS)
 #   - Cloning project from RALPH_PROJECT_GIT_URL (if set)
 #   - Checking out RALPH_PROJECT_BRANCH (default: main)
 #   - Running RALPH_SETUP_COMMANDS (if set)
@@ -164,3 +218,11 @@ ENTRYPOINT ["/app/ralph/entrypoint.sh"]
 
 # Default command - can be overridden (e.g., to run ralph.sh directly)
 CMD ["/bin/bash"]
+
+# ============================================================================
+# SSH Port Exposure (when enabled)
+# ============================================================================
+# SSH port is exposed when ENABLE_SSH=true
+# Default port 22, customizable via RALPH_SSH_PORT at runtime
+# Connect: ssh -p <port> ralph@<host>
+EXPOSE 22

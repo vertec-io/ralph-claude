@@ -7,9 +7,18 @@
 #   RALPH_PROJECT_BRANCH     - Branch to checkout (default: main)
 #   RALPH_SETUP_COMMANDS     - Commands to run after clone (e.g., "npm install")
 #   RALPH_PROJECT_SSH_KEY    - SSH private key content for private repos (optional)
+#   RALPH_SSH_AUTHORIZED_KEYS - SSH public keys for remote access (for SSH server)
+#   RALPH_SSH_PORT           - SSH server port (default: 22)
+#   ENABLE_SSH               - Set by Dockerfile build arg (true/false)
 #
 # If RALPH_PROJECT_GIT_URL is not set, falls through to CMD with existing /app/project contents.
 # This allows mounting a local project directory as a volume instead of cloning.
+#
+# SSH Server:
+#   When ENABLE_SSH=true (set at build time), the entrypoint:
+#   1. Starts the SSH server on RALPH_SSH_PORT (default 22)
+#   2. Sets up authorized_keys from RALPH_SSH_AUTHORIZED_KEYS
+#   3. Runs CMD as the ralph user (switches from root)
 
 set -e
 
@@ -50,6 +59,69 @@ EOF
         chmod 600 ~/.ssh/config
         
         log "SSH key configured"
+    fi
+}
+
+# ============================================================================
+# SSH Server Setup (for remote Claude session attachment)
+# ============================================================================
+# Sets up authorized_keys for SSH access when SSH server is enabled
+# 
+# Environment:
+#   RALPH_SSH_AUTHORIZED_KEYS - Public SSH key(s) for authorized access
+#                               Multiple keys can be separated by newlines
+#   ENABLE_SSH                - Set by Dockerfile build arg
+#   RALPH_SSH_PORT            - SSH port (default: 22)
+setup_ssh_server() {
+    # Only set up if SSH is enabled in the container
+    if [[ "${ENABLE_SSH:-false}" != "true" ]]; then
+        return 0
+    fi
+    
+    log "SSH server is enabled"
+    
+    # Determine the ralph user home directory
+    local ralph_home="/home/ralph"
+    
+    # Create .ssh directory with correct permissions for ralph user
+    mkdir -p "$ralph_home/.ssh"
+    chmod 700 "$ralph_home/.ssh"
+    
+    if [[ -n "${RALPH_SSH_AUTHORIZED_KEYS:-}" ]]; then
+        log "Configuring SSH authorized keys..."
+        
+        # Write authorized keys (handles multi-line keys)
+        echo "$RALPH_SSH_AUTHORIZED_KEYS" > "$ralph_home/.ssh/authorized_keys"
+        chmod 600 "$ralph_home/.ssh/authorized_keys"
+        
+        # Ensure correct ownership (important when running as root)
+        chown -R ralph:ralph "$ralph_home/.ssh" 2>/dev/null || true
+        
+        # Count keys added
+        local key_count
+        key_count=$(grep -c '^ssh-' "$ralph_home/.ssh/authorized_keys" 2>/dev/null || echo "0")
+        log "SSH authorized keys configured ($key_count key(s) added)"
+    else
+        log "WARNING: No RALPH_SSH_AUTHORIZED_KEYS set - SSH login will not be possible"
+        log "Set RALPH_SSH_AUTHORIZED_KEYS to your public SSH key to enable remote access"
+    fi
+    
+    # Start SSH server in background
+    # Note: sshd must run as root, container entrypoint runs as root before switching to ralph
+    if [[ $EUID -eq 0 ]]; then
+        log "Starting SSH server on port ${RALPH_SSH_PORT:-22}..."
+        
+        # Start sshd in daemon mode
+        /usr/sbin/sshd -p "${RALPH_SSH_PORT:-22}" || {
+            log_error "Failed to start SSH server"
+            return 1
+        }
+        
+        log "SSH server started - connect via: ssh -p ${RALPH_SSH_PORT:-22} ralph@<host>"
+        log "Attach to Ralph session: tmux attach-session -t ralph"
+    else
+        log "WARNING: SSH server requires root to start"
+        log "Container must be started as root (remove USER directive or use --user root)"
     fi
 }
 
@@ -169,6 +241,9 @@ main() {
     # Setup SSH key if provided (for private repos)
     setup_ssh_key
     
+    # Setup SSH server for remote Claude session attachment
+    setup_ssh_server
+    
     # Clone project if URL is provided
     clone_project
     
@@ -184,8 +259,15 @@ main() {
     log "Entrypoint complete, executing command: $*"
     log "----------------------------------------"
     
-    # Execute the CMD (default: /bin/bash from Dockerfile)
-    exec "$@"
+    # If running as root (for SSH server support), switch to ralph user for CMD
+    # This ensures the main process runs with appropriate permissions
+    if [[ $EUID -eq 0 ]] && [[ "${ENABLE_SSH:-false}" == "true" ]]; then
+        log "Switching to ralph user for command execution..."
+        exec su -s /bin/bash ralph -c "cd $PROJECT_DIR && exec $*"
+    else
+        # Execute the CMD directly (already running as ralph user)
+        exec "$@"
+    fi
 }
 
 # Run main with all arguments
