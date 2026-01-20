@@ -1,17 +1,34 @@
 #!/bin/bash
 # Ralph Wiggum Interactive Mode - TUI with tmux
-# Usage: ./ralph-i.sh [task-directory] [-i iterations] [--rotate-at N]
-# Example: ./ralph-i.sh tasks/fix-auth-timeout -i 20
+# Usage: ./ralph-i.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]
+# Example: ./ralph-i.sh tasks/fix-auth-timeout -i 20 --agent opencode
+#
+# For non-interactive mode, use: ./ralph.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Source common utilities for prompt preprocessing
+source "$SCRIPT_DIR/agents/common.sh"
 
 # Parse command line arguments
 TASK_DIR=""
 MAX_ITERATIONS=""
 SKIP_PROMPTS=false
 ROTATE_THRESHOLD=300
+
+# Agent configuration (default to claude for backwards compatibility)
+# Precedence: CLI --agent flag > RALPH_AGENT env var > prd.json agent > default (claude)
+AGENT="claude"
+AGENT_SOURCE="default"
+if [ -n "$RALPH_AGENT" ]; then
+  AGENT="$RALPH_AGENT"
+  AGENT_SOURCE="env"
+fi
+
+# Valid agents list
+VALID_AGENTS="claude opencode"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -27,26 +44,37 @@ while [[ $# -gt 0 ]]; do
       ROTATE_THRESHOLD="$2"
       shift 2
       ;;
+    --agent)
+      AGENT="$2"
+      AGENT_SOURCE="cli"
+      shift 2
+      ;;
     -h|--help)
       echo "Ralph Wiggum Interactive Mode - TUI with tmux"
       echo ""
-      echo "Usage: ./ralph-i.sh [task-directory] [-i iterations] [--rotate-at N]"
+      echo "Usage: ./ralph-i.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
       echo ""
       echo "Options:"
       echo "  -i, --iterations N   Max iterations (default: 10)"
+      echo "  --agent <agent>      Select agent: claude, opencode (default: claude)"
       echo "  -y, --yes            Skip confirmation prompts"
       echo "  --rotate-at N        Rotate progress file at N lines (default: 300)"
       echo "  -h, --help           Show this help message"
       echo ""
+      echo "Environment variables:"
+      echo "  RALPH_AGENT          Set default agent (overridden by --agent flag)"
+      echo ""
       echo "Interactive Controls:"
-      echo "  i: Send message to Claude"
+      echo "  i: Send message to agent"
       echo "  f: Force checkpoint (save progress)"
       echo "  q: Quit iteration"
+      echo ""
+      echo "For non-interactive mode, use: ./ralph.sh"
       exit 0
       ;;
     -*)
       echo "Unknown option: $1"
-      echo "Usage: ./ralph-i.sh [task-directory] [-i iterations] [--rotate-at N]"
+      echo "Usage: ./ralph-i.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
       exit 1
       ;;
     *)
@@ -169,6 +197,37 @@ if [ ! -f "$PRD_FILE" ]; then
   exit 1
 fi
 
+# Read agent from prd.json if not already set by CLI or env var
+# Precedence: CLI > env var > prd.json > default
+if [ "$AGENT_SOURCE" = "default" ]; then
+  PRD_AGENT=$(jq -r '.agent // empty' "$PRD_FILE" 2>/dev/null)
+  if [ -n "$PRD_AGENT" ]; then
+    AGENT="$PRD_AGENT"
+    AGENT_SOURCE="prd"
+  fi
+fi
+
+# Validate agent name
+if ! echo "$VALID_AGENTS" | grep -qw "$AGENT"; then
+  echo "Error: Invalid agent '$AGENT'"
+  echo "Valid agents: $VALID_AGENTS"
+  exit 1
+fi
+
+# Validate agent wrapper script exists
+AGENT_SCRIPT="$SCRIPT_DIR/agents/$AGENT.sh"
+if [ ! -f "$AGENT_SCRIPT" ]; then
+  echo "Error: Agent script not found: $AGENT_SCRIPT"
+  echo "Valid agents: $(ls "$SCRIPT_DIR/agents/"*.sh 2>/dev/null | xargs -n1 basename | sed 's/\.sh$//' | grep -v '^common$' | tr '\n' ' ')"
+  exit 1
+fi
+
+if [ ! -x "$AGENT_SCRIPT" ]; then
+  echo "Error: Agent script is not executable: $AGENT_SCRIPT"
+  echo "Run: chmod +x $AGENT_SCRIPT"
+  exit 1
+fi
+
 # Initialize progress file if it doesn't exist
 if [ ! -f "$PROGRESS_FILE" ]; then
   EFFORT_NAME=$(basename "$TASK_DIR")
@@ -269,6 +328,7 @@ echo "╚═══════════════════════�
 echo ""
 echo "  Task:       $TASK_DIR"
 echo "  Branch:     $BRANCH_NAME"
+echo "  Agent:      $AGENT ($AGENT_SOURCE)"
 echo "  Progress:   $COMPLETED_STORIES / $TOTAL_STORIES stories complete"
 echo "  Max iters:  $MAX_ITERATIONS"
 echo "  Mode:       Interactive (tmux)"
@@ -293,13 +353,17 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   echo "═══════════════════════════════════════════════════════════════"
 
   # Build the prompt with task directory context
+  # Preprocess to filter agent-specific sections for the current agent
+  RAW_PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+  PROCESSED_PROMPT_CONTENT="$(preprocess_prompt "$RAW_PROMPT_CONTENT" "$AGENT")"
+  
   PROMPT="# Ralph Agent Instructions
 
 Task Directory: $TASK_DIR
 PRD File: $TASK_DIR/prd.json
 Progress File: $TASK_DIR/progress.txt
 
-$(cat "$PROMPT_FILE")
+$PROCESSED_PROMPT_CONTENT
 "
 
   # Create temp files for output
@@ -314,9 +378,18 @@ $(cat "$PROMPT_FILE")
   PROMPT_FILE_TMP=$(mktemp)
   echo "$PROMPT" > "$PROMPT_FILE_TMP"
 
-  # Start Claude in a tmux session (use script for unbuffered output)
-  tmux new-session -d -s "$TMUX_SESSION" \
-    "script -q -c 'cat \"$PROMPT_FILE_TMP\" | claude --dangerously-skip-permissions' '$OUTPUT_FILE'; echo 'RALPH_SESSION_DONE' >> '$OUTPUT_FILE'"
+  # Start agent in a tmux session (use script for unbuffered output)
+  # Claude agent uses --dangerously-skip-permissions, OpenCode uses opencode.json config
+  # Both agents accept prompt via stdin
+  if [ "$AGENT" = "claude" ]; then
+    tmux new-session -d -s "$TMUX_SESSION" \
+      "script -q -c 'cat \"$PROMPT_FILE_TMP\" | claude --dangerously-skip-permissions' '$OUTPUT_FILE'; echo 'RALPH_SESSION_DONE' >> '$OUTPUT_FILE'"
+  else
+    # For other agents (opencode), use the agent wrapper script
+    # Note: OpenCode's interactive TUI requires special handling
+    tmux new-session -d -s "$TMUX_SESSION" \
+      "script -q -c 'cat \"$PROMPT_FILE_TMP\" | \"$AGENT_SCRIPT\"' '$OUTPUT_FILE'; echo 'RALPH_SESSION_DONE' >> '$OUTPUT_FILE'"
+  fi
 
   # Show spinner while monitoring tmux session
   SPINNER="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -362,13 +435,13 @@ $(cat "$PROMPT_FILE")
     # Tools: Read, Bash, Edit, Write, Grep, Glob, Search, Task, WebFetch, etc.
     NEW_TOOL=$(echo "$PANE_CONTENT" | grep -E "^● [A-Za-z]+\(" | tail -1 | head -c 100)
 
-    # Get the last status/thinking line (various Unicode stars/dots used by Claude Code)
+    # Get the last status/thinking line (various Unicode stars/dots used by agent TUI)
     NEW_STATUS=$(echo "$PANE_CONTENT" | grep -E "^[✢·✻✽✶⋆] |^\* " | tail -1 | head -c 100)
 
-    # Get Claude's thinking/commentary lines (● followed by text, not a tool call)
+    # Get thinking/commentary lines (● followed by text, not a tool call)
     NEW_THINKING=$(echo "$PANE_CONTENT" | grep "^● " | grep -v "^● [A-Za-z]*(" | tail -1 | head -c 100)
 
-    # Get text that looks like Claude's natural language output (starts with letter)
+    # Get text that looks like natural language output (starts with letter)
     NEW_TEXT=$(echo "$PANE_CONTENT" | \
       grep -v "^$" | \
       grep -v "^● " | \
@@ -398,7 +471,7 @@ $(cat "$PROMPT_FILE")
     # Update status line (spinner indicators)
     if [ -n "$NEW_STATUS" ]; then
       if [ "$AWAITING_RESPONSE" = true ]; then
-        LAST_STATUS="← CLAUDE: $NEW_STATUS"
+        LAST_STATUS="← AGENT: $NEW_STATUS"
         AWAITING_RESPONSE=false
       else
         LAST_STATUS="$NEW_STATUS"
@@ -522,7 +595,7 @@ $(cat "$PROMPT_FILE")
     DISP_TOOL="${LAST_TOOL:0:$MAX_LEN}"
 
     printf "\033[5A\r"
-    printf "\033[K  ${SPINNER:0:1} Claude working... %02d:%02d\n" $MINS $SECS
+    printf "\033[K  ${SPINNER:0:1} Agent ($AGENT) working... %02d:%02d\n" $MINS $SECS
     # Model text line (Claude's actual output)
     if [ -n "$LAST_MODEL_TEXT" ]; then
       printf "\033[K  \033[97m%s\033[0m\n" "$DISP_MODEL"  # bright white for model text
@@ -534,7 +607,7 @@ $(cat "$PROMPT_FILE")
       printf "\033[K  \033[33m%s\033[0m\n" "$DISP_STATUS"  # yellow
     elif [[ "$LAST_STATUS" == "→ CHECKPOINT:"* ]]; then
       printf "\033[K  \033[35m%s\033[0m\n" "$DISP_STATUS"  # magenta
-    elif [[ "$LAST_STATUS" == "← CLAUDE:"* ]]; then
+    elif [[ "$LAST_STATUS" == "← AGENT:"* ]]; then
       printf "\033[K  \033[32m%s\033[0m\n" "$DISP_STATUS"  # green
     else
       printf "\033[K  \033[37m%s\033[0m\n" "$DISP_STATUS"  # white
@@ -567,7 +640,7 @@ $(cat "$PROMPT_FILE")
   MINS=$((ELAPSED / 60))
   SECS=$((ELAPSED % 60))
   printf "\033[5A"
-  printf "\r\033[K  ✓ Claude finished in %02d:%02d\n" $MINS $SECS
+  printf "\r\033[K  ✓ Agent ($AGENT) finished in %02d:%02d\n" $MINS $SECS
   printf "\033[K\n"
   printf "\033[K\n"
   printf "\033[K\n"
