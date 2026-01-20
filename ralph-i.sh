@@ -67,6 +67,7 @@ while [[ $# -gt 0 ]]; do
       echo "Interactive Controls:"
       echo "  i: Send message to agent"
       echo "  f: Force checkpoint (save progress)"
+      echo "  p: Pause (save state and stop, resume with 'r')"
       echo "  q: Quit iteration"
       echo ""
       echo "For non-interactive mode, use: ./ralph.sh"
@@ -336,7 +337,7 @@ echo ""
 echo "  $DESCRIPTION"
 echo ""
 echo "  ┌─────────────────────────────────────────────────────────────┐"
-echo "  │  i: Send message    f: Force checkpoint    q: Quit iter   │"
+echo "  │  i: Send message  f: Checkpoint  p: Pause  q: Quit iter   │"
 echo "  └─────────────────────────────────────────────────────────────┘"
 echo ""
 
@@ -410,6 +411,7 @@ $PROCESSED_PROMPT_CONTENT
 
   # Save terminal settings for raw input (only if we have a tty)
   HAS_TTY=false
+  USER_PAUSED=false
   if [ -t 0 ]; then
     OLD_STTY=$(stty -g)
     # Trap to restore terminal on exit/interrupt (includes temp file cleanup)
@@ -576,11 +578,46 @@ $PROCESSED_PROMPT_CONTENT
       LAST_STATUS="→ CHECKPOINT: Requesting progress save..."
       MSG_SENT_TIME=$(date +%s)
       AWAITING_RESPONSE=true
+    elif [ "$KEY" = "p" ] && [ "$HAS_TTY" = true ]; then  # 'p' to pause
+      USER_PAUSED=true
+      # Send checkpoint message to agent before stopping
+      PAUSE_MSG="IMPORTANT: Ralph is being paused. Please immediately save your current progress to progress.txt and update prd.json with any completed acceptance criteria. Note where you stopped so the next iteration can continue from here. Then stop."
+      tmux send-keys -t "$TMUX_SESSION" "$PAUSE_MSG" Enter
+      LAST_STATUS="→ PAUSE: Saving state..."
+      MSG_SENT_TIME=$(date +%s)
+      AWAITING_RESPONSE=true
+      # Don't break immediately - let agent respond to checkpoint message
+      # We'll break after a short delay to allow state save
     elif [ "$KEY" = "q" ] && [ "$HAS_TTY" = true ]; then  # 'q' to quit entirely
       USER_QUIT=true
       # Kill the tmux session gracefully
       tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
       LAST_STATUS="Quitting..."
+      break
+    fi
+
+    # Handle paused state - wait for agent to save, then stop gracefully
+    if [ "$USER_PAUSED" = true ]; then
+      # Wait up to 30 seconds for agent to process the checkpoint
+      PAUSE_WAIT_START=$(($(date +%s)))
+      PAUSE_TIMEOUT=30
+      while tmux has-session -t "$TMUX_SESSION" 2>/dev/null; do
+        PAUSE_ELAPSED=$(($(date +%s) - PAUSE_WAIT_START))
+        if [ $PAUSE_ELAPSED -ge $PAUSE_TIMEOUT ]; then
+          LAST_STATUS="Pause timeout - stopping..."
+          break
+        fi
+        # Check if agent shows completion indicator
+        PANE_CHECK=$(tmux capture-pane -t "$TMUX_SESSION" -p 2>/dev/null | tail -10)
+        if echo "$PANE_CHECK" | grep -qE "^(❯|>|\$)"; then
+          # Agent returned to prompt, ready to stop
+          LAST_STATUS="State saved - pausing..."
+          break
+        fi
+        sleep 0.5
+      done
+      # Kill the session after saving
+      tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
       break
     fi
 
@@ -618,7 +655,7 @@ $PROCESSED_PROMPT_CONTENT
     else
       printf "\033[K  \033[90m(no tool)\033[0m\n"
     fi
-    printf "\033[K  \033[90m[i: message | f: checkpoint | q: quit]\033[0m\n"
+    printf "\033[K  \033[90m[i: message | f: checkpoint | p: pause | q: quit]\033[0m\n"
 
     # Rotate spinner
     SPINNER="${SPINNER:1}${SPINNER:0:1}"
@@ -645,6 +682,40 @@ $PROCESSED_PROMPT_CONTENT
   printf "\033[K\n"
   printf "\033[K\n"
   printf "\033[K\n"
+
+  # Handle user pause - save state and exit gracefully
+  if [ "$USER_PAUSED" = true ]; then
+    rm -f "$OUTPUT_FILE" "$STATUS_FILE" "$PROMPT_FILE_TMP" 2>/dev/null
+    # Clear spinner lines
+    printf "\033[5A"
+    printf "\r\033[K  ⏸ Paused by user\n"
+    printf "\033[K\n"
+    printf "\033[K\n"
+    printf "\033[K\n"
+    printf "\033[K\n"
+    echo ""
+    
+    # Log pause event to progress.txt
+    CURRENT_STORY=$(jq -r '.userStories | sort_by(.priority) | map(select(.passes == false)) | first | .id // "unknown"' "$PRD_FILE" 2>/dev/null)
+    {
+      echo ""
+      echo "## $(date '+%Y-%m-%d %H:%M') - PAUSED"
+      echo "- Paused at iteration $i of $MAX_ITERATIONS"
+      echo "- Working on story: $CURRENT_STORY"
+      echo "- Agent requested to save state before stopping"
+      echo "- Resume with: ./ralph-i.sh $TASK_DIR"
+      echo "---"
+    } >> "$PROGRESS_FILE"
+    
+    COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
+    echo "  Progress: $COMPLETED_STORIES of $TOTAL_STORIES stories complete."
+    echo "  Paused state logged to progress.txt"
+    echo ""
+    echo "  Resume with: ./ralph-i.sh $TASK_DIR"
+    echo "  (or press 'r' in interactive mode after restarting)"
+    echo ""
+    exit 0
+  fi
 
   # Handle user quit - restore terminal, clean up, and exit
   if [ "$USER_QUIT" = true ]; then
