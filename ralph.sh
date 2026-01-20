@@ -329,9 +329,44 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   # Refresh progress count
   COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
 
+  # Determine agent for this iteration (story-level overrides task-level)
+  # Find the next story: highest priority where passes: false
+  NEXT_STORY_AGENT=$(jq -r '
+    [.userStories[] | select(.passes == false)] 
+    | sort_by(.priority) 
+    | first 
+    | .agent // empty
+  ' "$PRD_FILE" 2>/dev/null)
+  
+  NEXT_STORY_ID=$(jq -r '
+    [.userStories[] | select(.passes == false)] 
+    | sort_by(.priority) 
+    | first 
+    | .id // empty
+  ' "$PRD_FILE" 2>/dev/null)
+  
+  # Use story-level agent if set, otherwise fall back to task-level AGENT
+  ITERATION_AGENT="$AGENT"
+  ITERATION_AGENT_SOURCE="$AGENT_SOURCE"
+  if [ -n "$NEXT_STORY_AGENT" ]; then
+    # Validate story-level agent
+    if echo "$VALID_AGENTS" | grep -qw "$NEXT_STORY_AGENT"; then
+      ITERATION_AGENT="$NEXT_STORY_AGENT"
+      ITERATION_AGENT_SOURCE="story"
+    else
+      echo "Warning: Invalid agent '$NEXT_STORY_AGENT' in story $NEXT_STORY_ID, using $AGENT"
+    fi
+  fi
+  
+  # Update agent script path for this iteration
+  ITERATION_AGENT_SCRIPT="$SCRIPT_DIR/agents/$ITERATION_AGENT.sh"
+
   echo ""
   echo "═══════════════════════════════════════════════════════════════"
   echo "  Iteration $i of $MAX_ITERATIONS ($COMPLETED_STORIES/$TOTAL_STORIES complete)"
+  if [ "$ITERATION_AGENT" != "$AGENT" ]; then
+    echo "  Agent: $ITERATION_AGENT (story override for $NEXT_STORY_ID)"
+  fi
   echo "═══════════════════════════════════════════════════════════════"
 
   # Build the prompt with task directory context
@@ -355,7 +390,7 @@ $(cat "$PROMPT_FILE")
   SKIP_PERMISSIONS=true \
   OUTPUT_FORMAT=stream-json \
   RALPH_VERBOSE=true \
-  echo "$PROMPT" | "$AGENT_SCRIPT" > "$OUTPUT_FILE" 2>&1 &
+  echo "$PROMPT" | "$ITERATION_AGENT_SCRIPT" > "$OUTPUT_FILE" 2>&1 &
   AGENT_PID=$!
 
   # Show spinner while agent runs
@@ -393,7 +428,7 @@ $(cat "$PROMPT_FILE")
       fi
       # Move up 2 lines, clear and print spinner, then status
       printf "\033[2A"
-      printf "\r\033[K  ${SPINNER:$j:1} Agent ($AGENT) working... %02d:%02d\n" $MINS $SECS
+      printf "\r\033[K  ${SPINNER:$j:1} Agent ($ITERATION_AGENT) working... %02d:%02d\n" $MINS $SECS
       printf "\033[K  \033[90m%.70s\033[0m\n" "$LAST_STATUS"
       sleep 0.1
     done
@@ -407,7 +442,7 @@ $(cat "$PROMPT_FILE")
   MINS=$((ELAPSED / 60))
   SECS=$((ELAPSED % 60))
   printf "\033[2A"
-  printf "\r\033[K  ✓ Agent ($AGENT) finished in %02d:%02d\n" $MINS $SECS
+  printf "\r\033[K  ✓ Agent ($ITERATION_AGENT) finished in %02d:%02d\n" $MINS $SECS
   printf "\033[K\n"
 
   # Extract final result from JSON output
