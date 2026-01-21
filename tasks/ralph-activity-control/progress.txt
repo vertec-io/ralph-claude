@@ -4,6 +4,49 @@ Type: Feature
 Started: 2026-01-21
 ---
 
+## Codebase Patterns
+- ralph-tui has multiple render functions for different views (run, run_delay, run_attach_mode)
+- Each view renders its own header, so changes need to be applied in multiple places
+- AMBER_WARNING color constant is available from theme.rs for warning/attention indicators
+- portable_pty CommandBuilder.env() is used to set environment variables for spawned processes
+- YOLO_MODE is passed as an environment variable from ralph.sh to agent scripts
+- Activities in PtyState are stored newest-first via get_activities() which reverses the internal list
+- Activity scrolling: scroll_offset=0 means newest items, higher offset shows older items
+
+---
+
+## 2026-01-21 10:45 - US-003
+- Implemented scrollable activity history panel with full history (up to 1000 activities)
+- Added timestamp field to Activity struct with format_timestamp() method for relative timestamps
+- Added activity_scroll_offset, activity_user_scrolled, activity_panel_focused, last_activity_count fields to App struct
+- Updated activity panel rendering to show timestamps in [MM:SS] format relative to iteration start
+- Implemented 'a' keybinding to toggle activity panel focus for scrolling
+- j/k and arrow keys scroll activities when panel is focused, scroll stories when not focused
+- Auto-scroll behavior: scrolls to show newest activities unless user has manually scrolled up
+- Updated hints panel to show context-aware keybindings based on activity focus state
+- Files changed: ralph-tui/src/main.rs, tasks/ralph-activity-control/prd.json
+- **Learnings for future iterations:**
+  - Activities are returned newest-first from get_activities(), so scroll_offset=0 shows newest
+  - User scroll tracking (activity_user_scrolled) allows disabling auto-scroll when user explores history
+  - Focus state pattern: activity_panel_focused determines which panel receives j/k navigation
+  - Hints area dynamically changes content based on current focus state
+
+---
+
+## 2026-01-21 09:30 - US-002
+- Implemented --yolo flag in ralph-tui CLI argument parsing
+- Added yolo_mode field to CliConfig struct and App struct
+- Updated spawn_claude() to set YOLO_MODE=true and OPENCODE_PERMISSION env vars when yolo mode enabled
+- Added [YOLO] indicator in TUI header (appears in amber color next to "RALPH LOOP")
+- Updated all 3 header render locations: main run(), delay view, and attach mode view
+- Files changed: ralph-tui/src/main.rs, tasks/ralph-activity-control/prd.json
+- **Learnings for future iterations:**
+  - ralph-tui has multiple render functions for different views (run, run_delay, run_attach_mode)
+  - Each view renders its own header, so changes need to be applied in multiple places
+  - AMBER_WARNING color constant is available from theme.rs for warning/attention indicators
+  - portable_pty CommandBuilder.env() is used to set environment variables for spawned processes
+---
+
 ## 2026-01-21 08:15 - US-001
 - Implemented --yolo flag for permissive mode in ralph.sh
 - Added YOLO_MODE environment variable handling

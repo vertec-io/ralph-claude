@@ -219,6 +219,7 @@ enum RalphViewMode {
 struct Activity {
     action_type: String,
     target: String,
+    timestamp: Instant,
 }
 
 impl Activity {
@@ -226,6 +227,7 @@ impl Activity {
         Self {
             action_type: action_type.to_string(),
             target: target.to_string(),
+            timestamp: Instant::now(),
         }
     }
 
@@ -243,6 +245,15 @@ impl Activity {
             self.target.clone()
         };
         format!("{}{}", prefix, target)
+    }
+
+    /// Format timestamp relative to a reference time (e.g., iteration start)
+    fn format_timestamp(&self, reference: Instant) -> String {
+        let elapsed = self.timestamp.saturating_duration_since(reference);
+        let total_secs = elapsed.as_secs();
+        let mins = total_secs / 60;
+        let secs = total_secs % 60;
+        format!("{:02}:{:02}", mins, secs)
     }
 }
 
@@ -308,7 +319,7 @@ fn parse_activities(text: &str) -> Vec<Activity> {
 }
 
 /// Maximum number of activities to track
-const MAX_ACTIVITIES: usize = 10;
+const MAX_ACTIVITIES: usize = 1000;
 
 /// Shared state for PTY with VT100 parser
 struct PtyState {
@@ -499,6 +510,14 @@ struct App {
     tmux_session: Option<String>,
     // Yolo mode - permissive mode that skips all agent permission prompts
     yolo_mode: bool,
+    // Activity panel scroll offset (for scrolling through activity history)
+    activity_scroll_offset: usize,
+    // Whether user has manually scrolled the activity panel (disables auto-scroll)
+    activity_user_scrolled: bool,
+    // Whether the activity panel is focused for scrolling (true = focus on activities, false = focus on stories)
+    activity_panel_focused: bool,
+    // Previous activity count (to detect new activities for auto-scroll)
+    last_activity_count: usize,
 }
 
 impl App {
@@ -539,6 +558,10 @@ impl App {
             run_mode: config.run_mode,
             tmux_session: config.tmux_session.clone(),
             yolo_mode: config.yolo_mode,
+            activity_scroll_offset: 0,
+            activity_user_scrolled: false,
+            activity_panel_focused: false,
+            last_activity_count: 0,
         }
     }
 
@@ -2445,26 +2468,90 @@ fn run(
                 Vec::new()
             };
 
-            // Recent activities section
+            // Auto-scroll logic: scroll to bottom when new activities arrive (unless user manually scrolled)
+            if activities.len() > app.last_activity_count && !app.activity_user_scrolled {
+                // New activities arrived - scroll to show the most recent (bottom)
+                // Activities are returned newest-first from get_activities()
+                app.activity_scroll_offset = 0; // 0 means show newest first
+            }
+            app.last_activity_count = activities.len();
+
+            // Activity panel header - show focus indicator
+            let activity_header = if app.activity_panel_focused {
+                Line::from(vec![
+                    Span::styled(
+                        "▶ Activity History ",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("[{} items]", activities.len()),
+                        Style::default().fg(TEXT_MUTED),
+                    ),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        "Activity History ",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("[{} items]", activities.len()),
+                        Style::default().fg(TEXT_MUTED),
+                    ),
+                ])
+            };
+            status_lines.push(activity_header);
+
+            // Calculate how many activity lines we can show (reserve space for header)
+            let max_activity_lines = 8usize; // Show up to 8 activities
+            let max_activity_width = left_panel_area.width.saturating_sub(12) as usize; // Reserve space for timestamp
+
             if !activities.is_empty() {
-                status_lines.push(Line::from(vec![Span::styled(
-                    "Recent Activity:",
-                    Style::default()
-                        .fg(CYAN_PRIMARY)
-                        .add_modifier(Modifier::BOLD),
-                )]));
-                let max_activity_width = left_panel_area.width.saturating_sub(6) as usize;
-                for activity in activities.iter().take(5) {
+                // Activities are newest-first, so we skip based on scroll offset
+                let skip = app.activity_scroll_offset;
+                let total_activities = activities.len();
+
+                // Show scroll indicator if there are activities above (older)
+                if skip + max_activity_lines < total_activities {
                     status_lines.push(Line::from(vec![
-                        Span::styled("  • ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled("  ▲ ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(
+                            format!("{} older", total_activities - skip - max_activity_lines),
+                            Style::default().fg(TEXT_MUTED),
+                        ),
+                    ]));
+                }
+
+                // Render visible activities with timestamps
+                for activity in activities.iter().skip(skip).take(max_activity_lines) {
+                    let timestamp = activity.format_timestamp(app.iteration_start);
+                    status_lines.push(Line::from(vec![
+                        Span::styled(format!("[{}] ", timestamp), Style::default().fg(TEXT_MUTED)),
                         Span::styled(
                             activity.format(max_activity_width),
                             Style::default().fg(TEXT_PRIMARY),
                         ),
                     ]));
                 }
-                status_lines.push(Line::from(""));
+
+                // Show scroll indicator if there are newer activities
+                if skip > 0 {
+                    status_lines.push(Line::from(vec![
+                        Span::styled("  ▼ ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(format!("{} newer", skip), Style::default().fg(TEXT_MUTED)),
+                    ]));
+                }
+            } else {
+                status_lines.push(Line::from(vec![Span::styled(
+                    "  (no activities yet)",
+                    Style::default().fg(TEXT_MUTED),
+                )]));
             }
+            status_lines.push(Line::from(""));
 
             // PRD information
             if let Some(ref prd) = app.prd {
@@ -2576,51 +2663,85 @@ fn run(
             frame.render_widget(left_content, status_area);
 
             // Render keybinding hints at the bottom of left panel
-            let hints_lines = vec![
-                Line::from(Span::styled(
-                    "─── Navigation ───",
-                    Style::default().fg(BORDER_SUBTLE),
-                )),
-                Line::from(vec![
-                    Span::styled(
-                        "↑↓",
-                        Style::default()
-                            .fg(CYAN_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" or ", Style::default().fg(TEXT_MUTED)),
-                    Span::styled(
-                        "j/k",
-                        Style::default()
-                            .fg(CYAN_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" Select story", Style::default().fg(TEXT_MUTED)),
-                ]),
-                Line::from(vec![
-                    Span::styled(
-                        "s",
-                        Style::default()
-                            .fg(CYAN_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" Story  ", Style::default().fg(TEXT_MUTED)),
-                    Span::styled(
-                        "p",
-                        Style::default()
-                            .fg(CYAN_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" Progress  ", Style::default().fg(TEXT_MUTED)),
-                    Span::styled(
-                        "r",
-                        Style::default()
-                            .fg(CYAN_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" Reqs", Style::default().fg(TEXT_MUTED)),
-                ]),
-            ];
+            let hints_lines = if app.activity_panel_focused {
+                vec![
+                    Line::from(Span::styled(
+                        "─── Activity Panel ───",
+                        Style::default().fg(CYAN_PRIMARY),
+                    )),
+                    Line::from(vec![
+                        Span::styled(
+                            "↑↓",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" or ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(
+                            "j/k",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" Scroll activities", Style::default().fg(TEXT_MUTED)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            "a",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" Exit activity focus", Style::default().fg(TEXT_MUTED)),
+                    ]),
+                ]
+            } else {
+                vec![
+                    Line::from(Span::styled(
+                        "─── Navigation ───",
+                        Style::default().fg(BORDER_SUBTLE),
+                    )),
+                    Line::from(vec![
+                        Span::styled(
+                            "↑↓",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" or ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(
+                            "j/k",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" Select story", Style::default().fg(TEXT_MUTED)),
+                    ]),
+                    Line::from(vec![
+                        Span::styled(
+                            "a",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" Activity  ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(
+                            "s",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" Story  ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(
+                            "p",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" Progress", Style::default().fg(TEXT_MUTED)),
+                    ]),
+                ]
+            };
             let hints = Paragraph::new(hints_lines);
             frame.render_widget(hints, hints_area);
 
@@ -3299,9 +3420,22 @@ fn run(
                             KeyCode::Char('i') | KeyCode::Tab => {
                                 app.mode = Mode::Claude;
                             }
-                            // j/k and arrow keys for story navigation
+                            // 'a' key toggles activity panel focus
+                            KeyCode::Char('a') => {
+                                app.activity_panel_focused = !app.activity_panel_focused;
+                                if app.activity_panel_focused {
+                                    // When focusing activity panel, reset user scroll flag
+                                    // so auto-scroll resumes when unfocused
+                                    app.activity_user_scrolled = false;
+                                }
+                            }
+                            // j/k and arrow keys for navigation
                             KeyCode::Up | KeyCode::Char('k') => {
-                                if story_count > 0 {
+                                if app.activity_panel_focused {
+                                    // Scroll activity panel up (show older activities)
+                                    app.activity_scroll_offset += 1;
+                                    app.activity_user_scrolled = true;
+                                } else if story_count > 0 {
                                     if app.selected_story_index > 0 {
                                         app.selected_story_index -= 1;
                                     } else {
@@ -3313,7 +3447,16 @@ fn run(
                                 }
                             }
                             KeyCode::Down | KeyCode::Char('j') => {
-                                if story_count > 0 {
+                                if app.activity_panel_focused {
+                                    // Scroll activity panel down (show newer activities)
+                                    if app.activity_scroll_offset > 0 {
+                                        app.activity_scroll_offset -= 1;
+                                    }
+                                    // If we scroll to bottom, re-enable auto-scroll
+                                    if app.activity_scroll_offset == 0 {
+                                        app.activity_user_scrolled = false;
+                                    }
+                                } else if story_count > 0 {
                                     if app.selected_story_index < story_count - 1 {
                                         app.selected_story_index += 1;
                                     } else {
@@ -3324,9 +3467,13 @@ fn run(
                                     app.ralph_scroll_offset = 0;
                                 }
                             }
-                            // PageUp/PageDown for scrolling Ralph terminal content
+                            // PageUp/PageDown for scrolling Ralph terminal content or activity panel
                             KeyCode::PageUp | KeyCode::Char('K') => {
-                                if app.ralph_view_mode != RalphViewMode::Normal
+                                if app.activity_panel_focused {
+                                    // Page up in activity panel (show older activities)
+                                    app.activity_scroll_offset += 5;
+                                    app.activity_user_scrolled = true;
+                                } else if app.ralph_view_mode != RalphViewMode::Normal
                                     && app.ralph_scroll_offset > 0
                                 {
                                     app.ralph_scroll_offset =
@@ -3334,7 +3481,14 @@ fn run(
                                 }
                             }
                             KeyCode::PageDown | KeyCode::Char('J') => {
-                                if app.ralph_view_mode != RalphViewMode::Normal {
+                                if app.activity_panel_focused {
+                                    // Page down in activity panel (show newer activities)
+                                    app.activity_scroll_offset =
+                                        app.activity_scroll_offset.saturating_sub(5);
+                                    if app.activity_scroll_offset == 0 {
+                                        app.activity_user_scrolled = false;
+                                    }
+                                } else if app.ralph_view_mode != RalphViewMode::Normal {
                                     app.ralph_scroll_offset += 3;
                                 }
                             }

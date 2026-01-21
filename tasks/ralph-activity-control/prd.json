@@ -44,14 +44,14 @@
       "title": "Scrollable activity history panel",
       "description": "As a user, I want to see the complete activity history in ralph-tui, not just the last 10 actions, so I can debug issues and understand what the agent has done.",
       "acceptanceCriteria": [
-        { "description": "Activity panel shows full history (up to 1000 activities)", "passes": false },
-        { "description": "Can scroll through activities with j/k or arrow keys when panel is focused", "passes": false },
-        { "description": "Shows timestamp for each activity", "passes": false },
-        { "description": "Activity list auto-scrolls to bottom on new activities (unless user has scrolled up)", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Activity panel shows full history (up to 1000 activities)", "passes": true },
+        { "description": "Can scroll through activities with j/k or arrow keys when panel is focused", "passes": true },
+        { "description": "Shows timestamp for each activity", "passes": true },
+        { "description": "Activity list auto-scrolls to bottom on new activities (unless user has scrolled up)", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
