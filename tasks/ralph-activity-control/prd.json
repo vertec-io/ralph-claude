@@ -30,13 +30,13 @@
       "title": "Pass yolo mode through ralph-tui",
       "description": "As a user, I want ralph-tui to respect and propagate the yolo mode setting when spawning opencode.",
       "acceptanceCriteria": [
-        { "description": "ralph-tui accepts --yolo flag", "passes": false },
-        { "description": "When spawning opencode, set YOLO_MODE=true and OPENCODE_PERMISSION env vars if yolo mode enabled", "passes": false },
-        { "description": "Display indicator in TUI header when running in yolo mode (e.g., [YOLO])", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "ralph-tui accepts --yolo flag", "passes": true },
+        { "description": "When spawning opencode, set YOLO_MODE=true and OPENCODE_PERMISSION env vars if yolo mode enabled", "passes": true },
+        { "description": "Display indicator in TUI header when running in yolo mode (e.g., [YOLO])", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

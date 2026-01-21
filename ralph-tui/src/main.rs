@@ -139,7 +139,15 @@ struct Prd {
     #[serde(rename = "type")]
     prd_type: String,
     description: String,
+    /// Name of the agent being used (default: "claude-code")
+    /// In prd.json this is the "agent" field (e.g., "claude", "opencode")
+    #[serde(default = "default_agent")]
+    agent: String,
     user_stories: Vec<UserStory>,
+}
+
+fn default_agent() -> String {
+    "claude-code".to_string()
 }
 
 impl Prd {
@@ -489,6 +497,8 @@ struct App {
     run_mode: RunMode,
     // tmux session name (for attach mode)
     tmux_session: Option<String>,
+    // Yolo mode - permissive mode that skips all agent permission prompts
+    yolo_mode: bool,
 }
 
 impl App {
@@ -528,6 +538,7 @@ impl App {
             ralph_scroll_offset: 0,
             run_mode: config.run_mode,
             tmux_session: config.tmux_session.clone(),
+            yolo_mode: config.yolo_mode,
         }
     }
 
@@ -538,6 +549,14 @@ impl App {
         } else {
             0
         }
+    }
+
+    /// Get the agent name from PRD or default
+    fn agent_name(&self) -> &str {
+        self.prd
+            .as_ref()
+            .map(|p| p.agent.as_str())
+            .unwrap_or("claude-code")
     }
 
     /// Reload PRD from disk if flagged
@@ -649,11 +668,18 @@ fn render_stat_cards(
         .border_style(Style::default().fg(BORDER_SUBTLE))
         .style(Style::default().bg(BG_SECONDARY));
 
+    // Handle unknown iteration state (0/0 means unknown, e.g., in attach mode)
+    let iter_display = if current_iteration == 0 && max_iterations == 0 {
+        "?/?".to_string()
+    } else {
+        format!("{}/{}", current_iteration, max_iterations)
+    };
+
     let iter_content = vec![
         Line::from(vec![
             Span::styled("⏱ ", Style::default().fg(CYAN_PRIMARY)),
             Span::styled(
-                format!("{}/{}", current_iteration, max_iterations),
+                iter_display,
                 Style::default()
                     .fg(CYAN_PRIMARY)
                     .add_modifier(Modifier::BOLD),
@@ -1211,6 +1237,7 @@ fn print_usage() {
     eprintln!("  -i, --iterations <N>   Maximum iterations to run (default: 10)");
     eprintln!("  --rotate-at <N>        Rotate progress file at N lines (default: 300)");
     eprintln!("  -y, --yes              Skip confirmation prompts");
+    eprintln!("  --yolo                 Permissive mode: skip all agent permission prompts");
     eprintln!("  -h, --help             Show this help message");
     eprintln!("  -V, --version          Show version");
     eprintln!();
@@ -1218,6 +1245,7 @@ fn print_usage() {
     eprintln!("  ralph-tui                          # Interactive task selection");
     eprintln!("  ralph-tui tasks/my-feature         # Run specific task");
     eprintln!("  ralph-tui tasks/my-feature -i 5    # Run with 5 iterations");
+    eprintln!("  ralph-tui tasks/my-feature --yolo  # Run with permissive mode");
     eprintln!("  ralph-tui --attach                 # Attach to running session");
 }
 
@@ -1238,6 +1266,8 @@ struct CliConfig {
     skip_prompts: bool,
     run_mode: RunMode,
     tmux_session: Option<String>,
+    /// Yolo mode - permissive mode that skips all agent permission prompts
+    yolo_mode: bool,
 }
 
 /// Find active tasks (directories with prd.json, excluding archived)
@@ -1560,6 +1590,7 @@ fn parse_args() -> io::Result<CliConfig> {
     let mut rotate_threshold: u32 = 300;
     let mut skip_prompts = false;
     let mut run_mode = RunMode::Standalone;
+    let mut yolo_mode = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -1575,6 +1606,9 @@ fn parse_args() -> io::Result<CliConfig> {
             i += 1;
         } else if arg == "-y" || arg == "--yes" {
             skip_prompts = true;
+            i += 1;
+        } else if arg == "--yolo" {
+            yolo_mode = true;
             i += 1;
         } else if arg == "-i" || arg == "--iterations" {
             i += 1;
@@ -1676,6 +1710,7 @@ fn parse_args() -> io::Result<CliConfig> {
             skip_prompts: true,
             run_mode,
             tmux_session: Some(session_name),
+            yolo_mode,
         });
     }
 
@@ -1733,6 +1768,7 @@ fn parse_args() -> io::Result<CliConfig> {
         skip_prompts,
         run_mode,
         tmux_session: None,
+        yolo_mode,
     })
 }
 
@@ -1784,6 +1820,16 @@ fn spawn_claude(
     cmd.env("COLORTERM", "truecolor");
     // Disable cursor visibility queries that might cause issues
     cmd.env("NO_COLOR", "0");
+
+    // Set yolo mode env vars if enabled (permissive mode)
+    if app.yolo_mode {
+        cmd.env("YOLO_MODE", "true");
+        // OPENCODE_PERMISSION with permissive JSON to allow all operations
+        cmd.env(
+            "OPENCODE_PERMISSION",
+            r#"{"*": "allow", "external_directory": "allow", "doom_loop": "allow"}"#,
+        );
+    }
 
     cmd.arg("--dangerously-skip-permissions");
     // Prompt is passed as the last positional argument
@@ -2283,16 +2329,27 @@ fn run(
             let content_area_inner = inner_layout[2];
 
             // Header: Ralph branding
+            let mut header_spans = vec![
+                Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
+                Span::styled(
+                    "RALPH LOOP",
+                    Style::default()
+                        .fg(TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            // Add [YOLO] indicator if yolo mode is enabled
+            if app.yolo_mode {
+                header_spans.push(Span::raw(" "));
+                header_spans.push(Span::styled(
+                    "[YOLO]",
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             let header_lines = vec![
-                Line::from(vec![
-                    Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
-                    Span::styled(
-                        "RALPH LOOP",
-                        Style::default()
-                            .fg(TEXT_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
+                Line::from(header_spans),
                 Line::from(vec![Span::styled(
                     format!("Terminal v{}", VERSION),
                     Style::default().fg(CYAN_PRIMARY),
@@ -2759,13 +2816,14 @@ fn run(
 
             // === CLAUDE TERMINAL ===
             // Create bordered block for Claude terminal
+            let agent_title = format!(" >_ {} - ralph-loop ", app.agent_name());
             let claude_title = match app.mode {
                 Mode::Claude => Line::from(vec![
-                    Span::raw(" >_ claude-code - ralph-loop "),
+                    Span::raw(agent_title),
                     Span::styled("[ACTIVE]", Style::default().fg(CYAN_PRIMARY)),
                     Span::raw(" "),
                 ]),
-                Mode::Ralph => Line::from(" >_ claude-code - ralph-loop "),
+                Mode::Ralph => Line::from(format!(" >_ {} - ralph-loop ", app.agent_name())),
             };
             let claude_block = Block::default()
                 .title(claude_title)
@@ -3434,16 +3492,27 @@ fn run_delay(
             let content_area_inner = inner_layout[2];
 
             // Header: Ralph branding
+            let mut header_spans = vec![
+                Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
+                Span::styled(
+                    "RALPH LOOP",
+                    Style::default()
+                        .fg(TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            // Add [YOLO] indicator if yolo mode is enabled
+            if app.yolo_mode {
+                header_spans.push(Span::raw(" "));
+                header_spans.push(Span::styled(
+                    "[YOLO]",
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             let header_lines = vec![
-                Line::from(vec![
-                    Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
-                    Span::styled(
-                        "RALPH LOOP",
-                        Style::default()
-                            .fg(TEXT_PRIMARY)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
+                Line::from(header_spans),
                 Line::from(vec![Span::styled(
                     format!("Terminal v{}", VERSION),
                     Style::default().fg(CYAN_PRIMARY),
@@ -3661,7 +3730,7 @@ fn run_delay(
             let claude_input_area = claude_layout[2];
 
             // Claude window chrome with centered title (no traffic lights)
-            let claude_title = ">_ claude-code - ralph-loop";
+            let claude_title = format!(">_ {} - ralph-loop", app.agent_name());
             let title_width = claude_title.len() as u16;
             let available_width = claude_chrome_area.width;
             let center_offset = (available_width.saturating_sub(title_width)) / 2;
@@ -3916,92 +3985,349 @@ fn run_attach_mode(
             let left_inner = left_block.inner(left_panel_area);
             frame.render_widget(left_block, left_panel_area);
 
-            // Split inner area: header, stats, stories
+            // Split inner area: header (3 lines), stat cards (8 lines for 2 rows), rest
             let inner_layout = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3), // Header
-                    Constraint::Length(4), // Stat cards
-                    Constraint::Min(0),    // Stories
+                    Constraint::Length(8), // Two stat card rows (4 lines each)
+                    Constraint::Min(0),    // Rest of content
                 ])
                 .split(left_inner);
 
             let header_area = inner_layout[0];
             let cards_area = inner_layout[1];
-            let stories_area = inner_layout[2];
+            let content_area_inner = inner_layout[2];
 
-            // Header
+            // Header: Ralph branding with ATTACHED indicator
+            let mut header_spans = vec![
+                Span::styled("● ", Style::default().fg(AMBER_WARNING)),
+                Span::styled(
+                    "RALPH LOOP",
+                    Style::default()
+                        .fg(TEXT_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" [ATTACHED]", Style::default().fg(AMBER_WARNING)),
+            ];
+            // Add [YOLO] indicator if yolo mode is enabled
+            if app.yolo_mode {
+                header_spans.push(Span::raw(" "));
+                header_spans.push(Span::styled(
+                    "[YOLO]",
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             let header_lines = vec![
-                Line::from(vec![
-                    Span::styled("● ", Style::default().fg(AMBER_WARNING)),
+                Line::from(header_spans),
+                Line::from(vec![Span::styled(
+                    format!("Terminal v{}", VERSION),
+                    Style::default().fg(CYAN_PRIMARY),
+                )]),
+                Line::from(""), // Gap after header
+            ];
+            let header = Paragraph::new(header_lines);
+            frame.render_widget(header, header_area);
+
+            // Split cards area into two rows
+            let cards_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(4), // First row: iteration/completed
+                    Constraint::Length(4), // Second row: stories left/progress
+                ])
+                .split(cards_area);
+
+            // Render iteration/completion stat cards (first row)
+            // For attach mode, we don't know iteration info, so show "?"
+            render_stat_cards(
+                cards_layout[0],
+                0, // current_iteration unknown
+                0, // max_iterations unknown (will show "?/?")
+                completed,
+                total,
+                frame,
+            );
+
+            // Render progress stat cards (second row)
+            render_progress_cards(cards_layout[1], completed, total, frame);
+
+            // Build remaining status content
+            let mut status_lines: Vec<Line> = Vec::new();
+            status_lines.push(Line::from("")); // Gap after cards
+
+            // Active Phase section
+            let session_elapsed = app.session_start.elapsed();
+            status_lines.push(Line::from(vec![Span::styled(
+                "✦ ACTIVE PHASE",
+                Style::default().fg(TEXT_MUTED),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "Monitoring Session",
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                format!("⏱ Watching: {}", format_duration(session_elapsed)),
+                Style::default().fg(TEXT_MUTED),
+            )]));
+            status_lines.push(Line::from("")); // Gap after active phase
+
+            // Session info
+            status_lines.push(Line::from(vec![
+                Span::styled(
+                    "Session: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(session_name, Style::default().fg(TEXT_PRIMARY)),
+            ]));
+            status_lines.push(Line::from(""));
+
+            // Parse activities from raw_lines
+            let activities = if let Ok(state) = app.pty_state.lock() {
+                let combined_output = state.raw_lines.join("\n");
+                parse_activities(&combined_output)
+            } else {
+                Vec::new()
+            };
+
+            // Recent activities section
+            if !activities.is_empty() {
+                status_lines.push(Line::from(vec![Span::styled(
+                    "Recent Activity:",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                let max_activity_width = left_panel_area.width.saturating_sub(6) as usize;
+                for activity in activities.iter().rev().take(5) {
+                    status_lines.push(Line::from(vec![
+                        Span::styled("  • ", Style::default().fg(TEXT_MUTED)),
+                        Span::styled(
+                            activity.format(max_activity_width),
+                            Style::default().fg(TEXT_PRIMARY),
+                        ),
+                    ]));
+                }
+                status_lines.push(Line::from(""));
+            }
+
+            // PRD information
+            if let Some(ref prd) = app.prd {
+                // Description
+                status_lines.push(Line::from(vec![Span::styled(
+                    "Task: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                // Wrap description to fit panel
+                for line in wrap_text(
+                    &prd.description,
+                    left_panel_area.width.saturating_sub(4) as usize,
+                ) {
+                    status_lines.push(Line::from(Span::raw(format!("  {}", line))));
+                }
+                status_lines.push(Line::from(""));
+
+                // Branch
+                status_lines.push(Line::from(vec![
                     Span::styled(
-                        "ATTACHED",
+                        "Branch: ",
                         Style::default()
-                            .fg(AMBER_WARNING)
+                            .fg(CYAN_PRIMARY)
                             .add_modifier(Modifier::BOLD),
                     ),
-                ]),
-                Line::from(vec![Span::styled(
-                    session_name,
-                    Style::default().fg(TEXT_SECONDARY),
-                )]),
-                Line::from(vec![Span::styled(
-                    format!("Elapsed: {}", format_duration(app.session_start.elapsed())),
+                    Span::raw(&prd.branch_name),
+                ]));
+                status_lines.push(Line::from(""));
+
+                // Progress (text display - cards show the numbers)
+                let progress_pct = if total > 0 {
+                    (completed as f32 / total as f32 * 100.0) as u8
+                } else {
+                    0
+                };
+                status_lines.push(Line::from(vec![
+                    Span::styled(
+                        "Progress: ",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}%", progress_pct),
+                        if completed == total && total > 0 {
+                            Style::default()
+                                .fg(GREEN_SUCCESS)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(CYAN_PRIMARY)
+                        },
+                    ),
+                ]));
+
+                // Overall progress bar (text-based)
+                let bar_width = left_panel_area.width.saturating_sub(6) as usize;
+                let filled = (bar_width as f32 * progress_pct as f32 / 100.0) as usize;
+                let empty = bar_width.saturating_sub(filled);
+                let bar_filled: String = "█".repeat(filled);
+                let bar_empty: String = "░".repeat(empty);
+                let progress_color = if completed == total && total > 0 {
+                    GREEN_SUCCESS
+                } else {
+                    CYAN_PRIMARY
+                };
+                status_lines.push(Line::from(vec![
+                    Span::styled(bar_filled, Style::default().fg(progress_color)),
+                    Span::styled(bar_empty, Style::default().fg(BORDER_SUBTLE)),
+                ]));
+                status_lines.push(Line::from(""));
+
+                // User Stories section header
+                status_lines.push(Line::from(vec![Span::styled(
+                    "↳ USER STORIES / PHASES",
                     Style::default().fg(TEXT_MUTED),
-                )]),
-            ];
-            let header_paragraph = Paragraph::new(header_lines);
-            frame.render_widget(header_paragraph, header_area);
+                )]));
+            } else {
+                status_lines.push(Line::from(vec![
+                    Span::styled(
+                        "Error: ",
+                        Style::default().fg(RED_ERROR).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("Failed to load prd.json"),
+                ]));
+            }
 
-            // Progress cards
-            render_progress_cards(cards_area, completed, total, frame);
+            // Calculate lines for status content
+            let status_line_count = status_lines.len() as u16;
 
-            // Story list
+            // Split content area: status text at top, story cards at bottom
+            let content_split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(status_line_count),
+                    Constraint::Min(0), // Story cards area
+                ])
+                .split(content_area_inner);
+
+            let status_area = content_split[0];
+            let stories_area = content_split[1];
+
+            let left_content =
+                Paragraph::new(status_lines).style(Style::default().fg(TEXT_PRIMARY));
+            frame.render_widget(left_content, status_area);
+
+            // Story cards (rendered similarly to normal mode)
             if let Some(ref prd) = app.prd {
-                let stories: Vec<Line> = prd
-                    .user_stories
+                // Sort stories by priority
+                let mut stories: Vec<_> = prd.user_stories.iter().collect();
+                stories.sort_by_key(|s| s.priority);
+
+                // Calculate visible stories based on area height
+                let available_height = stories_area.height.saturating_sub(1) as usize;
+                let story_height = 2; // Each story takes 2 lines in compact mode
+                let visible_count = available_height / story_height;
+
+                // Apply scroll offset
+                let scroll_offset = app
+                    .story_scroll_offset
+                    .min(stories.len().saturating_sub(visible_count));
+                let visible_stories: Vec<_> = stories
                     .iter()
-                    .map(|story| {
-                        let status = if story.passes {
-                            Span::styled("● ", Style::default().fg(GREEN_SUCCESS))
-                        } else if Some(&story.id) == prd.current_story().map(|s| &s.id) {
-                            Span::styled(
-                                "● ",
-                                Style::default().fg(get_pulse_color(
-                                    app.animation_tick,
-                                    GREEN_ACTIVE,
-                                    CYAN_DIM,
-                                )),
-                            )
-                        } else {
-                            Span::styled("○ ", Style::default().fg(TEXT_MUTED))
-                        };
-                        let title_color = if story.passes {
-                            TEXT_SECONDARY
-                        } else {
-                            TEXT_PRIMARY
-                        };
-                        Line::from(vec![
-                            status,
-                            Span::styled(&story.title, Style::default().fg(title_color)),
-                        ])
-                    })
+                    .skip(scroll_offset)
+                    .take(visible_count)
                     .collect();
 
-                let stories_block = Block::default()
-                    .borders(Borders::TOP)
-                    .border_style(Style::default().fg(BORDER_SUBTLE))
-                    .title(Line::from(Span::styled(
-                        " Stories ",
+                let mut story_lines: Vec<Line> = Vec::new();
+                for (idx, story) in visible_stories.iter().enumerate() {
+                    let actual_idx = scroll_offset + idx;
+                    let is_selected = actual_idx == app.selected_story_index;
+                    let is_current = Some(&story.id) == prd.current_story().map(|s| &s.id);
+
+                    // Status indicator
+                    let status = if story.passes {
+                        Span::styled("✓ ", Style::default().fg(GREEN_SUCCESS))
+                    } else if is_current {
+                        Span::styled(
+                            "● ",
+                            Style::default().fg(get_pulse_color(
+                                app.animation_tick,
+                                GREEN_ACTIVE,
+                                CYAN_DIM,
+                            )),
+                        )
+                    } else {
+                        Span::styled("○ ", Style::default().fg(TEXT_MUTED))
+                    };
+
+                    // Story ID and title
+                    let id_style = if is_selected {
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(TEXT_MUTED)
+                    };
+                    let title_style = if story.passes {
+                        Style::default().fg(TEXT_SECONDARY)
+                    } else if is_selected {
+                        Style::default()
+                            .fg(TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(TEXT_PRIMARY)
+                    };
+
+                    story_lines.push(Line::from(vec![
+                        status,
+                        Span::styled(format!("{} ", story.id), id_style),
+                        Span::styled(&story.title, title_style),
+                    ]));
+
+                    // Acceptance criteria summary
+                    let passed_criteria = story
+                        .acceptance_criteria
+                        .iter()
+                        .filter(|c| c.passes)
+                        .count();
+                    let total_criteria = story.acceptance_criteria.len();
+                    story_lines.push(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled(
+                            format!("{}/{} criteria", passed_criteria, total_criteria),
+                            Style::default().fg(TEXT_MUTED),
+                        ),
+                    ]));
+                }
+
+                // Show scroll indicator if needed
+                if stories.len() > visible_count {
+                    let scroll_info = format!(
+                        " [{}-{}/{}] ",
+                        scroll_offset + 1,
+                        (scroll_offset + visible_count).min(stories.len()),
+                        stories.len()
+                    );
+                    story_lines.push(Line::from(Span::styled(
+                        scroll_info,
                         Style::default().fg(TEXT_MUTED),
                     )));
-                let stories_paragraph = Paragraph::new(stories).block(stories_block);
+                }
+
+                let stories_paragraph = Paragraph::new(story_lines);
                 frame.render_widget(stories_paragraph, stories_area);
             }
 
-            // === RIGHT PANEL: Claude Code Output ===
+            // === RIGHT PANEL: Agent Output ===
+            let agent_name = app.agent_name();
             let right_title = Line::from(vec![
-                Span::raw(" Claude Code "),
+                Span::raw(format!(" >_ {} - ralph-loop ", agent_name)),
                 Span::styled("[VIEW ONLY]", Style::default().fg(TEXT_MUTED)),
                 Span::raw(" "),
             ]);
@@ -4015,13 +4341,23 @@ fn run_attach_mode(
             frame.render_widget(right_block, right_panel_area);
 
             // Render tmux output (raw text, no VT100)
+            // Scroll to show the bottom of the output (most recent content)
             if let Ok(state) = app.pty_state.lock() {
                 let lines: Vec<Line> = state
                     .raw_lines
                     .iter()
                     .map(|s| Line::from(s.as_str()))
                     .collect();
-                let paragraph = Paragraph::new(lines);
+
+                // Auto-scroll to bottom
+                let content_height = right_inner.height as usize;
+                let scroll_offset = if lines.len() > content_height {
+                    (lines.len() - content_height) as u16
+                } else {
+                    0
+                };
+
+                let paragraph = Paragraph::new(lines).scroll((scroll_offset, 0));
                 frame.render_widget(paragraph, right_inner);
             }
 
@@ -4062,28 +4398,8 @@ fn run_attach_mode(
         if event::poll(std::time::Duration::from_millis(50))? {
             let evt = event::read()?;
 
-            // Log all events to a file for debugging
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/ralph-tui-events.log")
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "{:?}", evt);
-            }
-
             match evt {
                 Event::Key(key) => {
-                    // Log key details
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/ralph-tui-events.log")
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(f, "  -> kind={:?} code={:?}", key.kind, key.code);
-                    }
-
                     if key.kind == KeyEventKind::Press {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
@@ -4092,19 +4408,31 @@ fn run_attach_mode(
                             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 break;
                             }
+                            // Arrow keys for story navigation (view only)
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if app.selected_story_index > 0 {
+                                    app.selected_story_index -= 1;
+                                    // Update scroll offset to keep selection visible
+                                    if app.selected_story_index < app.story_scroll_offset {
+                                        app.story_scroll_offset = app.selected_story_index;
+                                    }
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Some(ref prd) = app.prd {
+                                    if app.selected_story_index
+                                        < prd.user_stories.len().saturating_sub(1)
+                                    {
+                                        app.selected_story_index += 1;
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
-                Event::Resize(w, h) => {
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open("/tmp/ralph-tui-events.log")
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(f, "RESIZE: {}x{}", w, h);
-                    }
+                Event::Resize(_, _) => {
+                    // Terminal will redraw automatically
                 }
                 _ => {}
             }
