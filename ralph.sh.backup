@@ -1,177 +1,16 @@
 #!/bin/bash
-# Ralph - Multi-agent autonomous coding loop
-# Usage: ralph [command] [task-directory] [options]
+# Ralph Wiggum for Claude Code - Long-running AI agent loop
+# Usage: ./ralph.sh [task-directory] [-i iterations] [--rotate-at N]
+# Example: ./ralph.sh tasks/fix-auth-timeout -i 20
 #
-# Commands:
-#   (default)     Start or resume a task (runs in tmux background)
-#   attach        Watch running session output
-#   checkpoint    Gracefully stop with state summary
-#   stop          Force stop running session
-#   status        List running Ralph sessions
+# For interactive mode with tmux, use: ./ralph-i.sh
 
 set -e
 
-VERSION="2.0.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Find agents directory (supports both dev and installed locations)
-if [ -d "$SCRIPT_DIR/agents" ]; then
-  AGENTS_DIR="$SCRIPT_DIR/agents"
-elif [ -d "$HOME/.local/bin/ralph-agents" ]; then
-  AGENTS_DIR="$HOME/.local/bin/ralph-agents"
-else
-  echo "Error: Cannot find agents directory"
-  exit 1
-fi
-
-# Source common utilities for prompt preprocessing (if available)
-if [ -f "$AGENTS_DIR/common.sh" ]; then
-  source "$AGENTS_DIR/common.sh"
-fi
-
-# =============================================================================
-# tmux Session Management
-# =============================================================================
-
-check_tmux() {
-  if ! command -v tmux &>/dev/null; then
-    echo "Error: tmux is required. Install with: apt install tmux"
-    exit 1
-  fi
-}
-
-get_session_name() {
-  echo "ralph-$(basename "$1")"
-}
-
-session_exists() {
-  tmux has-session -t "$1" 2>/dev/null
-}
-
-get_session_pid() {
-  local pid_file="/tmp/${1}.pid"
-  [ -f "$pid_file" ] && cat "$pid_file"
-}
-
-list_sessions() {
-  tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "^ralph-" || true
-}
-
-kill_session() {
-  local name="$1"
-  session_exists "$name" && tmux kill-session -t "$name" 2>/dev/null && rm -f "/tmp/${name}.pid"
-}
-
-# =============================================================================
-# Checkpoint State Management
-# =============================================================================
-
-CHECKPOINT_REQUESTED=false
-CURRENT_ITERATION=0
-
-handle_checkpoint_signal() {
-  echo -e "\n>>> Checkpoint requested. Saving state after current operation..."
-  CHECKPOINT_REQUESTED=true
-}
-trap 'handle_checkpoint_signal' SIGUSR1
-
-write_checkpoint() {
-  local reason="${1:-user}"
-  local done=0 total=0
-  [ -f "$PRD_FILE" ] && {
-    done=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo 0)
-    total=$(jq '.userStories | length' "$PRD_FILE" 2>/dev/null || echo 0)
-  }
-  cat >> "$PROGRESS_FILE" << EOF
-
----
-CHECKPOINT at $(date)
-Iteration: $CURRENT_ITERATION/$MAX_ITERATIONS | Stories: $done/$total | Agent: $AGENT
-Reason: $reason
-To resume: ralph $TASK_DIR
----
-EOF
-  echo -e "\n=== Checkpoint saved ($done/$total stories) ===\nResume: ralph $TASK_DIR\n"
-}
-
-# =============================================================================
-# Subcommand Handlers
-# =============================================================================
-
-find_session() {
-  local task_dir="$1"
-  if [ -n "$task_dir" ]; then
-    get_session_name "$task_dir"
-  else
-    local sessions=($(list_sessions))
-    [ ${#sessions[@]} -eq 0 ] && echo "" && return
-    [ ${#sessions[@]} -eq 1 ] && echo "${sessions[0]}" && return
-    echo "MULTIPLE"
-  fi
-}
-
-cmd_attach() {
-  check_tmux
-  local session=$(find_session "$1")
-  [ -z "$session" ] && echo "No Ralph session found. Start: ralph tasks/your-task" && exit 1
-  [ "$session" = "MULTIPLE" ] && { echo "Multiple sessions. Specify: ralph attach <task>"; list_sessions; exit 1; }
-  session_exists "$session" || { echo "Session '$session' not found."; exit 1; }
-  echo "Attaching to $session... (Ctrl+B d to detach)"
-  tmux attach-session -t "$session"
-}
-
-cmd_status() {
-  check_tmux
-  local sessions=($(list_sessions))
-  [ ${#sessions[@]} -eq 0 ] && echo "No Ralph sessions running." && exit 0
-  echo "Running Ralph sessions:"
-  for s in "${sessions[@]}"; do
-    local prd="tasks/${s#ralph-}/prd.json"
-    local info=""
-    [ -f "$prd" ] && info="($(jq '[.userStories[] | select(.passes == true)] | length' "$prd")/$(jq '.userStories | length' "$prd") stories)"
-    echo "  $s  $info"
-  done
-  echo -e "\nCommands: ralph attach|checkpoint|stop [task]"
-}
-
-cmd_stop() {
-  check_tmux
-  local session=$(find_session "$1")
-  [ -z "$session" ] && echo "No Ralph session found." && exit 1
-  [ "$session" = "MULTIPLE" ] && { echo "Multiple sessions. Specify: ralph stop <task>"; exit 1; }
-  echo "Stopping $session..."
-  kill_session "$session" && echo "Stopped."
-}
-
-cmd_checkpoint() {
-  check_tmux
-  local session=$(find_session "$1")
-  [ -z "$session" ] && echo "No Ralph session found." && exit 1
-  [ "$session" = "MULTIPLE" ] && { echo "Multiple sessions. Specify: ralph checkpoint <task>"; exit 1; }
-  local pid=$(get_session_pid "$session")
-  [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null && { echo "Process not found. Try: ralph stop ${session#ralph-}"; exit 1; }
-  echo "Sending checkpoint to $session (PID $pid)..."
-  kill -USR1 "$pid"
-  echo "Checkpoint requested. Watch: ralph attach ${session#ralph-}"
-}
-
-# =============================================================================
-# Subcommand Dispatch (before arg parsing)
-# =============================================================================
-
-case "${1:-}" in
-  attach)     shift; cmd_attach "$1"; exit 0 ;;
-  status)     cmd_status; exit 0 ;;
-  stop)       shift; cmd_stop "$1"; exit 0 ;;
-  checkpoint) shift; cmd_checkpoint "$1"; exit 0 ;;
-  --version|-v) echo "ralph version $VERSION"; exit 0 ;;
-esac
-
-# =============================================================================
-# Configuration
-# =============================================================================
-
-RUNNING_IN_TMUX="${RALPH_TMUX_SESSION:-}"
+# Source common utilities for prompt preprocessing
+source "$SCRIPT_DIR/agents/common.sh"
 
 # Parse command line arguments
 TASK_DIR=""
@@ -179,13 +18,19 @@ MAX_ITERATIONS=""
 SKIP_PROMPTS=false
 ROTATE_THRESHOLD=300
 
-# Agent configuration
-AGENT="${RALPH_AGENT:-claude}"
+# Agent configuration (default to claude for backwards compatibility)
+# Precedence: CLI --agent flag > RALPH_AGENT env var > default (claude)
+AGENT="claude"
 AGENT_SOURCE="default"
-[ -n "$RALPH_AGENT" ] && AGENT_SOURCE="env"
+if [ -n "$RALPH_AGENT" ]; then
+  AGENT="$RALPH_AGENT"
+  AGENT_SOURCE="env"
+fi
 
+# Valid agents list
 VALID_AGENTS="claude opencode"
 
+# Failure tracking (associative arrays for per-agent tracking)
 declare -A FAILURE_COUNT
 declare -A LAST_FAILURE_MSG
 for agent in $VALID_AGENTS; do
@@ -193,12 +38,17 @@ for agent in $VALID_AGENTS; do
   LAST_FAILURE_MSG[$agent]=""
 done
 
-FAILOVER_THRESHOLD="${RALPH_FAILOVER_THRESHOLD:-3}"
+# Failover configuration
+# Precedence: CLI --failover-threshold > RALPH_FAILOVER_THRESHOLD env > prd.json failoverThreshold > default (3)
+FAILOVER_THRESHOLD=3
 FAILOVER_THRESHOLD_SOURCE="default"
-[ -n "$RALPH_FAILOVER_THRESHOLD" ] && FAILOVER_THRESHOLD_SOURCE="env"
-if ! [[ "$FAILOVER_THRESHOLD" =~ ^[0-9]+$ ]]; then
-  echo "Warning: Invalid RALPH_FAILOVER_THRESHOLD, using 3"
-  FAILOVER_THRESHOLD=3
+if [ -n "$RALPH_FAILOVER_THRESHOLD" ]; then
+  if [[ "$RALPH_FAILOVER_THRESHOLD" =~ ^[0-9]+$ ]]; then
+    FAILOVER_THRESHOLD="$RALPH_FAILOVER_THRESHOLD"
+    FAILOVER_THRESHOLD_SOURCE="env"
+  else
+    echo "Warning: Invalid RALPH_FAILOVER_THRESHOLD value '$RALPH_FAILOVER_THRESHOLD', using default of 3"
+  fi
 fi
 FAILOVER_ENABLED=true
 
@@ -231,45 +81,31 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
-    -a)
-      AGENT="$2"
-      AGENT_SOURCE="cli"
-      shift 2
-      ;;
     -h|--help)
-      cat << 'EOF'
-Ralph - Autonomous Multi-Agent Coding Loop (v2.0.0)
-
-Usage: ralph [command] [task-directory] [options]
-
-Commands:
-  (default)             Start task (runs in tmux background)
-  attach [task]         Watch running session output
-  checkpoint [task]     Graceful stop with state save
-  stop [task]           Force stop session
-  status                List running sessions
-
-Options:
-  -i, --iterations N        Max iterations (default: 10)
-  -a, --agent NAME          Agent: claude, opencode (default: claude)
-  --failover-threshold N    Failures before agent switch (default: 3)
-  -y, --yes                 Skip prompts
-  --rotate-at N             Rotate progress at N lines (default: 300)
-  --version                 Show version
-  -h, --help                Show help
-
-Examples:
-  ralph tasks/my-feature       # Start in background
-  ralph attach                 # Watch output
-  ralph checkpoint             # Graceful stop
-
-For TUI: ralph-tui
-EOF
+      echo "Ralph Wiggum - Autonomous Agent Loop"
+      echo ""
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--rotate-at N]"
+      echo ""
+      echo "Options:"
+      echo "  -i, --iterations N        Max iterations (default: 10)"
+      echo "  --agent <agent>           Select agent: claude, opencode (default: claude)"
+      echo "  --failover-threshold N    Failures before automatic agent failover (default: 3)"
+      echo "  -y, --yes                 Skip confirmation prompts"
+      echo "  --rotate-at N             Rotate progress file at N lines (default: 300)"
+      echo "  -h, --help                Show this help message"
+      echo ""
+      echo "Environment variables:"
+      echo "  RALPH_AGENT               Set default agent (overridden by --agent flag)"
+      echo "  RALPH_FAILOVER_THRESHOLD  Set failover threshold (overridden by --failover-threshold)"
+      echo ""
+      echo "For interactive mode with tmux, use: ./ralph-i.sh"
       exit 0
       ;;
     -*)
       echo "Unknown option: $1"
-      echo "Run 'ralph --help' for usage."
+      echo "Usage: ./ralph.sh [task-directory] [-i iterations] [--agent <agent>] [--failover-threshold N] [--rotate-at N]"
+      echo ""
+      echo "For interactive mode, use: ./ralph-i.sh"
       exit 1
       ;;
     *)
@@ -417,10 +253,10 @@ if [ "$FAILOVER_THRESHOLD_SOURCE" = "default" ]; then
 fi
 
 # Validate agent wrapper script exists
-AGENT_SCRIPT="$AGENTS_DIR/$AGENT.sh"
+AGENT_SCRIPT="$SCRIPT_DIR/agents/$AGENT.sh"
 if [ ! -f "$AGENT_SCRIPT" ]; then
   echo "Error: Agent script not found: $AGENT_SCRIPT"
-  echo "Valid agents: $(ls "$AGENTS_DIR/"*.sh 2>/dev/null | xargs -n1 basename | sed 's/\.sh$//' | grep -v '^common$' | tr '\n' ' ')"
+  echo "Valid agents: $(ls "$SCRIPT_DIR/agents/"*.sh 2>/dev/null | xargs -n1 basename | sed 's/\.sh$//' | grep -v '^common$' | tr '\n' ' ')"
   exit 1
 fi
 
@@ -655,65 +491,9 @@ BRANCH_NAME=$(jq -r '.branchName // "unknown"' "$PRD_FILE" 2>/dev/null || echo "
 TOTAL_STORIES=$(jq '.userStories | length' "$PRD_FILE" 2>/dev/null || echo "?")
 COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
 
-# =============================================================================
-# tmux Session Setup
-# =============================================================================
-
-SESSION_NAME=$(get_session_name "$TASK_DIR")
-
-# Check if session already exists (and we're not inside it)
-if session_exists "$SESSION_NAME" && [ -z "$RUNNING_IN_TMUX" ]; then
-  echo "Error: Session '$SESSION_NAME' already running."
-  echo ""
-  echo "  ralph attach      # Watch output"
-  echo "  ralph checkpoint  # Graceful stop"
-  echo "  ralph stop        # Force stop"
-  exit 1
-fi
-
-# If not in tmux, spawn ourselves in a new tmux session
-if [ -z "$RUNNING_IN_TMUX" ]; then
-  check_tmux
-  
-  echo ""
-  echo "======================================================================="
-  echo "  Starting Ralph in background"
-  echo "======================================================================="
-  echo ""
-  echo "  Session:    $SESSION_NAME"
-  echo "  Task:       $TASK_DIR"
-  echo "  Progress:   $COMPLETED_STORIES / $TOTAL_STORIES stories"
-  echo "  Max iters:  $MAX_ITERATIONS"
-  echo "  Agent:      $AGENT ($AGENT_SOURCE)"
-  echo ""
-  echo "  $DESCRIPTION"
-  echo ""
-  echo "-----------------------------------------------------------------------"
-  echo "  ralph attach      # Watch output"
-  echo "  ralph checkpoint  # Graceful stop"
-  echo "  ralph stop        # Force stop"
-  echo ""
-  
-  # Build tmux command
-  TMUX_CMD="RALPH_TMUX_SESSION='$SESSION_NAME' '$0' '$TASK_DIR' -i $MAX_ITERATIONS --agent '$AGENT'"
-  [ "$SKIP_PROMPTS" = true ] && TMUX_CMD+=" -y"
-  TMUX_CMD+=" --rotate-at $ROTATE_THRESHOLD --failover-threshold $FAILOVER_THRESHOLD"
-  
-  tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 "bash -c '$TMUX_CMD'"
-  exit 0
-fi
-
-# =============================================================================
-# Running inside tmux - Main Loop
-# =============================================================================
-
-# Write PID for checkpoint command
-echo $$ > "/tmp/${SESSION_NAME}.pid"
-trap 'rm -f "/tmp/${SESSION_NAME}.pid"' EXIT
-
 echo ""
 echo "╔═══════════════════════════════════════════════════════════════╗"
-echo "║  Ralph - Autonomous Agent Loop (v$VERSION)                      ║"
+echo "║  Ralph Wiggum - Autonomous Agent Loop                         ║"
 echo "╚═══════════════════════════════════════════════════════════════╝"
 echo ""
 echo "  Task:       $TASK_DIR"
@@ -724,17 +504,8 @@ echo "  Max iters:  $MAX_ITERATIONS"
 echo ""
 echo "  $DESCRIPTION"
 echo ""
-echo "  To checkpoint: ralph checkpoint (from another terminal)"
-echo ""
 
 for i in $(seq 1 $MAX_ITERATIONS); do
-  CURRENT_ITERATION=$i
-  
-  # Check for checkpoint request
-  if [ "$CHECKPOINT_REQUESTED" = true ]; then
-    write_checkpoint "user"
-    exit 0
-  fi
   # Check and rotate progress file if needed
   rotate_progress_if_needed
 
@@ -784,7 +555,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   fi
   
   # Update agent script path for this iteration
-  ITERATION_AGENT_SCRIPT="$AGENTS_DIR/$ITERATION_AGENT.sh"
+  ITERATION_AGENT_SCRIPT="$SCRIPT_DIR/agents/$ITERATION_AGENT.sh"
 
   echo ""
   echo "═══════════════════════════════════════════════════════════════"
@@ -818,12 +589,11 @@ $PROCESSED_PROMPT_CONTENT
 
   # Run agent in background with streaming JSON output
   # Agent wrapper scripts accept prompt via stdin and output to stdout
-  # Note: export ensures env vars are available to piped command
-  export SKIP_PERMISSIONS=true
-  export OUTPUT_FORMAT=stream-json
-  export RALPH_VERBOSE=true
-  export MODEL="$ITERATION_MODEL"
-  
+  # Configuration is passed via environment variables
+  SKIP_PERMISSIONS=true \
+  OUTPUT_FORMAT=stream-json \
+  RALPH_VERBOSE=true \
+  MODEL="$ITERATION_MODEL" \
   echo "$PROMPT" | "$ITERATION_AGENT_SCRIPT" > "$OUTPUT_FILE" 2>&1 &
   AGENT_PID=$!
 
@@ -950,7 +720,7 @@ $PROCESSED_PROMPT_CONTENT
       # This ensures the next iteration uses the alternate agent
       AGENT="$ALTERNATE_AGENT"
       AGENT_SOURCE="failover"
-      AGENT_SCRIPT="$AGENTS_DIR/$AGENT.sh"
+      AGENT_SCRIPT="$SCRIPT_DIR/agents/$AGENT.sh"
       
       # Note: We don't reset failure count here - the alternate agent
       # will get its own count incremented if it also fails
@@ -985,12 +755,6 @@ $PROCESSED_PROMPT_CONTENT
     exit 0
   fi
 
-  # Check for checkpoint after iteration
-  if [ "$CHECKPOINT_REQUESTED" = true ]; then
-    write_checkpoint "user"
-    exit 0
-  fi
-
   echo ""
   echo "Iteration $i complete. Continuing in 2 seconds..."
   sleep 2
@@ -1003,7 +767,6 @@ echo "╚═══════════════════════�
 echo ""
 COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
 echo "  Completed $COMPLETED_STORIES of $TOTAL_STORIES stories in $MAX_ITERATIONS iterations."
-echo "  Agent: $AGENT"
 echo "  Check $PROGRESS_FILE for status."
-echo "  Run again: ralph $TASK_DIR -i <more_iterations>"
+echo "  Run again with more iterations: ./ralph.sh $TASK_DIR <more_iterations>"
 exit 1

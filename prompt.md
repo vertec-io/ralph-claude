@@ -1,4 +1,4 @@
-<!-- version: 2.2 -->
+<!-- version: 2.3 -->
 <!--
   Versioning Scheme:
   - MAJOR.MINOR format (e.g., 1.0, 2.0)
@@ -18,7 +18,7 @@ You are an autonomous coding agent working on a software project.
 1. Read the PRD at the specified `prd.json` path
 2. Read the progress log at `progress.txt` (check Codebase Patterns section first)
    - If progress.txt references prior progress files (e.g., "see progress-1.txt"), you may read those for additional context if needed
-3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create from main.
+3. Check you're on the correct branch from PRD `branchName`. If not, check it out or create it from the current branch.
 4. Pick the **highest priority** user story where `passes: false`
 5. Implement that single user story, updating acceptance criteria as you go (see below)
 6. Run quality checks (e.g., typecheck, lint, test - use whatever your project requires)

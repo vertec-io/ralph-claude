@@ -265,6 +265,53 @@ install_hooks() {
   fi
 }
 
+# Install ralph CLI script
+install_ralph_cli() {
+  local repo_script="$SCRIPT_DIR/ralph.sh"
+  local install_path="$BIN_INSTALL_DIR/ralph"
+  
+  echo "Installing ralph CLI..."
+  
+  if [ ! -f "$repo_script" ]; then
+    echo -e "${RED}✗${NC} ralph.sh not found"
+    return 1
+  fi
+  
+  local repo_version
+  repo_version=$(grep -oP 'VERSION="\K[^"]+' "$repo_script" 2>/dev/null || echo "0.0")
+  
+  local installed_version="0.0"
+  [ -f "$install_path" ] && installed_version=$(grep -oP 'VERSION="\K[^"]+' "$install_path" 2>/dev/null || echo "0.0")
+  
+  if check_and_prompt_upgrade "ralph CLI" "$installed_version" "$repo_version"; then
+    create_backup "$install_path"
+    mkdir -p "$BIN_INSTALL_DIR"
+    cp "$repo_script" "$install_path"
+    chmod +x "$install_path"
+    echo -e "  ${GREEN}Installed${NC} ralph v$repo_version to $install_path"
+  fi
+  
+  # Install agent wrappers
+  local agents_dir="$SCRIPT_DIR/agents"
+  local install_agents_dir="$BIN_INSTALL_DIR/ralph-agents"
+  
+  if [ -d "$agents_dir" ]; then
+    echo "Installing agent wrappers..."
+    mkdir -p "$install_agents_dir"
+    cp -r "$agents_dir"/* "$install_agents_dir/"
+    chmod +x "$install_agents_dir"/*.sh 2>/dev/null || true
+    echo -e "  ${GREEN}Installed${NC} agent wrappers to $install_agents_dir"
+  fi
+  
+  # Install prompt.md globally
+  local share_dir="$HOME/.local/share/ralph"
+  mkdir -p "$share_dir"
+  if [ -f "$SCRIPT_DIR/prompt.md" ]; then
+    cp "$SCRIPT_DIR/prompt.md" "$share_dir/prompt.md"
+    echo -e "  ${GREEN}Installed${NC} prompt.md to $share_dir"
+  fi
+}
+
 # Build and install ralph-tui binary
 install_ralph_tui() {
   local tui_dir="$SCRIPT_DIR/ralph-tui"
@@ -329,9 +376,12 @@ main() {
   mkdir -p "$PROMPT_INSTALL_DIR"
   mkdir -p "$BIN_INSTALL_DIR"
 
+  # Install ralph CLI first
+  install_ralph_cli
+  echo ""
+
   # Build and install ralph-tui binary
   install_ralph_tui
-
   echo ""
 
   # Install skills
@@ -360,10 +410,16 @@ main() {
   echo ""
   echo -e "${GREEN}Installation complete!${NC}"
   echo ""
-  echo "Binary installed to:  $BIN_INSTALL_DIR/ralph-tui"
-  echo "Skills installed to:  $SKILLS_INSTALL_DIR"
-  echo "Prompt installed to:  $PROMPT_INSTALL_DIR/prompt.md"
-  echo "Hooks installed to:   $PROMPT_INSTALL_DIR/hooks/"
+  echo "Ralph CLI:           $BIN_INSTALL_DIR/ralph"
+  echo "Ralph TUI:           $BIN_INSTALL_DIR/ralph-tui"
+  echo "Agent wrappers:      $BIN_INSTALL_DIR/ralph-agents/"
+  echo "Prompt:              $HOME/.local/share/ralph/prompt.md"
+  echo "Skills:              $SKILLS_INSTALL_DIR"
+  echo ""
+  echo "Usage:"
+  echo "  ralph tasks/my-feature       # Start task (tmux background)"
+  echo "  ralph attach                 # Watch output"
+  echo "  ralph-tui tasks/my-feature   # Interactive TUI"
 }
 
 main

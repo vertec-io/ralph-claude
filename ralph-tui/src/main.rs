@@ -1,9 +1,9 @@
 mod theme;
 
 use theme::{
-    get_pulse_color, get_spinner_frame, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY, BORDER_SUBTLE, CYAN_DIM, CYAN_PRIMARY,
-    GREEN_ACTIVE, GREEN_SUCCESS, AMBER_WARNING, RED_ERROR, ROUNDED_BORDERS, TEXT_MUTED, TEXT_PRIMARY,
-    TEXT_SECONDARY,
+    get_pulse_color, get_spinner_frame, AMBER_WARNING, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY,
+    BORDER_SUBTLE, CYAN_DIM, CYAN_PRIMARY, GREEN_ACTIVE, GREEN_SUCCESS, RED_ERROR, ROUNDED_BORDERS,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY,
 };
 
 use std::io::{self, stdout, Read, Write};
@@ -171,13 +171,17 @@ impl Prd {
     /// This gives more granular progress than story-level tracking
     #[allow(dead_code)]
     fn criteria_progress(&self) -> f64 {
-        let total: usize = self.user_stories.iter()
+        let total: usize = self
+            .user_stories
+            .iter()
             .map(|s| s.acceptance_criteria.len())
             .sum();
         if total == 0 {
             return 0.0;
         }
-        let passed: usize = self.user_stories.iter()
+        let passed: usize = self
+            .user_stories
+            .iter()
             .flat_map(|s| &s.acceptance_criteria)
             .filter(|c| c.passes)
             .count();
@@ -196,7 +200,7 @@ enum Mode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum RalphViewMode {
     #[default]
-    Normal,       // Default: show minimal ralph output or ASCII logo
+    Normal, // Default: show minimal ralph output or ASCII logo
     StoryDetails, // Show selected story details from prd.json
     Progress,     // Show progress.txt entries for selected story
     Requirements, // Show requirements from prd.md for selected story
@@ -248,7 +252,10 @@ fn parse_activities(text: &str) -> Vec<Activity> {
         ("Bash", &["running ", "$ ", "bash(", "executing "]),
         ("Grep", &["searching ", "grep(", "grep for"]),
         ("Glob", &["finding files", "glob(", "globbing"]),
-        ("TodoWrite", &["updating todos", "todowrite(", "adding todo"]),
+        (
+            "TodoWrite",
+            &["updating todos", "todowrite(", "adding todo"],
+        ),
     ];
 
     for line in text.lines() {
@@ -271,19 +278,19 @@ fn parse_activities(text: &str) -> Vec<Activity> {
                         .next()
                         .unwrap_or("")
                         .chars()
-                        .take(100)  // Limit target length
+                        .take(100) // Limit target length
                         .collect::<String>();
 
                     if !target.is_empty() {
                         let activity = Activity::new(action_type, &target);
                         // Avoid duplicates
-                        if !activities.iter().any(|a: &Activity|
+                        if !activities.iter().any(|a: &Activity| {
                             a.action_type == activity.action_type && a.target == activity.target
-                        ) {
+                        }) {
                             activities.push(activity);
                         }
                     }
-                    break;  // Only match first pattern per line
+                    break; // Only match first pattern per line
                 }
             }
         }
@@ -404,9 +411,11 @@ impl PtyState {
 
         // Add new activities, avoiding duplicates
         for activity in new_activities {
-            if !self.activities.iter().any(|a|
-                a.action_type == activity.action_type && a.target == activity.target
-            ) {
+            if !self
+                .activities
+                .iter()
+                .any(|a| a.action_type == activity.action_type && a.target == activity.target)
+            {
                 self.activities.push(activity);
             }
         }
@@ -429,10 +438,10 @@ impl PtyState {
 /// Iteration state for tracking progress across Claude restarts
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IterationState {
-    Running,       // Claude is currently running
-    Completed,     // All stories complete (<promise>COMPLETE</promise> found)
-    NeedsRestart,  // Iteration finished but more work remains
-    WaitingDelay,  // Waiting before starting next iteration
+    Running,      // Claude is currently running
+    Completed,    // All stories complete (<promise>COMPLETE</promise> found)
+    NeedsRestart, // Iteration finished but more work remains
+    WaitingDelay, // Waiting before starting next iteration
 }
 
 /// Application state
@@ -473,6 +482,10 @@ struct App {
     ralph_expanded: bool,
     // Scroll offset for Ralph terminal content (when viewing details)
     ralph_scroll_offset: usize,
+    // Run mode (standalone vs attach)
+    run_mode: RunMode,
+    // tmux session name (for attach mode)
+    tmux_session: Option<String>,
 }
 
 impl App {
@@ -490,7 +503,7 @@ impl App {
             master_pty: None,
             pty_writer: None,
             mode: Mode::Ralph, // Default to Ralph mode
-            task_dir: config.task_dir,
+            task_dir: config.task_dir.clone(),
             prd_path,
             prd,
             prd_needs_reload: Arc::new(Mutex::new(false)),
@@ -510,16 +523,15 @@ impl App {
             ralph_view_mode: RalphViewMode::Normal,
             ralph_expanded: false,
             ralph_scroll_offset: 0,
+            run_mode: config.run_mode,
+            tmux_session: config.tmux_session.clone(),
         }
     }
 
     /// Find the index of the first incomplete story (or 0 if all complete)
     fn find_first_incomplete_story(prd: &Option<Prd>) -> usize {
         if let Some(prd) = prd {
-            prd.user_stories
-                .iter()
-                .position(|s| !s.passes)
-                .unwrap_or(0)
+            prd.user_stories.iter().position(|s| !s.passes).unwrap_or(0)
         } else {
             0
         }
@@ -624,10 +636,7 @@ fn render_stat_cards(
     // Split area horizontally for two cards with a small gap
     let card_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
     // Left card: Iterations
@@ -642,12 +651,15 @@ fn render_stat_cards(
             Span::styled("⏱ ", Style::default().fg(CYAN_PRIMARY)),
             Span::styled(
                 format!("{}/{}", current_iteration, max_iterations),
-                Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(CYAN_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("ITERATIONS", Style::default().fg(TEXT_MUTED)),
-        ]),
+        Line::from(vec![Span::styled(
+            "ITERATIONS",
+            Style::default().fg(TEXT_MUTED),
+        )]),
     ];
 
     let iter_paragraph = Paragraph::new(iter_content)
@@ -668,12 +680,15 @@ fn render_stat_cards(
             Span::styled("◎ ", Style::default().fg(CYAN_PRIMARY)),
             Span::styled(
                 format!("{}/{}", completed, total),
-                Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(CYAN_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("COMPLETED", Style::default().fg(TEXT_MUTED)),
-        ]),
+        Line::from(vec![Span::styled(
+            "COMPLETED",
+            Style::default().fg(TEXT_MUTED),
+        )]),
     ];
 
     let comp_paragraph = Paragraph::new(comp_content)
@@ -719,7 +734,11 @@ fn render_story_card(
     };
 
     // Use highlight border for selected card, normal for others
-    let border_color = if selected { CYAN_PRIMARY } else { BORDER_SUBTLE };
+    let border_color = if selected {
+        CYAN_PRIMARY
+    } else {
+        BORDER_SUBTLE
+    };
 
     // Create card block with rounded borders
     let card_block = Block::default()
@@ -749,8 +768,14 @@ fn render_story_card(
     };
 
     let title_line = Line::from(vec![
-        Span::styled(format!("{} ", indicator), Style::default().fg(indicator_color)),
-        Span::styled(format!("{} ", formatted_id), Style::default().fg(text_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} ", indicator),
+            Style::default().fg(indicator_color),
+        ),
+        Span::styled(
+            format!("{} ", formatted_id),
+            Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(truncated_title, Style::default().fg(text_color)),
     ]);
 
@@ -782,35 +807,26 @@ fn render_story_card(
         frame.render_widget(gauge, inner_layout[1]);
 
         // Render criteria count below the progress bar (e.g., "2/5 criteria")
-        let criteria_text = format!("{}/{} criteria ({}%)", criteria_passed, criteria_total, progress_percent);
-        let percent_line = Line::from(Span::styled(
-            criteria_text,
-            Style::default().fg(TEXT_MUTED),
-        ));
+        let criteria_text = format!(
+            "{}/{} criteria ({}%)",
+            criteria_passed, criteria_total, progress_percent
+        );
+        let percent_line = Line::from(Span::styled(criteria_text, Style::default().fg(TEXT_MUTED)));
         let percent_paragraph = Paragraph::new(vec![percent_line]);
         frame.render_widget(percent_paragraph, inner_layout[2]);
     } else {
         // Completed and Pending states - simple single line card
-        let paragraph = Paragraph::new(vec![title_line])
-            .block(card_block);
+        let paragraph = Paragraph::new(vec![title_line]).block(card_block);
         frame.render_widget(paragraph, area);
     }
 }
 
 /// Render progress stat cards (stories left + completion %) in a given area
-fn render_progress_cards(
-    area: Rect,
-    completed: usize,
-    total: usize,
-    frame: &mut Frame,
-) {
+fn render_progress_cards(area: Rect, completed: usize, total: usize, frame: &mut Frame) {
     // Split area horizontally for two cards
     let card_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
-        ])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(area);
 
     // Left card: Stories Left
@@ -826,12 +842,15 @@ fn render_progress_cards(
             Span::styled("◇ ", Style::default().fg(CYAN_PRIMARY)),
             Span::styled(
                 format!("{}", stories_left),
-                Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(CYAN_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("STORIES LEFT", Style::default().fg(TEXT_MUTED)),
-        ]),
+        Line::from(vec![Span::styled(
+            "STORIES LEFT",
+            Style::default().fg(TEXT_MUTED),
+        )]),
     ];
 
     let left_paragraph = Paragraph::new(left_content)
@@ -864,12 +883,15 @@ fn render_progress_cards(
             Span::styled("⟠ ", Style::default().fg(progress_color)),
             Span::styled(
                 format!("{}%", progress_pct),
-                Style::default().fg(progress_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(progress_color)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("PROGRESS", Style::default().fg(TEXT_MUTED)),
-        ]),
+        Line::from(vec![Span::styled(
+            "PROGRESS",
+            Style::default().fg(TEXT_MUTED),
+        )]),
     ];
 
     let right_paragraph = Paragraph::new(right_content)
@@ -908,7 +930,9 @@ fn find_prompt_content() -> (String, Option<String>) {
     }
 
     // 3. Fall back to embedded prompt
-    eprintln!("Warning: No prompt.md found in ./ralph/ or ~/.config/ralph/, using embedded default");
+    eprintln!(
+        "Warning: No prompt.md found in ./ralph/ or ~/.config/ralph/, using embedded default"
+    );
     (EMBEDDED_PROMPT.to_string(), None)
 }
 
@@ -1012,7 +1036,7 @@ fn strip_ansi_codes(s: &str) -> String {
             if let Some(&next) = chars.peek() {
                 if next == '[' {
                     chars.next(); // consume '['
-                    // Skip until we hit a letter (the terminator)
+                                  // Skip until we hit a letter (the terminator)
                     while let Some(&ch) = chars.peek() {
                         chars.next();
                         if ch.is_ascii_alphabetic() {
@@ -1084,9 +1108,9 @@ fn forward_key_to_pty(app: &mut App, key_code: KeyCode, modifiers: KeyModifiers)
                 vec![b'\r'] // Regular Enter: carriage return
             }
         }
-        KeyCode::Backspace => vec![0x7f],  // DEL character (most terminals)
+        KeyCode::Backspace => vec![0x7f], // DEL character (most terminals)
         KeyCode::Delete => vec![0x1b, b'[', b'3', b'~'], // ANSI escape sequence
-        KeyCode::Tab => vec![b'\t'],       // Tab character
+        KeyCode::Tab => vec![b'\t'],      // Tab character
 
         // Arrow keys (ANSI escape sequences)
         KeyCode::Up => vec![0x1b, b'[', b'A'],
@@ -1139,6 +1163,7 @@ fn print_usage() {
     eprintln!("                    If omitted, prompts for task selection");
     eprintln!();
     eprintln!("Options:");
+    eprintln!("  -a, --attach           Attach to running ralph session (view only)");
     eprintln!("  -i, --iterations <N>   Maximum iterations to run (default: 10)");
     eprintln!("  --rotate-at <N>        Rotate progress file at N lines (default: 300)");
     eprintln!("  -y, --yes              Skip confirmation prompts");
@@ -1149,6 +1174,16 @@ fn print_usage() {
     eprintln!("  ralph-tui                          # Interactive task selection");
     eprintln!("  ralph-tui tasks/my-feature         # Run specific task");
     eprintln!("  ralph-tui tasks/my-feature -i 5    # Run with 5 iterations");
+    eprintln!("  ralph-tui --attach                 # Attach to running session");
+}
+
+/// Run mode for the TUI
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunMode {
+    /// Start new Claude processes (default behavior)
+    Standalone,
+    /// Attach to existing ralph tmux session (view only)
+    Attach,
 }
 
 /// Configuration from CLI arguments
@@ -1157,6 +1192,8 @@ struct CliConfig {
     max_iterations: u32,
     rotate_threshold: u32,
     skip_prompts: bool,
+    run_mode: RunMode,
+    tmux_session: Option<String>,
 }
 
 /// Find active tasks (directories with prd.json, excluding archived)
@@ -1196,33 +1233,44 @@ fn get_task_info(task_dir: &PathBuf) -> (String, usize, usize, String) {
 
     // Parse JSON to get info
     if let Ok(prd) = serde_json::from_str::<serde_json::Value>(&content) {
-        let description = prd.get("description")
+        let description = prd
+            .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("No description")
             .chars()
             .take(50)
             .collect::<String>();
 
-        let stories = prd.get("userStories")
+        let stories = prd
+            .get("userStories")
             .and_then(|v| v.as_array())
             .map(|arr| arr.len())
             .unwrap_or(0);
 
-        let completed = prd.get("userStories")
+        let completed = prd
+            .get("userStories")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter(|s| {
-                s.get("passes").and_then(|v| v.as_bool()).unwrap_or(false)
-            }).count())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|s| s.get("passes").and_then(|v| v.as_bool()).unwrap_or(false))
+                    .count()
+            })
             .unwrap_or(0);
 
-        let prd_type = prd.get("type")
+        let prd_type = prd
+            .get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("feature")
             .to_string();
 
         (description, completed, stories, prd_type)
     } else {
-        ("Unable to parse prd.json".to_string(), 0, 0, "unknown".to_string())
+        (
+            "Unable to parse prd.json".to_string(),
+            0,
+            0,
+            "unknown".to_string(),
+        )
     }
 }
 
@@ -1259,9 +1307,10 @@ fn prompt_task_selection(tasks: &[PathBuf]) -> io::Result<PathBuf> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
 
-    let selection: usize = input.trim().parse().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "Invalid selection")
-    })?;
+    let selection: usize = input
+        .trim()
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid selection"))?;
 
     if selection < 1 || selection > tasks.len() {
         return Err(io::Error::new(
@@ -1290,16 +1339,22 @@ fn prompt_iterations() -> io::Result<u32> {
         return Ok(10);
     }
 
-    input.parse().map_err(|_| {
-        eprintln!("Invalid number. Using default of 10.");
-        io::Error::new(io::ErrorKind::InvalidInput, "Invalid number")
-    }).or(Ok(10))
+    input
+        .parse()
+        .map_err(|_| {
+            eprintln!("Invalid number. Using default of 10.");
+            io::Error::new(io::ErrorKind::InvalidInput, "Invalid number")
+        })
+        .or(Ok(10))
 }
 
 /// Prompt for rotation threshold
 fn prompt_rotation_threshold(current: u32, progress_lines: usize) -> io::Result<u32> {
     println!();
-    println!("Progress file has {} lines (rotation threshold: {})", progress_lines, current);
+    println!(
+        "Progress file has {} lines (rotation threshold: {})",
+        progress_lines, current
+    );
     print!("Rotation threshold [{}]: ", current);
     io::stdout().flush()?;
 
@@ -1311,10 +1366,102 @@ fn prompt_rotation_threshold(current: u32, progress_lines: usize) -> io::Result<
         return Ok(current);
     }
 
-    input.parse().map_err(|_| {
-        eprintln!("Invalid number. Using default of {}.", current);
-        io::Error::new(io::ErrorKind::InvalidInput, "Invalid number")
-    }).or(Ok(current))
+    input
+        .parse()
+        .map_err(|_| {
+            eprintln!("Invalid number. Using default of {}.", current);
+            io::Error::new(io::ErrorKind::InvalidInput, "Invalid number")
+        })
+        .or(Ok(current))
+}
+
+/// Get the tmux session name for a task directory (matches ralph.sh naming)
+fn get_session_name(task_dir: &PathBuf) -> String {
+    let task_name = task_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+    format!("ralph-{}", task_name)
+}
+
+/// Check if a tmux session exists
+fn tmux_session_exists(session_name: &str) -> bool {
+    std::process::Command::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Find all running ralph tmux sessions
+fn find_ralph_sessions() -> Vec<(String, String)> {
+    let output = std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output();
+
+    match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter(|s| s.starts_with("ralph-"))
+            .map(|s| {
+                let task_name = s.strip_prefix("ralph-").unwrap_or(s);
+                (s.to_string(), task_name.to_string())
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Prompt user to select from running ralph sessions
+fn prompt_session_selection(sessions: &[(String, String)]) -> io::Result<String> {
+    println!();
+    println!("╔═══════════════════════════════════════════════════════════════╗");
+    println!("║  Ralph TUI - Select Running Session                           ║");
+    println!("╚═══════════════════════════════════════════════════════════════╝");
+    println!();
+    println!("Running sessions:");
+    println!();
+
+    for (i, (session_name, task_name)) in sessions.iter().enumerate() {
+        let task_dir = PathBuf::from(format!("tasks/{}", task_name));
+        if task_dir.exists() {
+            let (desc, completed, total, prd_type) = get_task_info(&task_dir);
+            println!(
+                "  {}) {:30} [{}/{}] ({})",
+                i + 1,
+                session_name,
+                completed,
+                total,
+                prd_type
+            );
+            if !desc.is_empty() {
+                println!("     {}", desc);
+            }
+        } else {
+            println!("  {}) {}", i + 1, session_name);
+        }
+    }
+
+    println!();
+    print!("Select session [1-{}]: ", sessions.len());
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+
+    let selection: usize = input
+        .trim()
+        .parse()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid selection"))?;
+
+    if selection < 1 || selection > sessions.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Selection out of range",
+        ));
+    }
+
+    Ok(sessions[selection - 1].0.clone())
 }
 
 /// Parse CLI arguments and return configuration
@@ -1324,6 +1471,7 @@ fn parse_args() -> io::Result<CliConfig> {
     let mut max_iterations: Option<u32> = None;
     let mut rotate_threshold: u32 = 300;
     let mut skip_prompts = false;
+    let mut run_mode = RunMode::Standalone;
 
     let mut i = 1;
     while i < args.len() {
@@ -1334,6 +1482,9 @@ fn parse_args() -> io::Result<CliConfig> {
         } else if arg == "-V" || arg == "--version" {
             println!("ralph-tui {}", VERSION);
             std::process::exit(0);
+        } else if arg == "-a" || arg == "--attach" {
+            run_mode = RunMode::Attach;
+            i += 1;
         } else if arg == "-y" || arg == "--yes" {
             skip_prompts = true;
             i += 1;
@@ -1381,7 +1532,58 @@ fn parse_args() -> io::Result<CliConfig> {
         }
     }
 
-    // If no task directory provided, find and prompt
+    // Handle attach mode specially
+    if run_mode == RunMode::Attach {
+        let sessions = find_ralph_sessions();
+        if sessions.is_empty() {
+            println!("No running Ralph sessions found.");
+            println!();
+            println!("To start a task in background:");
+            println!("  ralph tasks/my-feature");
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "No running sessions",
+            ));
+        }
+
+        let (session_name, task_dir) = if let Some(dir) = task_dir {
+            let expected_session = get_session_name(&dir);
+            if tmux_session_exists(&expected_session) {
+                (expected_session, dir)
+            } else {
+                println!("No running session for task: {}", dir.display());
+                if sessions.len() == 1 {
+                    let task_dir = PathBuf::from(format!("tasks/{}", sessions[0].1));
+                    (sessions[0].0.clone(), task_dir)
+                } else {
+                    let session = prompt_session_selection(&sessions)?;
+                    let task_name = session.strip_prefix("ralph-").unwrap_or(&session);
+                    let task_dir = PathBuf::from(format!("tasks/{}", task_name));
+                    (session, task_dir)
+                }
+            }
+        } else if sessions.len() == 1 {
+            println!("Found one running session: {}", sessions[0].0);
+            let task_dir = PathBuf::from(format!("tasks/{}", sessions[0].1));
+            (sessions[0].0.clone(), task_dir)
+        } else {
+            let session = prompt_session_selection(&sessions)?;
+            let task_name = session.strip_prefix("ralph-").unwrap_or(&session);
+            let task_dir = PathBuf::from(format!("tasks/{}", task_name));
+            (session, task_dir)
+        };
+
+        return Ok(CliConfig {
+            task_dir,
+            max_iterations: 0,
+            rotate_threshold,
+            skip_prompts: true,
+            run_mode,
+            tmux_session: Some(session_name),
+        });
+    }
+
+    // Standalone mode: If no task directory provided, find and prompt
     let task_dir = if let Some(dir) = task_dir {
         dir
     } else {
@@ -1420,11 +1622,10 @@ fn parse_args() -> io::Result<CliConfig> {
     if progress_path.exists() && !skip_prompts {
         if let Ok(content) = std::fs::read_to_string(&progress_path) {
             let lines = content.lines().count();
-            // Prompt if within 50 lines of threshold or has prior rotations
             let has_prior_rotation = task_dir.join("progress-1.txt").exists();
             if lines > rotate_threshold.saturating_sub(50) as usize || has_prior_rotation {
-                rotate_threshold = prompt_rotation_threshold(rotate_threshold, lines)
-                    .unwrap_or(rotate_threshold);
+                rotate_threshold =
+                    prompt_rotation_threshold(rotate_threshold, lines).unwrap_or(rotate_threshold);
             }
         }
     }
@@ -1434,6 +1635,8 @@ fn parse_args() -> io::Result<CliConfig> {
         max_iterations,
         rotate_threshold,
         skip_prompts,
+        run_mode,
+        tmux_session: None,
     })
 }
 
@@ -1443,7 +1646,10 @@ fn spawn_claude(
     app: &mut App,
     pty_rows: u16,
     pty_cols: u16,
-) -> io::Result<(Box<dyn portable_pty::Child + Send + Sync>, thread::JoinHandle<()>)> {
+) -> io::Result<(
+    Box<dyn portable_pty::Child + Send + Sync>,
+    thread::JoinHandle<()>,
+)> {
     // Build the Ralph prompt
     let ralph_prompt = build_ralph_prompt(&app.task_dir)?;
 
@@ -1517,9 +1723,10 @@ fn spawn_claude(
 
     // Reset PTY state for new iteration
     {
-        let mut state = app.pty_state.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Failed to lock PTY state")
-        })?;
+        let mut state = app
+            .pty_state
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock PTY state"))?;
         state.child_exited = false;
         state.clear_recent_output();
         // Re-initialize parser to clear screen
@@ -1561,6 +1768,64 @@ fn spawn_claude(
     Ok((child, reader_thread))
 }
 
+/// Attach to a tmux session and capture its output
+/// Spawns a thread that continuously captures pane content and feeds it to the VT100 parser
+fn attach_to_tmux_session(
+    session_name: &str,
+    pty_state: Arc<Mutex<PtyState>>,
+) -> io::Result<thread::JoinHandle<()>> {
+    let session = session_name.to_string();
+
+    let handle = thread::spawn(move || {
+        let mut last_content = String::new();
+
+        loop {
+            // Check if session still exists
+            if !tmux_session_exists(&session) {
+                if let Ok(mut state) = pty_state.lock() {
+                    state.child_exited = true;
+                }
+                break;
+            }
+
+            // Capture pane content with ANSI escape sequences
+            let output = std::process::Command::new("tmux")
+                .args([
+                    "capture-pane",
+                    "-t",
+                    &session,
+                    "-p", // print to stdout
+                    "-e", // include escape sequences
+                    "-S",
+                    "-1000", // start from 1000 lines back (scrollback)
+                ])
+                .output();
+
+            if let Ok(o) = output {
+                if o.status.success() {
+                    let content = String::from_utf8_lossy(&o.stdout).to_string();
+
+                    // Only update if content changed
+                    if content != last_content {
+                        if let Ok(mut state) = pty_state.lock() {
+                            let (rows, cols) = state.parser.screen().size();
+                            state.parser = vt100::Parser::new(rows, cols, 1000);
+                            state.parser.process(content.as_bytes());
+                            state.append_output(content.as_bytes());
+                        }
+                        last_content = content;
+                    }
+                }
+            }
+
+            // Poll every 100ms for responsive updates
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+
+    Ok(handle)
+}
+
 fn main() -> io::Result<()> {
     // Set up panic hook to restore terminal state before panicking
     let default_panic = std::panic::take_hook();
@@ -1574,6 +1839,10 @@ fn main() -> io::Result<()> {
 
     // Parse CLI arguments (includes interactive prompts if needed)
     let config = parse_args()?;
+
+    // Store run mode before moving config
+    let run_mode = config.run_mode;
+    let tmux_session = config.tmux_session.clone();
 
     // Validate task directory exists
     if !config.task_dir.exists() {
@@ -1595,11 +1864,22 @@ fn main() -> io::Result<()> {
     // Show startup banner
     println!();
     println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║  Ralph TUI - Autonomous Agent Loop                            ║");
+    if run_mode == RunMode::Attach {
+        println!("║  Ralph TUI - Attached to Running Session                      ║");
+    } else {
+        println!("║  Ralph TUI - Autonomous Agent Loop                            ║");
+    }
     println!("╚═══════════════════════════════════════════════════════════════╝");
     println!();
     println!("  Task:       {}", config.task_dir.display());
-    println!("  Max iters:  {}", config.max_iterations);
+    if run_mode == RunMode::Attach {
+        if let Some(ref session) = tmux_session {
+            println!("  Session:    {}", session);
+        }
+        println!("  Mode:       View only (attached to background task)");
+    } else {
+        println!("  Max iters:  {}", config.max_iterations);
+    }
     println!();
     println!("Starting TUI...");
     println!();
@@ -1613,7 +1893,9 @@ fn main() -> io::Result<()> {
     let initial_size = terminal.size()?;
     // Calculate right panel size (70% of width, minus borders)
     // Ensure minimum sizes to prevent issues
-    let pty_cols = ((initial_size.width as f32 * 0.70) as u16).saturating_sub(2).max(40);
+    let pty_cols = ((initial_size.width as f32 * 0.70) as u16)
+        .saturating_sub(2)
+        .max(40);
     let pty_rows = initial_size.height.saturating_sub(3).max(10);
 
     // Create app state with VT100 parser sized to PTY dimensions
@@ -1628,78 +1910,97 @@ fn main() -> io::Result<()> {
     let mut last_cols = pty_cols;
     let mut last_rows = pty_rows;
 
-    // Spawn initial Claude process
-    let (mut child, mut reader_thread) = spawn_claude(&mut app, pty_rows, pty_cols)?;
+    // Branch based on run mode
+    let result = if run_mode == RunMode::Attach {
+        // Attach mode: connect to existing tmux session (view only)
+        let session_name = tmux_session.as_ref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "No tmux session specified")
+        })?;
 
-    // Run the main loop
-    let result = loop {
-        // Run the UI loop for current iteration
-        let run_result = run(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
+        let reader_thread = attach_to_tmux_session(session_name, Arc::clone(&app.pty_state))?;
 
-        // Clean up current iteration - kill the child process first to avoid blocking
-        let _ = child.kill();
-        let _ = child.wait();
-        drop(app.master_pty.take());
-        drop(app.pty_writer.take());
+        // Run view-only loop
+        let run_result = run_attach_mode(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
+
+        // Clean up
         let _ = reader_thread.join();
 
-        // Check iteration state
-        match app.iteration_state {
-            IterationState::Completed => {
-                // All done!
-                break run_result;
-            }
-            IterationState::NeedsRestart => {
-                // Check if we have more iterations
-                if app.current_iteration >= app.max_iterations {
+        run_result
+    } else {
+        // Standalone mode: spawn and manage Claude processes
+        let (mut child, mut reader_thread) = spawn_claude(&mut app, pty_rows, pty_cols)?;
+
+        // Run the main loop
+        loop {
+            // Run the UI loop for current iteration
+            let run_result = run(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
+
+            // Clean up current iteration - kill the child process first to avoid blocking
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(app.master_pty.take());
+            drop(app.pty_writer.take());
+            let _ = reader_thread.join();
+
+            // Check iteration state
+            match app.iteration_state {
+                IterationState::Completed => {
+                    // All done!
                     break run_result;
                 }
-
-                // Start delay period
-                app.iteration_state = IterationState::WaitingDelay;
-                app.delay_start = Some(std::time::Instant::now());
-
-                // Wait for 2 seconds (with UI updates)
-                let delay_result = run_delay(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
-                if let Err(e) = delay_result {
-                    break Err(e);
-                }
-
-                // Check if user quit during delay
-                if matches!(app.iteration_state, IterationState::Completed) {
-                    break Ok(());
-                }
-
-                // Start next iteration
-                app.current_iteration += 1;
-                app.iteration_start = Instant::now();
-                app.delay_start = None;
-
-                // Reload PRD to get latest state
-                if let Ok(prd) = Prd::load(&app.prd_path) {
-                    // Check if all stories pass - project is complete!
-                    if prd.all_stories_pass() {
-                        app.prd = Some(prd);
-                        app.iteration_state = IterationState::Completed;
-                        break Ok(());
+                IterationState::NeedsRestart => {
+                    // Check if we have more iterations
+                    if app.current_iteration >= app.max_iterations {
+                        break run_result;
                     }
-                    app.prd = Some(prd);
-                }
 
-                // Spawn new Claude process
-                match spawn_claude(&mut app, last_rows, last_cols) {
-                    Ok((new_child, new_thread)) => {
-                        child = new_child;
-                        reader_thread = new_thread;
-                    }
-                    Err(e) => {
+                    // Start delay period
+                    app.iteration_state = IterationState::WaitingDelay;
+                    app.delay_start = Some(std::time::Instant::now());
+
+                    // Wait for 2 seconds (with UI updates)
+                    let delay_result =
+                        run_delay(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
+                    if let Err(e) = delay_result {
                         break Err(e);
                     }
+
+                    // Check if user quit during delay
+                    if matches!(app.iteration_state, IterationState::Completed) {
+                        break Ok(());
+                    }
+
+                    // Start next iteration
+                    app.current_iteration += 1;
+                    app.iteration_start = Instant::now();
+                    app.delay_start = None;
+
+                    // Reload PRD to get latest state
+                    if let Ok(prd) = Prd::load(&app.prd_path) {
+                        // Check if all stories pass - project is complete!
+                        if prd.all_stories_pass() {
+                            app.prd = Some(prd);
+                            app.iteration_state = IterationState::Completed;
+                            break Ok(());
+                        }
+                        app.prd = Some(prd);
+                    }
+
+                    // Spawn new Claude process
+                    match spawn_claude(&mut app, last_rows, last_cols) {
+                        Ok((new_child, new_thread)) => {
+                            child = new_child;
+                            reader_thread = new_thread;
+                        }
+                        Err(e) => {
+                            break Err(e);
+                        }
+                    }
                 }
-            }
-            _ => {
-                // Running or WaitingDelay - shouldn't reach here normally
-                break run_result;
+                _ => {
+                    // Running or WaitingDelay - shouldn't reach here normally
+                    break run_result;
+                }
             }
         }
     };
@@ -1786,7 +2087,9 @@ fn run(
             let area = frame.area();
 
             // Check for terminal resize
-            let new_pty_cols = ((area.width as f32 * 0.70) as u16).saturating_sub(2).max(40);
+            let new_pty_cols = ((area.width as f32 * 0.70) as u16)
+                .saturating_sub(2)
+                .max(40);
             let new_pty_rows = area.height.saturating_sub(3).max(10);
 
             if new_pty_cols != *last_cols || new_pty_rows != *last_rows {
@@ -1822,12 +2125,16 @@ fn run(
             // Determine border styles based on current mode
             let (left_border_style, right_border_style) = match app.mode {
                 Mode::Ralph => (
-                    Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
                     Style::default().fg(BORDER_SUBTLE),
                 ),
                 Mode::Claude => (
                     Style::default().fg(BORDER_SUBTLE),
-                    Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
                 ),
             };
 
@@ -1878,11 +2185,17 @@ fn run(
             let header_lines = vec![
                 Line::from(vec![
                     Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
-                    Span::styled("RALPH LOOP", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "RALPH LOOP",
+                        Style::default()
+                            .fg(TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
-                Line::from(vec![
-                    Span::styled(format!("Terminal v{}", VERSION), Style::default().fg(CYAN_PRIMARY)),
-                ]),
+                Line::from(vec![Span::styled(
+                    format!("Terminal v{}", VERSION),
+                    Style::default().fg(CYAN_PRIMARY),
+                )]),
                 Line::from(""), // Gap after header
             ];
             let header = Paragraph::new(header_lines);
@@ -1908,12 +2221,7 @@ fn run(
             );
 
             // Render progress stat cards (second row)
-            render_progress_cards(
-                cards_layout[1],
-                completed,
-                total,
-                frame,
-            );
+            render_progress_cards(cards_layout[1], completed, total, frame);
 
             // Build remaining status content
             let mut status_lines: Vec<Line> = Vec::new();
@@ -1921,9 +2229,10 @@ fn run(
 
             // Active Phase section
             let session_elapsed = app.session_start.elapsed();
-            status_lines.push(Line::from(vec![
-                Span::styled("✦ ACTIVE PHASE", Style::default().fg(TEXT_MUTED)),
-            ]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "✦ ACTIVE PHASE",
+                Style::default().fg(TEXT_MUTED),
+            )]));
             // Determine current phase name based on iteration state
             let phase_name = match app.iteration_state {
                 IterationState::Running => "Execute Iteration Cycle",
@@ -1931,30 +2240,38 @@ fn run(
                 IterationState::NeedsRestart => "Preparing Next Iteration",
                 IterationState::WaitingDelay => "Waiting for Delay",
             };
-            status_lines.push(Line::from(vec![
-                Span::styled(
-                    phase_name,
-                    Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            status_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("⏱ Uptime: {}", format_duration(session_elapsed)),
-                    Style::default().fg(TEXT_MUTED),
-                ),
-            ]));
+            status_lines.push(Line::from(vec![Span::styled(
+                phase_name,
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                format!("⏱ Uptime: {}", format_duration(session_elapsed)),
+                Style::default().fg(TEXT_MUTED),
+            )]));
             status_lines.push(Line::from("")); // Gap after active phase
 
             // Elapsed time (iteration-specific)
             let iteration_elapsed = app.iteration_start.elapsed();
             status_lines.push(Line::from(vec![
-                Span::styled("Session: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Session: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format_duration(session_elapsed),
                     Style::default().fg(TEXT_PRIMARY),
                 ),
                 Span::raw("  "),
-                Span::styled("Iter: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Iter: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format_duration(iteration_elapsed),
                     Style::default().fg(TEXT_PRIMARY),
@@ -1972,9 +2289,12 @@ fn run(
 
             // Recent activities section
             if !activities.is_empty() {
-                status_lines.push(Line::from(vec![
-                    Span::styled("Recent Activity:", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
-                ]));
+                status_lines.push(Line::from(vec![Span::styled(
+                    "Recent Activity:",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 let max_activity_width = left_panel_area.width.saturating_sub(6) as usize;
                 for activity in activities.iter().take(5) {
                     status_lines.push(Line::from(vec![
@@ -1991,18 +2311,29 @@ fn run(
             // PRD information
             if let Some(ref prd) = app.prd {
                 // Description
-                status_lines.push(Line::from(vec![
-                    Span::styled("Task: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
-                ]));
+                status_lines.push(Line::from(vec![Span::styled(
+                    "Task: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )]));
                 // Wrap description to fit panel
-                for line in wrap_text(&prd.description, left_panel_area.width.saturating_sub(4) as usize) {
+                for line in wrap_text(
+                    &prd.description,
+                    left_panel_area.width.saturating_sub(4) as usize,
+                ) {
                     status_lines.push(Line::from(Span::raw(format!("  {}", line))));
                 }
                 status_lines.push(Line::from(""));
 
                 // Branch
                 status_lines.push(Line::from(vec![
-                    Span::styled("Branch: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Branch: ",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(&prd.branch_name),
                 ]));
                 status_lines.push(Line::from(""));
@@ -2014,11 +2345,18 @@ fn run(
                     0
                 };
                 status_lines.push(Line::from(vec![
-                    Span::styled("Progress: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Progress: ",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(
                         format!("{}%", progress_pct),
                         if completed == total {
-                            Style::default().fg(GREEN_SUCCESS).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(GREEN_SUCCESS)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(CYAN_PRIMARY)
                         },
@@ -2031,7 +2369,11 @@ fn run(
                 let empty = bar_width.saturating_sub(filled);
                 let bar_filled: String = "█".repeat(filled);
                 let bar_empty: String = "░".repeat(empty);
-                let progress_color = if completed == total { GREEN_SUCCESS } else { CYAN_PRIMARY };
+                let progress_color = if completed == total {
+                    GREEN_SUCCESS
+                } else {
+                    CYAN_PRIMARY
+                };
                 status_lines.push(Line::from(vec![
                     Span::styled(bar_filled, Style::default().fg(progress_color)),
                     Span::styled(bar_empty, Style::default().fg(BORDER_SUBTLE)),
@@ -2039,12 +2381,16 @@ fn run(
                 status_lines.push(Line::from(""));
 
                 // User Stories section header
-                status_lines.push(Line::from(vec![
-                    Span::styled("↳ USER STORIES / PHASES", Style::default().fg(TEXT_MUTED)),
-                ]));
+                status_lines.push(Line::from(vec![Span::styled(
+                    "↳ USER STORIES / PHASES",
+                    Style::default().fg(TEXT_MUTED),
+                )]));
             } else {
                 status_lines.push(Line::from(vec![
-                    Span::styled("Error: ", Style::default().fg(RED_ERROR).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Error: ",
+                        Style::default().fg(RED_ERROR).add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw("Failed to load prd.json"),
                 ]));
             }
@@ -2057,7 +2403,7 @@ fn run(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(status_line_count),
-                    Constraint::Min(0), // Story cards area
+                    Constraint::Min(0),    // Story cards area
                     Constraint::Length(4), // Hints area
                 ])
                 .split(content_area_inner);
@@ -2066,26 +2412,54 @@ fn run(
             let stories_area = content_split[1];
             let hints_area = content_split[2];
 
-            let left_content = Paragraph::new(status_lines)
-                .style(Style::default().fg(TEXT_PRIMARY));
+            let left_content =
+                Paragraph::new(status_lines).style(Style::default().fg(TEXT_PRIMARY));
 
             frame.render_widget(left_content, status_area);
 
             // Render keybinding hints at the bottom of left panel
             let hints_lines = vec![
-                Line::from(Span::styled("─── Navigation ───", Style::default().fg(BORDER_SUBTLE))),
+                Line::from(Span::styled(
+                    "─── Navigation ───",
+                    Style::default().fg(BORDER_SUBTLE),
+                )),
                 Line::from(vec![
-                    Span::styled("↑↓", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "↑↓",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" or ", Style::default().fg(TEXT_MUTED)),
-                    Span::styled("j/k", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "j/k",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" Select story", Style::default().fg(TEXT_MUTED)),
                 ]),
                 Line::from(vec![
-                    Span::styled("s", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "s",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" Story  ", Style::default().fg(TEXT_MUTED)),
-                    Span::styled("p", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "p",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" Progress  ", Style::default().fg(TEXT_MUTED)),
-                    Span::styled("r", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "r",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" Reqs", Style::default().fg(TEXT_MUTED)),
                 ]),
             ];
@@ -2098,7 +2472,11 @@ fn run(
                 let progress_percent = if let Some(story) = prd.current_story() {
                     let total = story.acceptance_criteria.len();
                     if total > 0 {
-                        let passed = story.acceptance_criteria.iter().filter(|c| c.passes).count();
+                        let passed = story
+                            .acceptance_criteria
+                            .iter()
+                            .filter(|c| c.passes)
+                            .count();
                         ((passed as f32 / total as f32) * 100.0) as u16
                     } else {
                         0
@@ -2135,7 +2513,9 @@ fn run(
                 if app.selected_story_index >= app.story_scroll_offset + estimated_visible {
                     // Selected story is below visible area, scroll down
                     // Put selected story at the bottom of visible area
-                    app.story_scroll_offset = app.selected_story_index.saturating_sub(estimated_visible.saturating_sub(1));
+                    app.story_scroll_offset = app
+                        .selected_story_index
+                        .saturating_sub(estimated_visible.saturating_sub(1));
                 }
                 let max_scroll = stories.len().saturating_sub(1);
                 if app.story_scroll_offset > max_scroll {
@@ -2225,7 +2605,11 @@ fn run(
 
                     // Calculate criteria progress for this story
                     let criteria_total = story.acceptance_criteria.len();
-                    let criteria_passed = story.acceptance_criteria.iter().filter(|c| c.passes).count();
+                    let criteria_passed = story
+                        .acceptance_criteria
+                        .iter()
+                        .filter(|c| c.passes)
+                        .count();
 
                     render_story_card(
                         card_area,
@@ -2252,19 +2636,20 @@ fn run(
             // Each terminal is its own bordered section
 
             // Determine Ralph terminal height based on expanded state
-            let ralph_is_expanded = app.ralph_expanded || app.ralph_view_mode != RalphViewMode::Normal;
+            let ralph_is_expanded =
+                app.ralph_expanded || app.ralph_view_mode != RalphViewMode::Normal;
             let ralph_terminal_height = if ralph_is_expanded {
-                9  // Expanded: 2 border + 5 content + 2 padding
+                9 // Expanded: 2 border + 5 content + 2 padding
             } else {
-                6  // Normal: 2 border + 2 content + 2 padding
+                6 // Normal: 2 border + 2 content + 2 padding
             };
 
             // Split right panel directly into Ralph terminal (top) and Claude terminal (bottom)
             let terminal_split = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(ralph_terminal_height),  // Ralph terminal (top)
-                    Constraint::Min(0),  // Claude terminal (takes remaining space, bottom)
+                    Constraint::Length(ralph_terminal_height), // Ralph terminal (top)
+                    Constraint::Min(0), // Claude terminal (takes remaining space, bottom)
                 ])
                 .split(right_panel_area);
 
@@ -2309,8 +2694,7 @@ fn run(
                 0
             };
 
-            let claude_content = Paragraph::new(lines)
-                .scroll((scroll_offset, 0));
+            let claude_content = Paragraph::new(lines).scroll((scroll_offset, 0));
             frame.render_widget(claude_content, claude_content_area);
 
             // === RALPH TERMINAL ===
@@ -2343,11 +2727,19 @@ fn run(
                     vec![
                         Line::from(vec![
                             Span::styled("  ▶▶ ", Style::default().fg(GREEN_ACTIVE)),
-                            Span::styled("RALPH LOOP", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                            Span::styled(
+                                "RALPH LOOP",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
                             Span::styled(" ◀◀", Style::default().fg(GREEN_ACTIVE)),
                         ]),
                         Line::from(Span::styled(
-                            format!("     Iteration {}/{}", app.current_iteration, app.max_iterations),
+                            format!(
+                                "     Iteration {}/{}",
+                                app.current_iteration, app.max_iterations
+                            ),
                             Style::default().fg(TEXT_MUTED),
                         )),
                     ]
@@ -2358,43 +2750,90 @@ fn run(
                         let mut stories: Vec<_> = prd.user_stories.iter().collect();
                         stories.sort_by_key(|s| s.priority);
                         if let Some(story) = stories.get(app.selected_story_index) {
-                            let status_text = if story.passes { "✓ PASSED" } else { "○ PENDING" };
-                            let status_color = if story.passes { GREEN_SUCCESS } else { AMBER_WARNING };
+                            let status_text = if story.passes {
+                                "✓ PASSED"
+                            } else {
+                                "○ PENDING"
+                            };
+                            let status_color = if story.passes {
+                                GREEN_SUCCESS
+                            } else {
+                                AMBER_WARNING
+                            };
                             let mut lines = vec![
                                 Line::from(vec![
-                                    Span::styled(format!("  {} ", story.id), Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                                    Span::styled(
+                                        format!("  {} ", story.id),
+                                        Style::default()
+                                            .fg(CYAN_PRIMARY)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
                                     Span::styled(status_text, Style::default().fg(status_color)),
                                 ]),
-                                Line::from(Span::styled(format!("  {}", story.title), Style::default().fg(TEXT_PRIMARY))),
+                                Line::from(Span::styled(
+                                    format!("  {}", story.title),
+                                    Style::default().fg(TEXT_PRIMARY),
+                                )),
                             ];
                             // Add all acceptance criteria (scrollable)
-                            lines.push(Line::from(Span::styled("  ─── Acceptance Criteria ───", Style::default().fg(BORDER_SUBTLE))));
+                            lines.push(Line::from(Span::styled(
+                                "  ─── Acceptance Criteria ───",
+                                Style::default().fg(BORDER_SUBTLE),
+                            )));
                             for (i, criterion) in story.acceptance_criteria.iter().enumerate() {
                                 let check = if criterion.passes { "✓" } else { "○" };
-                                let check_color = if criterion.passes { GREEN_SUCCESS } else { TEXT_MUTED };
+                                let check_color = if criterion.passes {
+                                    GREEN_SUCCESS
+                                } else {
+                                    TEXT_MUTED
+                                };
                                 lines.push(Line::from(vec![
-                                    Span::styled(format!("  {} ", check), Style::default().fg(check_color)),
-                                    Span::styled(format!("{}. {}", i + 1, criterion.description), Style::default().fg(TEXT_SECONDARY)),
+                                    Span::styled(
+                                        format!("  {} ", check),
+                                        Style::default().fg(check_color),
+                                    ),
+                                    Span::styled(
+                                        format!("{}. {}", i + 1, criterion.description),
+                                        Style::default().fg(TEXT_SECONDARY),
+                                    ),
                                 ]));
                             }
                             // Add description if present
                             if !story.description.is_empty() {
                                 lines.push(Line::from(""));
-                                lines.push(Line::from(Span::styled("  ─── Description ───", Style::default().fg(BORDER_SUBTLE))));
-                                lines.push(Line::from(Span::styled(format!("  {}", story.description), Style::default().fg(TEXT_MUTED))));
+                                lines.push(Line::from(Span::styled(
+                                    "  ─── Description ───",
+                                    Style::default().fg(BORDER_SUBTLE),
+                                )));
+                                lines.push(Line::from(Span::styled(
+                                    format!("  {}", story.description),
+                                    Style::default().fg(TEXT_MUTED),
+                                )));
                             }
                             // Add notes if present
                             if !story.notes.is_empty() {
                                 lines.push(Line::from(""));
-                                lines.push(Line::from(Span::styled("  ─── Notes ───", Style::default().fg(BORDER_SUBTLE))));
-                                lines.push(Line::from(Span::styled(format!("  {}", story.notes), Style::default().fg(TEXT_MUTED))));
+                                lines.push(Line::from(Span::styled(
+                                    "  ─── Notes ───",
+                                    Style::default().fg(BORDER_SUBTLE),
+                                )));
+                                lines.push(Line::from(Span::styled(
+                                    format!("  {}", story.notes),
+                                    Style::default().fg(TEXT_MUTED),
+                                )));
                             }
                             lines
                         } else {
-                            vec![Line::from(Span::styled("  No story selected", Style::default().fg(TEXT_MUTED)))]
+                            vec![Line::from(Span::styled(
+                                "  No story selected",
+                                Style::default().fg(TEXT_MUTED),
+                            ))]
                         }
                     } else {
-                        vec![Line::from(Span::styled("  No PRD loaded", Style::default().fg(TEXT_MUTED)))]
+                        vec![Line::from(Span::styled(
+                            "  No PRD loaded",
+                            Style::default().fg(TEXT_MUTED),
+                        ))]
                     }
                 }
                 RalphViewMode::Progress => {
@@ -2407,12 +2846,18 @@ fn run(
                             if let Ok(content) = std::fs::read_to_string(&progress_path) {
                                 // Find entries containing the story ID
                                 let story_id = &story.id;
-                                let mut matching_lines: Vec<Line> = vec![
-                                    Line::from(vec![
-                                        Span::styled("  Progress for ", Style::default().fg(TEXT_MUTED)),
-                                        Span::styled(story_id.clone(), Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
-                                    ]),
-                                ];
+                                let mut matching_lines: Vec<Line> = vec![Line::from(vec![
+                                    Span::styled(
+                                        "  Progress for ",
+                                        Style::default().fg(TEXT_MUTED),
+                                    ),
+                                    Span::styled(
+                                        story_id.clone(),
+                                        Style::default()
+                                            .fg(CYAN_PRIMARY)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ])];
 
                                 // Find section that mentions this story ID
                                 let mut in_matching_section = false;
@@ -2443,13 +2888,22 @@ fn run(
                                 }
                                 matching_lines
                             } else {
-                                vec![Line::from(Span::styled("  progress.txt not found", Style::default().fg(TEXT_MUTED)))]
+                                vec![Line::from(Span::styled(
+                                    "  progress.txt not found",
+                                    Style::default().fg(TEXT_MUTED),
+                                ))]
                             }
                         } else {
-                            vec![Line::from(Span::styled("  No story selected", Style::default().fg(TEXT_MUTED)))]
+                            vec![Line::from(Span::styled(
+                                "  No story selected",
+                                Style::default().fg(TEXT_MUTED),
+                            ))]
                         }
                     } else {
-                        vec![Line::from(Span::styled("  No PRD loaded", Style::default().fg(TEXT_MUTED)))]
+                        vec![Line::from(Span::styled(
+                            "  No PRD loaded",
+                            Style::default().fg(TEXT_MUTED),
+                        ))]
                     }
                 }
                 RalphViewMode::Requirements => {
@@ -2462,19 +2916,26 @@ fn run(
                             if let Ok(content) = std::fs::read_to_string(&prd_md_path) {
                                 let story_id = &story.id;
                                 let story_title = &story.title;
-                                let mut matching_lines: Vec<Line> = vec![
-                                    Line::from(vec![
-                                        Span::styled("  Requirements for ", Style::default().fg(TEXT_MUTED)),
-                                        Span::styled(story_id.clone(), Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
-                                    ]),
-                                ];
+                                let mut matching_lines: Vec<Line> = vec![Line::from(vec![
+                                    Span::styled(
+                                        "  Requirements for ",
+                                        Style::default().fg(TEXT_MUTED),
+                                    ),
+                                    Span::styled(
+                                        story_id.clone(),
+                                        Style::default()
+                                            .fg(CYAN_PRIMARY)
+                                            .add_modifier(Modifier::BOLD),
+                                    ),
+                                ])];
 
                                 // Find section that mentions this story ID or title
                                 let mut in_matching_section = false;
                                 let mut found_any = false;
                                 for line in content.lines() {
                                     // Look for headers containing story ID or title
-                                    if (line.contains(story_id) || line.contains(story_title.as_str()))
+                                    if (line.contains(story_id)
+                                        || line.contains(story_title.as_str()))
                                         && (line.starts_with("#") || line.starts_with("##"))
                                     {
                                         in_matching_section = true;
@@ -2501,13 +2962,22 @@ fn run(
                                 }
                                 matching_lines
                             } else {
-                                vec![Line::from(Span::styled("  prd.md not found", Style::default().fg(TEXT_MUTED)))]
+                                vec![Line::from(Span::styled(
+                                    "  prd.md not found",
+                                    Style::default().fg(TEXT_MUTED),
+                                ))]
                             }
                         } else {
-                            vec![Line::from(Span::styled("  No story selected", Style::default().fg(TEXT_MUTED)))]
+                            vec![Line::from(Span::styled(
+                                "  No story selected",
+                                Style::default().fg(TEXT_MUTED),
+                            ))]
                         }
                     } else {
-                        vec![Line::from(Span::styled("  No PRD loaded", Style::default().fg(TEXT_MUTED)))]
+                        vec![Line::from(Span::styled(
+                            "  No PRD loaded",
+                            Style::default().fg(TEXT_MUTED),
+                        ))]
                     }
                 }
             };
@@ -2516,13 +2986,26 @@ fn run(
             let mut ralph_content_lines = ralph_content_lines;
             let ralph_scroll = if app.ralph_view_mode != RalphViewMode::Normal {
                 // Add scroll hint at the top
-                ralph_content_lines.insert(0, Line::from(vec![
-                    Span::styled("  PgUp/PgDn", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
-                    Span::styled(" to scroll │ Press key again to close", Style::default().fg(TEXT_MUTED)),
-                ]));
+                ralph_content_lines.insert(
+                    0,
+                    Line::from(vec![
+                        Span::styled(
+                            "  PgUp/PgDn",
+                            Style::default()
+                                .fg(CYAN_PRIMARY)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            " to scroll │ Press key again to close",
+                            Style::default().fg(TEXT_MUTED),
+                        ),
+                    ]),
+                );
                 ralph_content_lines.insert(1, Line::from(""));
                 // Cap scroll offset to content length
-                let max_scroll = ralph_content_lines.len().saturating_sub(ralph_content_area.height as usize);
+                let max_scroll = ralph_content_lines
+                    .len()
+                    .saturating_sub(ralph_content_area.height as usize);
                 app.ralph_scroll_offset.min(max_scroll) as u16
             } else {
                 0
@@ -2541,25 +3024,38 @@ fn run(
 
             // Create footer line with session ID on left, mode in middle, keybindings on right
             // Calculate total fixed width: " Session ID " (12) + session_id + " │ " (3) + mode_text + remaining + keybindings + " " (1)
-            let fixed_width = 12 + app.session_id.len() as u16 + 3 + mode_text.len() as u16 + keybindings_text.len() as u16 + 2;
+            let fixed_width = 12
+                + app.session_id.len() as u16
+                + 3
+                + mode_text.len() as u16
+                + keybindings_text.len() as u16
+                + 2;
             let fill_width = bottom_bar_area.width.saturating_sub(fixed_width) as usize;
 
             let footer_line = Line::from(vec![
-                Span::styled(" Session ID ", Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
-                Span::styled(&app.session_id, Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
-                Span::styled(" │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_SECONDARY)),
-                Span::styled(mode_text, Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
-                // Fill remaining space with background color
                 Span::styled(
-                    " ".repeat(fill_width),
-                    Style::default().bg(BG_SECONDARY),
+                    " Session ID ",
+                    Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY),
                 ),
-                Span::styled(keybindings_text, Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
+                Span::styled(
+                    &app.session_id,
+                    Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY),
+                ),
+                Span::styled(" │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_SECONDARY)),
+                Span::styled(
+                    mode_text,
+                    Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY),
+                ),
+                // Fill remaining space with background color
+                Span::styled(" ".repeat(fill_width), Style::default().bg(BG_SECONDARY)),
+                Span::styled(
+                    keybindings_text,
+                    Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY),
+                ),
                 Span::styled(" ", Style::default().bg(BG_SECONDARY)),
             ]);
 
-            let footer = Paragraph::new(footer_line)
-                .style(Style::default().bg(BG_SECONDARY));
+            let footer = Paragraph::new(footer_line).style(Style::default().bg(BG_SECONDARY));
 
             frame.render_widget(footer, bottom_bar_area);
         })?;
@@ -2574,7 +3070,10 @@ fn run(
                     let stop_signal = state.has_stop_hook_signal();
                     // Debug: capture last 500 chars of recent_output for logging
                     let debug = if stop_signal {
-                        format!("STOP HOOK DETECTED! Buffer len: {}", state.recent_output.len())
+                        format!(
+                            "STOP HOOK DETECTED! Buffer len: {}",
+                            state.recent_output.len()
+                        )
                     } else {
                         let stripped = strip_ansi_codes(&state.recent_output);
                         let lower = stripped.to_lowercase();
@@ -2585,13 +3084,19 @@ fn run(
                             lower.contains("iteration complete")
                         )
                     };
-                    (state.child_exited, state.has_completion_signal(), stop_signal, debug)
+                    (
+                        state.child_exited,
+                        state.has_completion_signal(),
+                        stop_signal,
+                        debug,
+                    )
                 }
                 Err(_) => (true, false, false, "Mutex poisoned".to_string()),
             };
 
             // Write debug info periodically (every ~5 seconds based on loop timing)
-            static DEBUG_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            static DEBUG_COUNTER: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
             let count = DEBUG_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if count % 100 == 0 || stop_hook_fired {
                 let _ = std::fs::write("/tmp/ralph-tui-debug.log", format!(
@@ -2628,7 +3133,8 @@ fn run(
                 match app.mode {
                     Mode::Ralph => {
                         // In Ralph mode: handle TUI controls
-                        let story_count = app.prd.as_ref().map(|p| p.user_stories.len()).unwrap_or(0);
+                        let story_count =
+                            app.prd.as_ref().map(|p| p.user_stories.len()).unwrap_or(0);
 
                         match key.code {
                             KeyCode::Char('i') | KeyCode::Tab => {
@@ -2661,8 +3167,11 @@ fn run(
                             }
                             // PageUp/PageDown for scrolling Ralph terminal content
                             KeyCode::PageUp | KeyCode::Char('K') => {
-                                if app.ralph_view_mode != RalphViewMode::Normal && app.ralph_scroll_offset > 0 {
-                                    app.ralph_scroll_offset = app.ralph_scroll_offset.saturating_sub(3);
+                                if app.ralph_view_mode != RalphViewMode::Normal
+                                    && app.ralph_scroll_offset > 0
+                                {
+                                    app.ralph_scroll_offset =
+                                        app.ralph_scroll_offset.saturating_sub(3);
                                 }
                             }
                             KeyCode::PageDown | KeyCode::Char('J') => {
@@ -2672,29 +3181,32 @@ fn run(
                             }
                             // s: Toggle story details view
                             KeyCode::Char('s') => {
-                                app.ralph_view_mode = if app.ralph_view_mode == RalphViewMode::StoryDetails {
-                                    RalphViewMode::Normal
-                                } else {
-                                    RalphViewMode::StoryDetails
-                                };
+                                app.ralph_view_mode =
+                                    if app.ralph_view_mode == RalphViewMode::StoryDetails {
+                                        RalphViewMode::Normal
+                                    } else {
+                                        RalphViewMode::StoryDetails
+                                    };
                                 app.ralph_scroll_offset = 0; // Reset scroll on view change
                             }
                             // p: Toggle progress view
                             KeyCode::Char('p') => {
-                                app.ralph_view_mode = if app.ralph_view_mode == RalphViewMode::Progress {
-                                    RalphViewMode::Normal
-                                } else {
-                                    RalphViewMode::Progress
-                                };
+                                app.ralph_view_mode =
+                                    if app.ralph_view_mode == RalphViewMode::Progress {
+                                        RalphViewMode::Normal
+                                    } else {
+                                        RalphViewMode::Progress
+                                    };
                                 app.ralph_scroll_offset = 0; // Reset scroll on view change
                             }
                             // r: Toggle requirements view
                             KeyCode::Char('r') => {
-                                app.ralph_view_mode = if app.ralph_view_mode == RalphViewMode::Requirements {
-                                    RalphViewMode::Normal
-                                } else {
-                                    RalphViewMode::Requirements
-                                };
+                                app.ralph_view_mode =
+                                    if app.ralph_view_mode == RalphViewMode::Requirements {
+                                        RalphViewMode::Normal
+                                    } else {
+                                        RalphViewMode::Requirements
+                                    };
                                 app.ralph_scroll_offset = 0; // Reset scroll on view change
                             }
                             _ => {}
@@ -2751,7 +3263,9 @@ fn run_delay(
             let area = frame.area();
 
             // Check for terminal resize
-            let new_pty_cols = ((area.width as f32 * 0.70) as u16).saturating_sub(2).max(40);
+            let new_pty_cols = ((area.width as f32 * 0.70) as u16)
+                .saturating_sub(2)
+                .max(40);
             let new_pty_rows = area.height.saturating_sub(3).max(10);
 
             if new_pty_cols != *last_cols || new_pty_rows != *last_rows {
@@ -2762,10 +3276,7 @@ fn run_delay(
             // Create main layout: content area + bottom bar
             let main_layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(3),
-                    Constraint::Length(1),
-                ])
+                .constraints([Constraint::Min(3), Constraint::Length(1)])
                 .split(area);
 
             let content_area = main_layout[0];
@@ -2774,10 +3285,7 @@ fn run_delay(
             // Create horizontal split
             let panels = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(30),
-                    Constraint::Percentage(70),
-                ])
+                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
                 .split(content_area);
 
             let left_panel_area = panels[0];
@@ -2792,7 +3300,11 @@ fn run_delay(
             let left_block = Block::default()
                 .title(left_title)
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD))
+                .border_style(
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .style(Style::default().bg(BG_PRIMARY));
 
             // Render the outer block first to get the inner area
@@ -2824,11 +3336,17 @@ fn run_delay(
             let header_lines = vec![
                 Line::from(vec![
                     Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
-                    Span::styled("RALPH LOOP", Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "RALPH LOOP",
+                        Style::default()
+                            .fg(TEXT_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                 ]),
-                Line::from(vec![
-                    Span::styled(format!("Terminal v{}", VERSION), Style::default().fg(CYAN_PRIMARY)),
-                ]),
+                Line::from(vec![Span::styled(
+                    format!("Terminal v{}", VERSION),
+                    Style::default().fg(CYAN_PRIMARY),
+                )]),
                 Line::from(""), // Gap after header
             ];
             let header = Paragraph::new(header_lines);
@@ -2854,12 +3372,7 @@ fn run_delay(
             );
 
             // Render progress stat cards (second row)
-            render_progress_cards(
-                cards_layout[1],
-                completed,
-                total,
-                frame,
-            );
+            render_progress_cards(cards_layout[1], completed, total, frame);
 
             // Build remaining content
             let mut status_lines: Vec<Line> = Vec::new();
@@ -2867,35 +3380,44 @@ fn run_delay(
 
             // Active Phase section
             let session_elapsed = app.session_start.elapsed();
-            status_lines.push(Line::from(vec![
-                Span::styled("✦ ACTIVE PHASE", Style::default().fg(TEXT_MUTED)),
-            ]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "✦ ACTIVE PHASE",
+                Style::default().fg(TEXT_MUTED),
+            )]));
             // During delay, we're waiting for the next iteration
             let phase_name = "Preparing Next Iteration";
-            status_lines.push(Line::from(vec![
-                Span::styled(
-                    phase_name,
-                    Style::default().fg(TEXT_PRIMARY).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            status_lines.push(Line::from(vec![
-                Span::styled(
-                    format!("⏱ Uptime: {}", format_duration(session_elapsed)),
-                    Style::default().fg(TEXT_MUTED),
-                ),
-            ]));
+            status_lines.push(Line::from(vec![Span::styled(
+                phase_name,
+                Style::default()
+                    .fg(TEXT_PRIMARY)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            status_lines.push(Line::from(vec![Span::styled(
+                format!("⏱ Uptime: {}", format_duration(session_elapsed)),
+                Style::default().fg(TEXT_MUTED),
+            )]));
             status_lines.push(Line::from("")); // Gap after active phase
 
             // Elapsed time (iteration-specific)
             let iteration_elapsed = app.iteration_start.elapsed();
             status_lines.push(Line::from(vec![
-                Span::styled("Session: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Session: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format_duration(session_elapsed),
                     Style::default().fg(TEXT_PRIMARY),
                 ),
                 Span::raw("  "),
-                Span::styled("Iter: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "Iter: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(
                     format_duration(iteration_elapsed),
                     Style::default().fg(TEXT_PRIMARY),
@@ -2911,30 +3433,42 @@ fn run_delay(
             };
             let spinner = get_spinner_frame(app.animation_tick);
             // Add visual separator for prominence
-            status_lines.push(Line::from(vec![
-                Span::styled("━━━━━━━━━━━━━━━━━━━━━━━━━", Style::default().fg(AMBER_WARNING)),
-            ]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━",
+                Style::default().fg(AMBER_WARNING),
+            )]));
             status_lines.push(Line::from(vec![
                 Span::styled(
                     format!("{} ", spinner),
-                    Style::default().fg(AMBER_WARNING).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("Starting next iteration in {}s...", remaining),
-                    Style::default().fg(AMBER_WARNING).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
-            status_lines.push(Line::from(vec![
-                Span::styled("━━━━━━━━━━━━━━━━━━━━━━━━━", Style::default().fg(AMBER_WARNING)),
-            ]));
+            status_lines.push(Line::from(vec![Span::styled(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━",
+                Style::default().fg(AMBER_WARNING),
+            )]));
             status_lines.push(Line::from(""));
 
             // PRD info
             if let Some(ref prd) = app.prd {
-                status_lines.push(Line::from(vec![
-                    Span::styled("Task: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
-                ]));
-                for line in wrap_text(&prd.description, left_panel_area.width.saturating_sub(4) as usize) {
+                status_lines.push(Line::from(vec![Span::styled(
+                    "Task: ",
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )]));
+                for line in wrap_text(
+                    &prd.description,
+                    left_panel_area.width.saturating_sub(4) as usize,
+                ) {
                     status_lines.push(Line::from(Span::raw(format!("  {}", line))));
                 }
                 status_lines.push(Line::from(""));
@@ -2945,11 +3479,18 @@ fn run_delay(
                     0
                 };
                 status_lines.push(Line::from(vec![
-                    Span::styled("Progress: ", Style::default().fg(CYAN_PRIMARY).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "Progress: ",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(
                         format!("{}%", progress_pct),
                         if completed == total {
-                            Style::default().fg(GREEN_SUCCESS).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(GREEN_SUCCESS)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(CYAN_PRIMARY)
                         },
@@ -2962,15 +3503,19 @@ fn run_delay(
                 let empty = bar_width.saturating_sub(filled);
                 let bar_filled: String = "█".repeat(filled);
                 let bar_empty: String = "░".repeat(empty);
-                let progress_color = if completed == total { GREEN_SUCCESS } else { CYAN_PRIMARY };
+                let progress_color = if completed == total {
+                    GREEN_SUCCESS
+                } else {
+                    CYAN_PRIMARY
+                };
                 status_lines.push(Line::from(vec![
                     Span::styled(bar_filled, Style::default().fg(progress_color)),
                     Span::styled(bar_empty, Style::default().fg(BORDER_SUBTLE)),
                 ]));
             }
 
-            let left_content = Paragraph::new(status_lines)
-                .style(Style::default().fg(TEXT_PRIMARY));
+            let left_content =
+                Paragraph::new(status_lines).style(Style::default().fg(TEXT_PRIMARY));
 
             frame.render_widget(left_content, content_area_inner);
 
@@ -2986,14 +3531,14 @@ fn run_delay(
             frame.render_widget(right_block, right_panel_area);
 
             // Determine Ralph terminal height (always normal during delay)
-            let ralph_terminal_height = 4u16;  // Normal: 1 chrome + 2 content + 1 separator
+            let ralph_terminal_height = 4u16; // Normal: 1 chrome + 2 content + 1 separator
 
             // Split right inner into Claude terminal (top) and Ralph terminal (bottom)
             let terminal_split = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(0),  // Claude terminal
-                    Constraint::Length(ralph_terminal_height),  // Ralph terminal
+                    Constraint::Min(0),                        // Claude terminal
+                    Constraint::Length(ralph_terminal_height), // Ralph terminal
                 ])
                 .split(right_inner);
 
@@ -3022,13 +3567,22 @@ fn run_delay(
             let right_pad = available_width.saturating_sub(center_offset + title_width);
 
             let claude_chrome_line = Line::from(vec![
-                Span::styled(" ".repeat(center_offset as usize), Style::default().bg(BG_TERTIARY)),
-                Span::styled(claude_title, Style::default().fg(TEXT_SECONDARY).bg(BG_TERTIARY)),
-                Span::styled(" ".repeat(right_pad as usize), Style::default().bg(BG_TERTIARY)),
+                Span::styled(
+                    " ".repeat(center_offset as usize),
+                    Style::default().bg(BG_TERTIARY),
+                ),
+                Span::styled(
+                    claude_title,
+                    Style::default().fg(TEXT_SECONDARY).bg(BG_TERTIARY),
+                ),
+                Span::styled(
+                    " ".repeat(right_pad as usize),
+                    Style::default().bg(BG_TERTIARY),
+                ),
             ]);
 
-            let claude_chrome = Paragraph::new(claude_chrome_line)
-                .style(Style::default().bg(BG_TERTIARY));
+            let claude_chrome =
+                Paragraph::new(claude_chrome_line).style(Style::default().bg(BG_TERTIARY));
             frame.render_widget(claude_chrome, claude_chrome_area);
 
             // Render VT100 screen content
@@ -3050,13 +3604,22 @@ fn run_delay(
             let claude_input_content = Line::from(vec![
                 Span::styled("│ ", Style::default().fg(BORDER_SUBTLE).bg(BG_SECONDARY)),
                 Span::styled("> ", Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
-                Span::styled("ralph@loop:~$ ", Style::default().fg(TEXT_SECONDARY).bg(BG_SECONDARY)),
-                Span::styled("Enter command...", Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
-                Span::styled(" ".repeat(remaining_width as usize), Style::default().bg(BG_SECONDARY)),
+                Span::styled(
+                    "ralph@loop:~$ ",
+                    Style::default().fg(TEXT_SECONDARY).bg(BG_SECONDARY),
+                ),
+                Span::styled(
+                    "Enter command...",
+                    Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY),
+                ),
+                Span::styled(
+                    " ".repeat(remaining_width as usize),
+                    Style::default().bg(BG_SECONDARY),
+                ),
             ]);
 
-            let claude_input = Paragraph::new(claude_input_content)
-                .style(Style::default().bg(BG_SECONDARY));
+            let claude_input =
+                Paragraph::new(claude_input_content).style(Style::default().bg(BG_SECONDARY));
             frame.render_widget(claude_input, claude_input_area);
 
             // === RALPH TERMINAL ===
@@ -3076,28 +3639,36 @@ fn run_delay(
             let ralph_title_width = ralph_title.len() as u16;
             let ralph_available_width = ralph_chrome_area.width;
             let ralph_center_offset = (ralph_available_width.saturating_sub(ralph_title_width)) / 2;
-            let ralph_right_pad = ralph_available_width.saturating_sub(ralph_center_offset + ralph_title_width);
+            let ralph_right_pad =
+                ralph_available_width.saturating_sub(ralph_center_offset + ralph_title_width);
 
             let ralph_chrome_line = Line::from(vec![
-                Span::styled(" ".repeat(ralph_center_offset as usize), Style::default().bg(BG_TERTIARY)),
-                Span::styled(ralph_title, Style::default().fg(TEXT_SECONDARY).bg(BG_TERTIARY)),
-                Span::styled(" ".repeat(ralph_right_pad as usize), Style::default().bg(BG_TERTIARY)),
+                Span::styled(
+                    " ".repeat(ralph_center_offset as usize),
+                    Style::default().bg(BG_TERTIARY),
+                ),
+                Span::styled(
+                    ralph_title,
+                    Style::default().fg(TEXT_SECONDARY).bg(BG_TERTIARY),
+                ),
+                Span::styled(
+                    " ".repeat(ralph_right_pad as usize),
+                    Style::default().bg(BG_TERTIARY),
+                ),
             ]);
 
-            let ralph_chrome = Paragraph::new(ralph_chrome_line)
-                .style(Style::default().bg(BG_TERTIARY));
+            let ralph_chrome =
+                Paragraph::new(ralph_chrome_line).style(Style::default().bg(BG_TERTIARY));
             frame.render_widget(ralph_chrome, ralph_chrome_area);
 
             // Ralph content: show waiting message during delay
-            let ralph_content_lines = vec![
-                Line::from(Span::styled(
-                    format!("  Waiting {} seconds before next iteration...", remaining),
-                    Style::default().fg(AMBER_WARNING),
-                )),
-            ];
+            let ralph_content_lines = vec![Line::from(Span::styled(
+                format!("  Waiting {} seconds before next iteration...", remaining),
+                Style::default().fg(AMBER_WARNING),
+            ))];
 
-            let ralph_content = Paragraph::new(ralph_content_lines)
-                .style(Style::default().bg(BG_SECONDARY));
+            let ralph_content =
+                Paragraph::new(ralph_content_lines).style(Style::default().bg(BG_SECONDARY));
             frame.render_widget(ralph_content, ralph_content_area);
 
             // Bottom footer bar with session ID, mode indicator, and keybinding hints
@@ -3105,25 +3676,38 @@ fn run_delay(
             let keybindings_text = "^Q: Quit | Waiting for next iteration...";
 
             // Create footer line with session ID on left, mode in middle, keybindings on right
-            let fixed_width = 12 + app.session_id.len() as u16 + 3 + mode_text.len() as u16 + keybindings_text.len() as u16 + 2;
+            let fixed_width = 12
+                + app.session_id.len() as u16
+                + 3
+                + mode_text.len() as u16
+                + keybindings_text.len() as u16
+                + 2;
             let fill_width = bottom_bar_area.width.saturating_sub(fixed_width) as usize;
 
             let footer_line = Line::from(vec![
-                Span::styled(" Session ID ", Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
-                Span::styled(&app.session_id, Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
-                Span::styled(" │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_SECONDARY)),
-                Span::styled(mode_text, Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY)),
-                // Fill remaining space with background color
                 Span::styled(
-                    " ".repeat(fill_width),
-                    Style::default().bg(BG_SECONDARY),
+                    " Session ID ",
+                    Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY),
                 ),
-                Span::styled(keybindings_text, Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY)),
+                Span::styled(
+                    &app.session_id,
+                    Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY),
+                ),
+                Span::styled(" │ ", Style::default().fg(BORDER_SUBTLE).bg(BG_SECONDARY)),
+                Span::styled(
+                    mode_text,
+                    Style::default().fg(CYAN_PRIMARY).bg(BG_SECONDARY),
+                ),
+                // Fill remaining space with background color
+                Span::styled(" ".repeat(fill_width), Style::default().bg(BG_SECONDARY)),
+                Span::styled(
+                    keybindings_text,
+                    Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY),
+                ),
                 Span::styled(" ", Style::default().bg(BG_SECONDARY)),
             ]);
 
-            let footer = Paragraph::new(footer_line)
-                .style(Style::default().bg(BG_SECONDARY));
+            let footer = Paragraph::new(footer_line).style(Style::default().bg(BG_SECONDARY));
 
             frame.render_widget(footer, bottom_bar_area);
         })?;
@@ -3134,6 +3718,258 @@ fn run_delay(
                 // Ctrl+Q to quit
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
                     app.iteration_state = IterationState::Completed;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Run the attach mode loop (view-only, connected to running tmux session)
+fn run_attach_mode(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    last_cols: &mut u16,
+    last_rows: &mut u16,
+) -> io::Result<()> {
+    loop {
+        // Check if PRD needs reloading (file changed on disk)
+        app.reload_prd_if_needed();
+
+        // Update animation tick every 100ms
+        if app.last_animation_update.elapsed() >= Duration::from_millis(100) {
+            app.animation_tick = app.animation_tick.wrapping_add(1);
+            app.last_animation_update = Instant::now();
+        }
+
+        terminal.draw(|frame| {
+            let area = frame.area();
+
+            // Check for terminal resize
+            let new_pty_cols = ((area.width as f32 * 0.70) as u16)
+                .saturating_sub(2)
+                .max(40);
+            let new_pty_rows = area.height.saturating_sub(3).max(10);
+
+            if new_pty_cols != *last_cols || new_pty_rows != *last_rows {
+                *last_cols = new_pty_cols;
+                *last_rows = new_pty_rows;
+                // In attach mode, we don't own the PTY so can't resize it
+                // But we can resize the parser
+                if let Ok(mut state) = app.pty_state.lock() {
+                    state
+                        .parser
+                        .screen_mut()
+                        .set_size(new_pty_rows, new_pty_cols);
+                }
+            }
+
+            // Create main layout: content area + bottom bar
+            let main_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(3),    // Main content area
+                    Constraint::Length(1), // Bottom bar (single line)
+                ])
+                .split(area);
+
+            let content_area = main_layout[0];
+            let bottom_bar_area = main_layout[1];
+
+            // Create horizontal split: 30% left panel, 70% right panel
+            let panels = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(30), // Ralph Status panel
+                    Constraint::Percentage(70), // Claude Code panel
+                ])
+                .split(content_area);
+
+            let left_panel_area = panels[0];
+            let right_panel_area = panels[1];
+
+            // Left panel: Ralph Status
+            let left_title = Line::from(vec![
+                Span::raw(" Ralph Status "),
+                Span::styled("[ATTACHED]", Style::default().fg(AMBER_WARNING)),
+                Span::raw(" "),
+            ]);
+            let left_block = Block::default()
+                .title(left_title)
+                .borders(Borders::ALL)
+                .border_style(
+                    Style::default()
+                        .fg(CYAN_PRIMARY)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style(Style::default().bg(BG_PRIMARY));
+
+            let left_inner = left_block.inner(left_panel_area);
+            frame.render_widget(left_block, left_panel_area);
+
+            // Get PRD data for stats
+            let (completed, total) = if let Some(ref prd) = app.prd {
+                (prd.completed_count(), prd.user_stories.len())
+            } else {
+                (0, 0)
+            };
+
+            // Split inner area: header (3 lines), stat cards (4 lines), stories
+            let inner_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Header
+                    Constraint::Length(4), // Stat cards
+                    Constraint::Min(0),    // Stories
+                ])
+                .split(left_inner);
+
+            let header_area = inner_layout[0];
+            let cards_area = inner_layout[1];
+            let stories_area = inner_layout[2];
+
+            // Header
+            let session_name = app.tmux_session.as_deref().unwrap_or("unknown");
+            let header_lines = vec![
+                Line::from(vec![
+                    Span::styled("● ", Style::default().fg(AMBER_WARNING)),
+                    Span::styled(
+                        "ATTACHED",
+                        Style::default()
+                            .fg(AMBER_WARNING)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                Line::from(vec![Span::styled(
+                    session_name,
+                    Style::default().fg(TEXT_SECONDARY),
+                )]),
+                Line::from(vec![Span::styled(
+                    format!("Elapsed: {}", format_duration(app.session_start.elapsed())),
+                    Style::default().fg(TEXT_MUTED),
+                )]),
+            ];
+            let header_paragraph = Paragraph::new(header_lines);
+            frame.render_widget(header_paragraph, header_area);
+
+            // Progress cards
+            render_progress_cards(cards_area, completed, total, frame);
+
+            // Story list
+            if let Some(ref prd) = app.prd {
+                let stories: Vec<Line> = prd
+                    .user_stories
+                    .iter()
+                    .map(|story| {
+                        let status = if story.passes {
+                            Span::styled("● ", Style::default().fg(GREEN_SUCCESS))
+                        } else if Some(&story.id) == prd.current_story().map(|s| &s.id) {
+                            Span::styled(
+                                "● ",
+                                Style::default().fg(get_pulse_color(
+                                    app.animation_tick,
+                                    GREEN_ACTIVE,
+                                    CYAN_DIM,
+                                )),
+                            )
+                        } else {
+                            Span::styled("○ ", Style::default().fg(TEXT_MUTED))
+                        };
+                        let title_color = if story.passes {
+                            TEXT_SECONDARY
+                        } else {
+                            TEXT_PRIMARY
+                        };
+                        Line::from(vec![
+                            status,
+                            Span::styled(&story.title, Style::default().fg(title_color)),
+                        ])
+                    })
+                    .collect();
+
+                let stories_block = Block::default()
+                    .borders(Borders::TOP)
+                    .border_style(Style::default().fg(BORDER_SUBTLE))
+                    .title(Line::from(Span::styled(
+                        " Stories ",
+                        Style::default().fg(TEXT_MUTED),
+                    )));
+                let stories_paragraph = Paragraph::new(stories).block(stories_block);
+                frame.render_widget(stories_paragraph, stories_area);
+            }
+
+            // Right panel: Claude Code output
+            let right_title = Line::from(vec![
+                Span::raw(" Claude Code "),
+                Span::styled("[VIEW ONLY]", Style::default().fg(TEXT_MUTED)),
+                Span::raw(" "),
+            ]);
+            let right_block = Block::default()
+                .title(right_title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(BORDER_SUBTLE))
+                .style(Style::default().bg(BG_PRIMARY));
+
+            let right_inner = right_block.inner(right_panel_area);
+            frame.render_widget(right_block, right_panel_area);
+
+            // Render PTY content
+            if let Ok(state) = app.pty_state.lock() {
+                let lines = render_vt100_screen(state.parser.screen());
+                let paragraph = Paragraph::new(lines);
+                frame.render_widget(paragraph, right_inner);
+            }
+
+            // Bottom bar
+            let keybindings = "Ctrl+Q/Esc: Quit";
+            let session_info = format!(
+                " {} | {}/{} stories | {} ",
+                session_name,
+                completed,
+                total,
+                format_duration(app.session_start.elapsed())
+            );
+
+            let total_width = bottom_bar_area.width as usize;
+            let info_len = session_info.chars().count();
+            let keys_len = keybindings.chars().count();
+            let fill_width = total_width.saturating_sub(info_len + keys_len);
+
+            let footer_line = Line::from(vec![
+                Span::styled(
+                    session_info,
+                    Style::default().fg(TEXT_SECONDARY).bg(BG_SECONDARY),
+                ),
+                Span::styled(" ".repeat(fill_width), Style::default().bg(BG_SECONDARY)),
+                Span::styled(
+                    keybindings,
+                    Style::default().fg(TEXT_MUTED).bg(BG_SECONDARY),
+                ),
+            ]);
+            let footer = Paragraph::new(footer_line).style(Style::default().bg(BG_SECONDARY));
+            frame.render_widget(footer, bottom_bar_area);
+        })?;
+
+        // Check if tmux session ended
+        {
+            if let Ok(state) = app.pty_state.lock() {
+                if state.child_exited {
+                    break;
+                }
+            }
+        }
+
+        // Handle input - view only
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                // Ctrl+Q to quit
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+                    break;
+                }
+                // Escape also quits
+                if key.code == KeyCode::Esc {
                     break;
                 }
             }
