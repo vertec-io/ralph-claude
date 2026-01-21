@@ -75,15 +75,15 @@
       "title": "Pause iteration and inject prompt",
       "description": "As a user, I want to pause the current iteration and send a message to the agent so I can provide guidance or corrections without stopping the entire Ralph loop.",
       "acceptanceCriteria": [
-        { "description": "Keybind (Ctrl+P) pauses the agent and opens a prompt input modal", "passes": false },
-        { "description": "User can type a message to inject", "passes": false },
-        { "description": "Message is sent to the agent's stdin as if the user typed it", "passes": false },
-        { "description": "Agent continues after receiving the message", "passes": false },
-        { "description": "Display PAUSED indicator while input modal is open", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Keybind (Ctrl+P) pauses the agent and opens a prompt input modal", "passes": true },
+        { "description": "User can type a message to inject", "passes": true },
+        { "description": "Message is sent to the agent's stdin as if the user typed it", "passes": true },
+        { "description": "Agent continues after receiving the message", "passes": true },
+        { "description": "Display PAUSED indicator while input modal is open", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

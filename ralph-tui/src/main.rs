@@ -222,6 +222,14 @@ enum ActivityViewMode {
     Detail, // Show selected activity detail
 }
 
+/// Input mode for prompt injection
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum InputMode {
+    #[default]
+    Normal, // Normal operation
+    PromptInput, // User is typing a message to inject to the agent
+}
+
 /// Recent activity from Claude Code (tool calls, actions)
 #[derive(Debug, Clone)]
 struct Activity {
@@ -554,6 +562,12 @@ struct App {
     selected_activity_index: usize,
     // Scroll offset for activity detail view (when viewing long output)
     activity_detail_scroll_offset: usize,
+    // Input mode for prompt injection
+    input_mode: InputMode,
+    // Buffer for user input (prompt injection)
+    input_buffer: String,
+    // Cursor position in input buffer
+    input_cursor: usize,
 }
 
 impl App {
@@ -601,6 +615,9 @@ impl App {
             activity_view_mode: ActivityViewMode::List,
             selected_activity_index: 0,
             activity_detail_scroll_offset: 0,
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
+            input_cursor: 0,
         }
     }
 
@@ -2391,8 +2408,18 @@ fn run(
             let content_area_inner = inner_layout[2];
 
             // Header: Ralph branding
+            let status_indicator = if app.input_mode == InputMode::PromptInput {
+                Span::styled(
+                    "⏸ ",
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("● ", Style::default().fg(GREEN_ACTIVE))
+            };
             let mut header_spans = vec![
-                Span::styled("● ", Style::default().fg(GREEN_ACTIVE)),
+                status_indicator,
                 Span::styled(
                     "RALPH LOOP",
                     Style::default()
@@ -2400,6 +2427,16 @@ fn run(
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
+            // Add [PAUSED] indicator if in prompt input mode
+            if app.input_mode == InputMode::PromptInput {
+                header_spans.push(Span::raw(" "));
+                header_spans.push(Span::styled(
+                    "[PAUSED]",
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             // Add [YOLO] indicator if yolo mode is enabled
             if app.yolo_mode {
                 header_spans.push(Span::raw(" "));
@@ -3555,6 +3592,98 @@ fn run(
             let footer = Paragraph::new(footer_line).style(Style::default().bg(BG_SECONDARY));
 
             frame.render_widget(footer, bottom_bar_area);
+
+            // Render prompt input modal if active
+            if app.input_mode == InputMode::PromptInput {
+                // Calculate modal dimensions (centered, 60% width, 5 lines height)
+                let modal_width = (area.width as f32 * 0.6).max(40.0).min(80.0) as u16;
+                let modal_height = 5u16;
+                let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+                let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+                let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+                // Clear the modal area with background
+                let clear_block = Block::default().style(Style::default().bg(BG_PRIMARY));
+                frame.render_widget(clear_block, modal_area);
+
+                // Modal block with border
+                let modal_block = Block::default()
+                    .title(Line::from(vec![
+                        Span::styled(" ", Style::default()),
+                        Span::styled(
+                            "⏸ INJECT PROMPT",
+                            Style::default()
+                                .fg(AMBER_WARNING)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" ", Style::default()),
+                    ]))
+                    .borders(Borders::ALL)
+                    .border_set(ROUNDED_BORDERS)
+                    .border_style(Style::default().fg(AMBER_WARNING))
+                    .style(Style::default().bg(BG_SECONDARY));
+
+                let inner_area = modal_block.inner(modal_area);
+                frame.render_widget(modal_block, modal_area);
+
+                // Split inner area: input line + hint line
+                let modal_layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // Input line
+                        Constraint::Length(1), // Hint line
+                    ])
+                    .split(inner_area);
+
+                // Render input line with cursor
+                let input_width = modal_layout[0].width.saturating_sub(3) as usize;
+                let display_text = if app.input_buffer.len() > input_width {
+                    // Show the end of the input if it's too long
+                    let start = app.input_buffer.len().saturating_sub(input_width);
+                    format!("…{}", &app.input_buffer[start..])
+                } else {
+                    app.input_buffer.clone()
+                };
+
+                // Build input line with cursor indicator
+                let cursor_pos = app.input_cursor.min(display_text.len());
+                let (before_cursor, after_cursor) =
+                    display_text.split_at(cursor_pos.min(display_text.len()));
+                let cursor_char = after_cursor.chars().next().unwrap_or(' ');
+                let after_cursor_rest: String = after_cursor.chars().skip(1).collect();
+
+                let input_line = Line::from(vec![
+                    Span::styled("> ", Style::default().fg(CYAN_PRIMARY)),
+                    Span::styled(before_cursor.to_string(), Style::default().fg(TEXT_PRIMARY)),
+                    Span::styled(
+                        cursor_char.to_string(),
+                        Style::default().fg(BG_PRIMARY).bg(TEXT_PRIMARY),
+                    ),
+                    Span::styled(after_cursor_rest, Style::default().fg(TEXT_PRIMARY)),
+                ]);
+                let input_paragraph = Paragraph::new(input_line);
+                frame.render_widget(input_paragraph, modal_layout[0]);
+
+                // Render hint line
+                let hint_line = Line::from(vec![
+                    Span::styled(
+                        "Enter",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" send  ", Style::default().fg(TEXT_MUTED)),
+                    Span::styled(
+                        "Esc",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" cancel", Style::default().fg(TEXT_MUTED)),
+                ]);
+                let hint_paragraph = Paragraph::new(hint_line);
+                frame.render_widget(hint_paragraph, modal_layout[1]);
+            }
         })?;
 
         // Check if child exited or stop hook fired
@@ -3625,6 +3754,80 @@ fn run(
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
                     app.iteration_state = IterationState::Completed;
                     break;
+                }
+
+                // Handle prompt input mode first (modal takes priority)
+                if app.input_mode == InputMode::PromptInput {
+                    match key.code {
+                        KeyCode::Esc => {
+                            // Cancel input, close modal
+                            app.input_mode = InputMode::Normal;
+                            app.input_buffer.clear();
+                            app.input_cursor = 0;
+                        }
+                        KeyCode::Enter => {
+                            // Send the input to PTY and close modal
+                            if !app.input_buffer.is_empty() {
+                                // Send the text followed by Enter
+                                let text = app.input_buffer.clone();
+                                app.write_to_pty(text.as_bytes());
+                                app.write_to_pty(b"\r"); // Send Enter
+                            }
+                            app.input_mode = InputMode::Normal;
+                            app.input_buffer.clear();
+                            app.input_cursor = 0;
+                        }
+                        KeyCode::Char(c) => {
+                            // Insert character at cursor position
+                            if app.input_cursor >= app.input_buffer.len() {
+                                app.input_buffer.push(c);
+                            } else {
+                                app.input_buffer.insert(app.input_cursor, c);
+                            }
+                            app.input_cursor += 1;
+                        }
+                        KeyCode::Backspace => {
+                            // Delete character before cursor
+                            if app.input_cursor > 0 {
+                                app.input_cursor -= 1;
+                                app.input_buffer.remove(app.input_cursor);
+                            }
+                        }
+                        KeyCode::Delete => {
+                            // Delete character at cursor
+                            if app.input_cursor < app.input_buffer.len() {
+                                app.input_buffer.remove(app.input_cursor);
+                            }
+                        }
+                        KeyCode::Left => {
+                            // Move cursor left
+                            if app.input_cursor > 0 {
+                                app.input_cursor -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            // Move cursor right
+                            if app.input_cursor < app.input_buffer.len() {
+                                app.input_cursor += 1;
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.input_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            app.input_cursor = app.input_buffer.len();
+                        }
+                        _ => {}
+                    }
+                    continue; // Skip normal key handling while in input mode
+                }
+
+                // Handle Ctrl+P to open prompt input modal (before mode-specific handling)
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+                    app.input_mode = InputMode::PromptInput;
+                    app.input_buffer.clear();
+                    app.input_cursor = 0;
+                    continue;
                 }
 
                 match app.mode {

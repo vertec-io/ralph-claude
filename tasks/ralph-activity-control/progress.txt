@@ -14,6 +14,30 @@ Started: 2026-01-21
 - Activity scrolling: scroll_offset=0 means newest items, higher offset shows older items
 - View modes (list/detail) should use separate state tracking (e.g., ActivityViewMode enum)
 - Selected item index should be synchronized with scroll offset for predictable navigation
+- Input modes (normal/modal) use InputMode enum for state tracking
+- Modal overlays are rendered at the end of the draw closure to appear on top
+- write_to_pty() sends bytes directly to the agent's stdin
+- Ctrl+modifier key handlers must come before mode-specific handling in key event processing
+
+---
+
+## 2026-01-21 12:15 - US-005
+- Implemented pause iteration and inject prompt feature with Ctrl+P keybind
+- Added InputMode enum (Normal/PromptInput) to track modal state
+- Added input_buffer, input_cursor fields to App struct for text input handling
+- Created centered modal overlay with ROUNDED_BORDERS and AMBER_WARNING styling
+- Modal shows input line with cursor indicator and hint line for keybindings
+- Ctrl+P opens modal, Enter sends message to agent stdin, Esc cancels
+- Added [PAUSED] indicator and pause icon (⏸) in header when modal is open
+- Input handling supports: typing, backspace, delete, left/right arrows, home/end
+- Message sent to PTY with trailing \r (carriage return) to simulate Enter
+- Files changed: ralph-tui/src/main.rs, tasks/ralph-activity-control/prd.json
+- **Learnings for future iterations:**
+  - Modal input handling must be checked before mode-specific handlers (takes priority)
+  - Use `continue` after handling modal input to skip normal key processing
+  - Ctrl+modifier keys need to be checked with key.modifiers.contains()
+  - Modal rendering goes at the end of draw closure to overlay on all content
+  - Send \r to PTY to simulate Enter key after text input
 
 ---
 
