@@ -61,6 +61,13 @@ OPENCODE_PID_FILE="${OPENCODE_PID_FILE:-/tmp/opencode-serve.pid}"
 # Server URL for attach mode
 OPENCODE_SERVER_URL="http://${OPENCODE_HOSTNAME}:${OPENCODE_PORT}"
 
+# Yolo mode - permissive permissions (skip all prompts)
+YOLO_MODE="${YOLO_MODE:-false}"
+if [ "$YOLO_MODE" = "true" ]; then
+  # Set OPENCODE_PERMISSION with permissive JSON to allow all operations
+  export OPENCODE_PERMISSION='{"*": "allow", "external_directory": "allow", "doom_loop": "allow"}'
+fi
+
 # ============================================================================
 # Server mode functions
 # ============================================================================

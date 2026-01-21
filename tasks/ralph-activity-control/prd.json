@@ -1,0 +1,152 @@
+{
+  "schemaVersion": "2.0",
+  "project": "ralph-claude",
+  "taskDir": "tasks/ralph-activity-control",
+  "branchName": "ralph/activity-control",
+  "mergeTarget": null,
+  "autoMerge": false,
+  "type": "feature",
+  "description": "Ralph Activity Visibility and Interactive Control - Complete activity history, interactive control, and permissive mode for unattended operation",
+  "agent": "opencode",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add --yolo flag to ralph.sh for permissive mode",
+      "description": "As a user, I want to run Ralph with a --yolo flag so that opencode runs with all permissions allowed and never prompts for approval.",
+      "acceptanceCriteria": [
+        { "description": "ralph.sh accepts --yolo flag (e.g., ./ralph.sh tasks/foo --yolo)", "passes": true },
+        { "description": "When --yolo is set, export YOLO_MODE=true environment variable", "passes": true },
+        { "description": "Update agents/opencode.sh to check YOLO_MODE and set OPENCODE_PERMISSION env var with permissive JSON: {\"*\": \"allow\", \"external_directory\": \"allow\", \"doom_loop\": \"allow\"}", "passes": true },
+        { "description": "Document the --yolo flag in ralph.sh help text", "passes": true },
+        { "description": "Flag is passed through to tmux session environment", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Pass yolo mode through ralph-tui",
+      "description": "As a user, I want ralph-tui to respect and propagate the yolo mode setting when spawning opencode.",
+      "acceptanceCriteria": [
+        { "description": "ralph-tui accepts --yolo flag", "passes": false },
+        { "description": "When spawning opencode, set YOLO_MODE=true and OPENCODE_PERMISSION env vars if yolo mode enabled", "passes": false },
+        { "description": "Display indicator in TUI header when running in yolo mode (e.g., [YOLO])", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Scrollable activity history panel",
+      "description": "As a user, I want to see the complete activity history in ralph-tui, not just the last 10 actions, so I can debug issues and understand what the agent has done.",
+      "acceptanceCriteria": [
+        { "description": "Activity panel shows full history (up to 1000 activities)", "passes": false },
+        { "description": "Can scroll through activities with j/k or arrow keys when panel is focused", "passes": false },
+        { "description": "Shows timestamp for each activity", "passes": false },
+        { "description": "Activity list auto-scrolls to bottom on new activities (unless user has scrolled up)", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Activity detail view",
+      "description": "As a user, I want to see details about a specific activity, including any output or errors.",
+      "acceptanceCriteria": [
+        { "description": "Pressing Enter on an activity shows expanded detail view", "passes": false },
+        { "description": "Detail view shows: action type, target, timestamp, duration (if available)", "passes": false },
+        { "description": "For bash commands: shows command output (truncated if long)", "passes": false },
+        { "description": "For file operations: shows file path and operation result", "passes": false },
+        { "description": "Esc returns to activity list", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Pause iteration and inject prompt",
+      "description": "As a user, I want to pause the current iteration and send a message to the agent so I can provide guidance or corrections without stopping the entire Ralph loop.",
+      "acceptanceCriteria": [
+        { "description": "Keybind (Ctrl+P) pauses the agent and opens a prompt input modal", "passes": false },
+        { "description": "User can type a message to inject", "passes": false },
+        { "description": "Message is sent to the agent's stdin as if the user typed it", "passes": false },
+        { "description": "Agent continues after receiving the message", "passes": false },
+        { "description": "Display PAUSED indicator while input modal is open", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Switch to interactive mode",
+      "description": "As a user, I want to switch to full interactive mode mid-iteration so I can directly interact with the agent when needed.",
+      "acceptanceCriteria": [
+        { "description": "Keybind (Ctrl+I) switches to interactive mode", "passes": false },
+        { "description": "In interactive mode, all keyboard input goes to the agent", "passes": false },
+        { "description": "Clear visual indicator showing INTERACTIVE MODE", "passes": false },
+        { "description": "Keybind to return to monitoring mode (Esc)", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Edit PRD notes mid-run",
+      "description": "As a user, I want to add notes to the current story in prd.json without stopping Ralph, so the next iteration sees my guidance.",
+      "acceptanceCriteria": [
+        { "description": "Keybind (n) opens a notes editor for the current in-progress story", "passes": false },
+        { "description": "Notes are saved to the story's notes field in prd.json", "passes": false },
+        { "description": "Existing notes are preserved and new notes appended", "passes": false },
+        { "description": "Agent sees updated notes on next iteration (no restart needed)", "passes": false },
+        { "description": "Display confirmation when notes are saved", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Activity search/filter",
+      "description": "As a user, I want to search through activities to find specific actions.",
+      "acceptanceCriteria": [
+        { "description": "Keybind (/) opens search input", "passes": false },
+        { "description": "Filter activities by search term (matches action type or target)", "passes": false },
+        { "description": "Highlight matching activities", "passes": false },
+        { "description": "n/N to jump to next/previous match", "passes": false },
+        { "description": "Clear filter with Esc", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Attach mode improvements",
+      "description": "As a user running ralph-tui --attach, I want the same activity visibility and control features available.",
+      "acceptanceCriteria": [
+        { "description": "Attach mode parses activities from tmux capture output", "passes": false },
+        { "description": "Activity history panel works in attach mode", "passes": false },
+        { "description": "Inject prompt works by sending to tmux session via tmux send-keys", "passes": false },
+        { "description": "Interactive mode works by attaching to tmux", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

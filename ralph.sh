@@ -184,6 +184,9 @@ AGENT="${RALPH_AGENT:-claude}"
 AGENT_SOURCE="default"
 [ -n "$RALPH_AGENT" ] && AGENT_SOURCE="env"
 
+# Yolo mode - permissive mode that skips all agent permission prompts
+YOLO_MODE="${YOLO_MODE:-false}"
+
 VALID_AGENTS="claude opencode"
 
 declare -A FAILURE_COUNT
@@ -231,6 +234,10 @@ while [[ $# -gt 0 ]]; do
       fi
       shift 2
       ;;
+    --yolo)
+      YOLO_MODE=true
+      shift
+      ;;
     -a)
       AGENT="$2"
       AGENT_SOURCE="cli"
@@ -253,6 +260,7 @@ Options:
   -i, --iterations N        Max iterations (default: 10)
   -a, --agent NAME          Agent: claude, opencode (default: claude)
   --failover-threshold N    Failures before agent switch (default: 3)
+  --yolo                    Permissive mode: skip all agent permission prompts
   -y, --yes                 Skip prompts
   --rotate-at N             Rotate progress at N lines (default: 300)
   --version                 Show version
@@ -708,6 +716,7 @@ if [ -z "$RUNNING_IN_TMUX" ]; then
   # Build tmux command - use absolute path for task dir
   TMUX_CMD="RALPH_TMUX_SESSION='$SESSION_NAME' '$0' '$FULL_TASK_DIR' -i $MAX_ITERATIONS --agent '$AGENT'"
   [ "$SKIP_PROMPTS" = true ] && TMUX_CMD+=" -y"
+  [ "$YOLO_MODE" = true ] && TMUX_CMD+=" --yolo"
   TMUX_CMD+=" --rotate-at $ROTATE_THRESHOLD --failover-threshold $FAILOVER_THRESHOLD"
   
   tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 "bash -c '$TMUX_CMD'"
@@ -834,6 +843,7 @@ $PROCESSED_PROMPT_CONTENT
   export OUTPUT_FORMAT=stream-json
   export RALPH_VERBOSE=true
   export MODEL="$ITERATION_MODEL"
+  export YOLO_MODE="$YOLO_MODE"
   
   echo "$PROMPT" | "$ITERATION_AGENT_SCRIPT" > "$OUTPUT_FILE" 2>&1 &
   AGENT_PID=$!

@@ -1,0 +1,18 @@
+# Ralph Progress Log
+Effort: ralph-activity-control
+Type: Feature
+Started: 2026-01-21
+---
+
+## 2026-01-21 08:15 - US-001
+- Implemented --yolo flag for permissive mode in ralph.sh
+- Added YOLO_MODE environment variable handling
+- Updated agents/opencode.sh to set OPENCODE_PERMISSION with permissive JSON when YOLO_MODE=true
+- Added help text documentation for --yolo flag
+- Ensured flag passes through to tmux session environment
+- Files changed: ralph.sh, agents/opencode.sh
+- **Learnings for future iterations:**
+  - YOLO_MODE is passed as an environment variable from ralph.sh to agent scripts
+  - OPENCODE_PERMISSION env var controls opencode's permission prompts
+  - Permissive JSON format: {"*": "allow", "external_directory": "allow", "doom_loop": "allow"}
+---
