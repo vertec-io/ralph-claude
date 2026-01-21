@@ -290,8 +290,9 @@ enum ActivityViewMode {
 enum InputMode {
     #[default]
     Normal, // Normal operation
-    PromptInput, // User is typing a message to inject to the agent
-    NotesEdit,   // User is editing notes for the current in-progress story
+    PromptInput,    // User is typing a message to inject to the agent
+    NotesEdit,      // User is editing notes for the current in-progress story
+    ActivitySearch, // User is searching activities
 }
 
 /// Recent activity from Claude Code (tool calls, actions)
@@ -356,6 +357,16 @@ impl Activity {
         let mins = total_secs / 60;
         let secs = total_secs % 60;
         format!("{:02}:{:02}", mins, secs)
+    }
+
+    /// Check if this activity matches a search query (case-insensitive)
+    fn matches_search(&self, query: &str) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        let query_lower = query.to_lowercase();
+        self.action_type.to_lowercase().contains(&query_lower)
+            || self.target.to_lowercase().contains(&query_lower)
     }
 }
 
@@ -640,6 +651,13 @@ struct App {
     notes_cursor: usize,
     // Whether notes were just saved (for confirmation display)
     notes_saved_confirmation: Option<std::time::Instant>,
+    // Activity search state
+    activity_search_query: String,
+    activity_search_cursor: usize,
+    // Cached indices of activities matching the search (indices into the activities Vec)
+    activity_search_matches: Vec<usize>,
+    // Current match index (for n/N navigation)
+    activity_search_match_index: usize,
 }
 
 impl App {
@@ -694,6 +712,10 @@ impl App {
             notes_line_index: 0,
             notes_cursor: 0,
             notes_saved_confirmation: None,
+            activity_search_query: String::new(),
+            activity_search_cursor: 0,
+            activity_search_matches: Vec::new(),
+            activity_search_match_index: 0,
         }
     }
 
@@ -2753,8 +2775,32 @@ fn run(
                     )]));
                 }
             } else {
-                // Activity panel header - show focus indicator (list view)
-                let activity_header = if app.activity_panel_focused {
+                // Activity panel header - show focus indicator and search info (list view)
+                let has_search = !app.activity_search_query.is_empty();
+                let match_count = app.activity_search_matches.len();
+
+                let activity_header = if has_search {
+                    // Show search status with match count
+                    let match_info = if match_count > 0 {
+                        format!(
+                            "[{}/{} matches]",
+                            app.activity_search_match_index + 1,
+                            match_count
+                        )
+                    } else {
+                        "[0 matches]".to_string()
+                    };
+                    Line::from(vec![
+                        Span::styled("🔍 ", Style::default().fg(AMBER_WARNING)),
+                        Span::styled(
+                            format!("\"{}\" ", app.activity_search_query),
+                            Style::default()
+                                .fg(AMBER_WARNING)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(match_info, Style::default().fg(TEXT_MUTED)),
+                    ])
+                } else if app.activity_panel_focused {
                     Line::from(vec![
                         Span::styled(
                             "▶ Activity History ",
@@ -2801,6 +2847,7 @@ fn run(
 
                     // Render visible activities with timestamps
                     // Highlight the selected activity when focused
+                    // Highlight matching activities when search is active
                     for (idx, activity) in activities
                         .iter()
                         .skip(skip)
@@ -2811,18 +2858,48 @@ fn run(
                         let timestamp = activity.format_timestamp(app.iteration_start);
                         let is_selected =
                             app.activity_panel_focused && actual_idx == app.selected_activity_index;
-                        let activity_style = if is_selected {
+                        let is_search_match =
+                            has_search && app.activity_search_matches.contains(&actual_idx);
+                        let is_current_match = has_search
+                            && app
+                                .activity_search_matches
+                                .get(app.activity_search_match_index)
+                                == Some(&actual_idx);
+
+                        // Determine style based on selection and search state
+                        let activity_style = if is_current_match {
+                            // Current search match - highlighted in amber
+                            Style::default()
+                                .fg(AMBER_WARNING)
+                                .add_modifier(Modifier::BOLD)
+                        } else if is_selected {
                             Style::default()
                                 .fg(CYAN_PRIMARY)
                                 .add_modifier(Modifier::BOLD)
+                        } else if is_search_match {
+                            // Other search matches - highlighted but not as prominent
+                            Style::default().fg(AMBER_WARNING)
                         } else {
                             Style::default().fg(TEXT_PRIMARY)
                         };
-                        let prefix = if is_selected { "▸ " } else { "  " };
+
+                        let prefix = if is_current_match {
+                            "» "
+                        } else if is_selected {
+                            "▸ "
+                        } else if is_search_match {
+                            "• "
+                        } else {
+                            "  "
+                        };
                         status_lines.push(Line::from(vec![
                             Span::styled(
                                 format!("{}[{}] ", prefix, timestamp),
-                                Style::default().fg(TEXT_MUTED),
+                                if is_current_match || is_search_match {
+                                    Style::default().fg(AMBER_WARNING)
+                                } else {
+                                    Style::default().fg(TEXT_MUTED)
+                                },
                             ),
                             Span::styled(activity.format(max_activity_width - 2), activity_style),
                         ]));
@@ -2991,44 +3068,86 @@ fn run(
                     ]),
                 ]
             } else if app.activity_panel_focused {
-                vec![
-                    Line::from(Span::styled(
-                        "─── Activity Panel ───",
-                        Style::default().fg(CYAN_PRIMARY),
-                    )),
-                    Line::from(vec![
-                        Span::styled(
-                            "↑↓",
-                            Style::default()
-                                .fg(CYAN_PRIMARY)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" or ", Style::default().fg(TEXT_MUTED)),
-                        Span::styled(
-                            "j/k",
-                            Style::default()
-                                .fg(CYAN_PRIMARY)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" Select  ", Style::default().fg(TEXT_MUTED)),
-                        Span::styled(
-                            "Enter",
-                            Style::default()
-                                .fg(CYAN_PRIMARY)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" Detail", Style::default().fg(TEXT_MUTED)),
-                    ]),
-                    Line::from(vec![
-                        Span::styled(
-                            "Esc",
-                            Style::default()
-                                .fg(CYAN_PRIMARY)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" Exit activity focus", Style::default().fg(TEXT_MUTED)),
-                    ]),
-                ]
+                // Show different hints if search is active
+                if !app.activity_search_query.is_empty() {
+                    vec![
+                        Line::from(Span::styled(
+                            "─── Search Active ───",
+                            Style::default().fg(AMBER_WARNING),
+                        )),
+                        Line::from(vec![
+                            Span::styled(
+                                "n",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" next  ", Style::default().fg(TEXT_MUTED)),
+                            Span::styled(
+                                "N",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" prev  ", Style::default().fg(TEXT_MUTED)),
+                            Span::styled(
+                                "Enter",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Detail", Style::default().fg(TEXT_MUTED)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(
+                                "Esc",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Clear search", Style::default().fg(TEXT_MUTED)),
+                        ]),
+                    ]
+                } else {
+                    vec![
+                        Line::from(Span::styled(
+                            "─── Activity Panel ───",
+                            Style::default().fg(CYAN_PRIMARY),
+                        )),
+                        Line::from(vec![
+                            Span::styled(
+                                "↑↓",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Scroll  ", Style::default().fg(TEXT_MUTED)),
+                            Span::styled(
+                                "/",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Search  ", Style::default().fg(TEXT_MUTED)),
+                            Span::styled(
+                                "Enter",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Detail", Style::default().fg(TEXT_MUTED)),
+                        ]),
+                        Line::from(vec![
+                            Span::styled(
+                                "Esc",
+                                Style::default()
+                                    .fg(CYAN_PRIMARY)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(" Exit focus", Style::default().fg(TEXT_MUTED)),
+                        ]),
+                    ]
+                }
             } else {
                 vec![
                     Line::from(Span::styled(
@@ -3926,6 +4045,98 @@ fn run(
                 frame.render_widget(hint_paragraph, hint_area);
             }
 
+            // Render activity search input modal if active
+            if app.input_mode == InputMode::ActivitySearch {
+                // Calculate modal dimensions (centered, 50% width, 4 lines height)
+                let modal_width = (area.width as f32 * 0.5).max(35.0).min(60.0) as u16;
+                let modal_height = 4u16;
+                let modal_x = (area.width.saturating_sub(modal_width)) / 2;
+                let modal_y = (area.height.saturating_sub(modal_height)) / 2;
+                let modal_area = Rect::new(modal_x, modal_y, modal_width, modal_height);
+
+                // Clear the modal area with background
+                let clear_block = Block::default().style(Style::default().bg(BG_PRIMARY));
+                frame.render_widget(clear_block, modal_area);
+
+                // Modal block with border
+                let modal_block = Block::default()
+                    .title(Line::from(vec![
+                        Span::styled(" ", Style::default()),
+                        Span::styled(
+                            "🔍 SEARCH ACTIVITIES",
+                            Style::default()
+                                .fg(AMBER_WARNING)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(" ", Style::default()),
+                    ]))
+                    .borders(Borders::ALL)
+                    .border_set(ROUNDED_BORDERS)
+                    .border_style(Style::default().fg(AMBER_WARNING))
+                    .style(Style::default().bg(BG_SECONDARY));
+
+                let inner_area = modal_block.inner(modal_area);
+                frame.render_widget(modal_block, modal_area);
+
+                // Split inner area: input line + hint line
+                let modal_layout = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(1), // Input line
+                        Constraint::Length(1), // Hint line
+                    ])
+                    .split(inner_area);
+
+                // Render input line with cursor
+                let input_width = modal_layout[0].width.saturating_sub(3) as usize;
+                let display_text = if app.activity_search_query.len() > input_width {
+                    // Show the end of the input if it's too long
+                    let start = app.activity_search_query.len().saturating_sub(input_width);
+                    format!("…{}", &app.activity_search_query[start..])
+                } else {
+                    app.activity_search_query.clone()
+                };
+
+                // Build input line with cursor indicator
+                let cursor_pos = app.activity_search_cursor.min(display_text.len());
+                let (before_cursor, after_cursor) =
+                    display_text.split_at(cursor_pos.min(display_text.len()));
+                let cursor_char = after_cursor.chars().next().unwrap_or(' ');
+                let after_cursor_rest: String = after_cursor.chars().skip(1).collect();
+
+                let input_line = Line::from(vec![
+                    Span::styled("/ ", Style::default().fg(AMBER_WARNING)),
+                    Span::styled(before_cursor.to_string(), Style::default().fg(TEXT_PRIMARY)),
+                    Span::styled(
+                        cursor_char.to_string(),
+                        Style::default().fg(BG_PRIMARY).bg(TEXT_PRIMARY),
+                    ),
+                    Span::styled(after_cursor_rest, Style::default().fg(TEXT_PRIMARY)),
+                ]);
+                let input_paragraph = Paragraph::new(input_line);
+                frame.render_widget(input_paragraph, modal_layout[0]);
+
+                // Render hint line
+                let hint_line = Line::from(vec![
+                    Span::styled(
+                        "Enter",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" search  ", Style::default().fg(TEXT_MUTED)),
+                    Span::styled(
+                        "Esc",
+                        Style::default()
+                            .fg(CYAN_PRIMARY)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(" cancel", Style::default().fg(TEXT_MUTED)),
+                ]);
+                let hint_paragraph = Paragraph::new(hint_line);
+                frame.render_widget(hint_paragraph, modal_layout[1]);
+            }
+
             // Render notes saved confirmation (briefly shown after saving)
             if let Some(saved_time) = app.notes_saved_confirmation {
                 if saved_time.elapsed() < std::time::Duration::from_secs(2) {
@@ -4274,6 +4485,88 @@ fn run(
                     continue; // Skip normal key handling while in notes edit mode
                 }
 
+                // Handle activity search mode (modal takes priority)
+                if app.input_mode == InputMode::ActivitySearch {
+                    match key.code {
+                        KeyCode::Esc => {
+                            // Cancel search input without applying
+                            app.input_mode = InputMode::Normal;
+                            app.activity_search_query.clear();
+                            app.activity_search_cursor = 0;
+                            app.activity_search_matches.clear();
+                            app.activity_search_match_index = 0;
+                        }
+                        KeyCode::Enter => {
+                            // Apply search and close modal
+                            if !app.activity_search_query.is_empty() {
+                                // Calculate matches from current activities
+                                if let Ok(state) = app.pty_state.lock() {
+                                    let activities = state.get_activities();
+                                    app.activity_search_matches = activities
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, a)| {
+                                            a.matches_search(&app.activity_search_query)
+                                        })
+                                        .map(|(i, _)| i)
+                                        .collect();
+                                    // Jump to first match if available
+                                    if !app.activity_search_matches.is_empty() {
+                                        app.activity_search_match_index = 0;
+                                        app.selected_activity_index =
+                                            app.activity_search_matches[0];
+                                        app.activity_scroll_offset = app.selected_activity_index;
+                                        app.activity_user_scrolled = true;
+                                    }
+                                }
+                            }
+                            app.input_mode = InputMode::Normal;
+                            app.activity_search_cursor = 0;
+                        }
+                        KeyCode::Char(c) => {
+                            // Insert character at cursor position
+                            if app.activity_search_cursor >= app.activity_search_query.len() {
+                                app.activity_search_query.push(c);
+                            } else {
+                                app.activity_search_query
+                                    .insert(app.activity_search_cursor, c);
+                            }
+                            app.activity_search_cursor += 1;
+                        }
+                        KeyCode::Backspace => {
+                            // Delete character before cursor
+                            if app.activity_search_cursor > 0 {
+                                app.activity_search_cursor -= 1;
+                                app.activity_search_query.remove(app.activity_search_cursor);
+                            }
+                        }
+                        KeyCode::Delete => {
+                            // Delete character at cursor
+                            if app.activity_search_cursor < app.activity_search_query.len() {
+                                app.activity_search_query.remove(app.activity_search_cursor);
+                            }
+                        }
+                        KeyCode::Left => {
+                            if app.activity_search_cursor > 0 {
+                                app.activity_search_cursor -= 1;
+                            }
+                        }
+                        KeyCode::Right => {
+                            if app.activity_search_cursor < app.activity_search_query.len() {
+                                app.activity_search_cursor += 1;
+                            }
+                        }
+                        KeyCode::Home => {
+                            app.activity_search_cursor = 0;
+                        }
+                        KeyCode::End => {
+                            app.activity_search_cursor = app.activity_search_query.len();
+                        }
+                        _ => {}
+                    }
+                    continue; // Skip normal key handling while in search mode
+                }
+
                 // Handle Ctrl+P to open prompt input modal (before mode-specific handling)
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
                     app.input_mode = InputMode::PromptInput;
@@ -4308,11 +4601,19 @@ fn run(
                                     app.activity_detail_scroll_offset = 0;
                                 }
                             }
-                            // Esc key: return from detail view to activity list
+                            // Esc key: return from detail view to activity list, or clear search
                             KeyCode::Esc => {
                                 if app.activity_view_mode == ActivityViewMode::Detail {
                                     // Return to activity list
                                     app.activity_view_mode = ActivityViewMode::List;
+                                } else if !app.activity_search_query.is_empty()
+                                    && app.activity_panel_focused
+                                {
+                                    // Clear search filter when activity panel is focused
+                                    app.activity_search_query.clear();
+                                    app.activity_search_cursor = 0;
+                                    app.activity_search_matches.clear();
+                                    app.activity_search_match_index = 0;
                                 } else if app.activity_panel_focused {
                                     // Unfocus activity panel
                                     app.activity_panel_focused = false;
@@ -4450,17 +4751,63 @@ fn run(
                                     };
                                 app.ralph_scroll_offset = 0; // Reset scroll on view change
                             }
-                            // n: Open notes editor for current in-progress story
+                            // /: Open activity search (when activity panel is focused)
+                            KeyCode::Char('/') => {
+                                if app.activity_panel_focused {
+                                    // Open search input modal
+                                    app.input_mode = InputMode::ActivitySearch;
+                                    app.activity_search_query.clear();
+                                    app.activity_search_cursor = 0;
+                                    app.activity_search_matches.clear();
+                                    app.activity_search_match_index = 0;
+                                }
+                            }
+                            // n: Jump to next match (if search active and activity focused) or open notes editor
                             KeyCode::Char('n') => {
-                                // Only open if there's a current story in progress
-                                if let Some(ref prd) = app.prd {
-                                    if let Some(_story_id) = prd.current_story_id() {
-                                        // Initialize notes buffer (empty for new notes, or could load existing)
-                                        // We append to existing notes, so start with empty buffer
-                                        app.notes_buffer = vec![String::new()];
-                                        app.notes_line_index = 0;
-                                        app.notes_cursor = 0;
-                                        app.input_mode = InputMode::NotesEdit;
+                                if app.activity_panel_focused
+                                    && !app.activity_search_query.is_empty()
+                                {
+                                    // Jump to next match
+                                    if !app.activity_search_matches.is_empty() {
+                                        app.activity_search_match_index =
+                                            (app.activity_search_match_index + 1)
+                                                % app.activity_search_matches.len();
+                                        app.selected_activity_index = app.activity_search_matches
+                                            [app.activity_search_match_index];
+                                        app.activity_scroll_offset = app.selected_activity_index;
+                                        app.activity_user_scrolled = true;
+                                    }
+                                } else {
+                                    // Open notes editor for current in-progress story
+                                    if let Some(ref prd) = app.prd {
+                                        if let Some(_story_id) = prd.current_story_id() {
+                                            // Initialize notes buffer (empty for new notes, or could load existing)
+                                            // We append to existing notes, so start with empty buffer
+                                            app.notes_buffer = vec![String::new()];
+                                            app.notes_line_index = 0;
+                                            app.notes_cursor = 0;
+                                            app.input_mode = InputMode::NotesEdit;
+                                        }
+                                    }
+                                }
+                            }
+                            // N: Jump to previous match (if search active and activity focused)
+                            KeyCode::Char('N') => {
+                                if app.activity_panel_focused
+                                    && !app.activity_search_query.is_empty()
+                                {
+                                    // Jump to previous match
+                                    if !app.activity_search_matches.is_empty() {
+                                        if app.activity_search_match_index > 0 {
+                                            app.activity_search_match_index -= 1;
+                                        } else {
+                                            app.activity_search_match_index =
+                                                app.activity_search_matches.len() - 1;
+                                        }
+                                        app.selected_activity_index = app.activity_search_matches
+                                            [app.activity_search_match_index];
+                                        app.activity_scroll_offset = app.selected_activity_index;
+                                        app.activity_user_scrolled = true;
                                     }
                                 }
                             }

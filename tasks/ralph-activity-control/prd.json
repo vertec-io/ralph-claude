@@ -122,15 +122,15 @@
       "title": "Activity search/filter",
       "description": "As a user, I want to search through activities to find specific actions.",
       "acceptanceCriteria": [
-        { "description": "Keybind (/) opens search input", "passes": false },
-        { "description": "Filter activities by search term (matches action type or target)", "passes": false },
-        { "description": "Highlight matching activities", "passes": false },
-        { "description": "n/N to jump to next/previous match", "passes": false },
-        { "description": "Clear filter with Esc", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Keybind (/) opens search input", "passes": true },
+        { "description": "Filter activities by search term (matches action type or target)", "passes": true },
+        { "description": "Highlight matching activities", "passes": true },
+        { "description": "n/N to jump to next/previous match", "passes": true },
+        { "description": "Clear filter with Esc", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
