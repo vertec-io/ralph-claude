@@ -1866,16 +1866,24 @@ fn spawn_claude(
 
 /// Attach to a tmux session and capture its output
 /// Spawns a thread that continuously captures pane content and feeds it to the VT100 parser
+/// Returns the thread handle and a stop flag to signal the thread to exit
 fn attach_to_tmux_session(
     session_name: &str,
     pty_state: Arc<Mutex<PtyState>>,
-) -> io::Result<thread::JoinHandle<()>> {
+) -> io::Result<(thread::JoinHandle<()>, Arc<std::sync::atomic::AtomicBool>)> {
     let session = session_name.to_string();
+    let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_flag_clone = Arc::clone(&stop_flag);
 
     let handle = thread::spawn(move || {
         let mut last_content = String::new();
 
         loop {
+            // Check if we should stop
+            if stop_flag_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
             // Check if session still exists
             if !tmux_session_exists(&session) {
                 if let Ok(mut state) = pty_state.lock() {
@@ -1914,7 +1922,7 @@ fn attach_to_tmux_session(
         }
     });
 
-    Ok(handle)
+    Ok((handle, stop_flag))
 }
 
 fn main() -> io::Result<()> {
@@ -2008,12 +2016,14 @@ fn main() -> io::Result<()> {
             io::Error::new(io::ErrorKind::InvalidInput, "No tmux session specified")
         })?;
 
-        let reader_thread = attach_to_tmux_session(session_name, Arc::clone(&app.pty_state))?;
+        let (reader_thread, stop_flag) =
+            attach_to_tmux_session(session_name, Arc::clone(&app.pty_state))?;
 
         // Run view-only loop
         let run_result = run_attach_mode(&mut terminal, &mut app, &mut last_cols, &mut last_rows);
 
-        // Clean up
+        // Signal thread to stop and wait for it
+        stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = reader_thread.join();
 
         run_result
@@ -4049,26 +4059,54 @@ fn run_attach_mode(
         }
 
         // Handle input - view only
-        // Modern terminals (like Ghostty) send both Press and Release events
-        // We only want to act on Press events
         if event::poll(std::time::Duration::from_millis(50))? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    // Only handle key press (not release or repeat)
-                    match key.code {
-                        KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
-                            break;
+            let evt = event::read()?;
+
+            // Log all events to a file for debugging
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/ralph-tui-events.log")
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{:?}", evt);
+            }
+
+            match evt {
+                Event::Key(key) => {
+                    // Log key details
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/ralph-tui-events.log")
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(f, "  -> kind={:?} code={:?}", key.kind, key.code);
+                    }
+
+                    if key.kind == KeyEventKind::Press {
+                        match key.code {
+                            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                                break;
+                            }
+                            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                break;
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            break;
-                        }
-                        _ => {} // Ignore other keys
                     }
                 }
-                Event::Resize(_, _) => {
-                    // Terminal was resized - the next draw() will pick up the new size
+                Event::Resize(w, h) => {
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open("/tmp/ralph-tui-events.log")
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(f, "RESIZE: {}x{}", w, h);
+                    }
                 }
-                _ => {} // Ignore key release, mouse events, etc.
+                _ => {}
             }
         }
     }
