@@ -211,17 +211,17 @@ main() {
       if [ "$VERBOSE" = "true" ]; then
         log_info "Using server mode: attaching to $attach_url"
       fi
+      # Pipe prompt via stdin - much faster than CLI args for large prompts
       # shellcheck disable=SC2086
-      opencode run $args --attach "$attach_url" "$prompt"
+      echo "$prompt" | opencode run $args --attach "$attach_url"
       return $?
     fi
   fi
 
   # Direct execution (default mode or fallback)
-  # Execute opencode run with prompt as argument
-  # OpenCode run takes the message as positional arguments
+  # Pipe prompt via stdin - much faster than CLI args for large prompts
   # shellcheck disable=SC2086
-  opencode run $args "$prompt"
+  echo "$prompt" | opencode run $args
 }
 
 # Run main function

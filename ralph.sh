@@ -377,7 +377,18 @@ fi
 
 PRD_FILE="$FULL_TASK_DIR/prd.json"
 PROGRESS_FILE="$FULL_TASK_DIR/progress.txt"
-PROMPT_FILE="$SCRIPT_DIR/prompt.md"
+# Look for prompt.md in installed location first, then repo location
+if [ -f "$HOME/.local/share/ralph/prompt.md" ]; then
+  PROMPT_FILE="$HOME/.local/share/ralph/prompt.md"
+elif [ -f "$SCRIPT_DIR/prompt.md" ]; then
+  PROMPT_FILE="$SCRIPT_DIR/prompt.md"
+else
+  echo "Error: prompt.md not found"
+  echo "Expected locations:"
+  echo "  - $HOME/.local/share/ralph/prompt.md (installed)"
+  echo "  - $SCRIPT_DIR/prompt.md (repo)"
+  exit 1
+fi
 
 # Validate task directory exists
 if [ ! -d "$FULL_TASK_DIR" ]; then
@@ -694,8 +705,8 @@ if [ -z "$RUNNING_IN_TMUX" ]; then
   echo "  ralph stop        # Force stop"
   echo ""
   
-  # Build tmux command
-  TMUX_CMD="RALPH_TMUX_SESSION='$SESSION_NAME' '$0' '$TASK_DIR' -i $MAX_ITERATIONS --agent '$AGENT'"
+  # Build tmux command - use absolute path for task dir
+  TMUX_CMD="RALPH_TMUX_SESSION='$SESSION_NAME' '$0' '$FULL_TASK_DIR' -i $MAX_ITERATIONS --agent '$AGENT'"
   [ "$SKIP_PROMPTS" = true ] && TMUX_CMD+=" -y"
   TMUX_CMD+=" --rotate-at $ROTATE_THRESHOLD --failover-threshold $FAILOVER_THRESHOLD"
   
@@ -841,17 +852,47 @@ $PROCESSED_PROMPT_CONTENT
     MINS=$((ELAPSED / 60))
     SECS=$((ELAPSED % 60))
 
-    # Parse JSON output for status updates
+    # Parse output for status updates (supports multiple formats)
     if [ -f "$OUTPUT_FILE" ]; then
-      # Look for tool calls, assistant messages, etc.
-      TOOL_NAME=$(tail -n 20 "$OUTPUT_FILE" 2>/dev/null | grep -o '"tool_name":"[^"]*"' | tail -1 | cut -d'"' -f4)
-      if [ -n "$TOOL_NAME" ]; then
-        LAST_STATUS="Using $TOOL_NAME..."
+      # Get last 50 lines for parsing (use strings to handle binary content)
+      RECENT_OUTPUT=$(tail -c 8192 "$OUTPUT_FILE" 2>/dev/null | strings 2>/dev/null)
+      
+      # Try multiple patterns in order of preference:
+      
+      # 1. OpenCode debug logs: permission=bash pattern=<command>
+      # Extract just the command, stopping at ruleset= or end of relevant content
+      BASH_CMD=$(echo "$RECENT_OUTPUT" | grep -o 'permission=bash pattern=[^ ]*' | tail -1 | sed 's/permission=bash pattern=//')
+      if [ -n "$BASH_CMD" ]; then
+        # Clean up and truncate
+        BASH_CMD=$(echo "$BASH_CMD" | head -c 60)
+        LAST_STATUS="$ $BASH_CMD"
       else
-        # Look for text content being generated
-        TEXT_PREVIEW=$(tail -n 5 "$OUTPUT_FILE" 2>/dev/null | grep -o '"text":"[^"]*"' | tail -1 | cut -d'"' -f4 | head -c 60)
-        if [ -n "$TEXT_PREVIEW" ]; then
-          LAST_STATUS="$TEXT_PREVIEW"
+        # 2. OpenCode debug logs: permission=<tool> pattern=<path>
+        # Extract tool name and the file/pattern it's operating on
+        TOOL_LINE=$(echo "$RECENT_OUTPUT" | grep -oE 'permission=(read|write|edit|glob|grep|webfetch|task) pattern=[^ ]+' | tail -1)
+        TOOL_PATTERN=$(echo "$TOOL_LINE" | sed 's/permission=//' | sed 's/ pattern=/: /' | head -c 60)
+        if [ -n "$TOOL_PATTERN" ]; then
+          LAST_STATUS="Using $TOOL_PATTERN..."
+        else
+          # 3. Text content in the output (assistant speaking)
+          # Look for lines that look like actual text, not log fragments
+          # Must be at least 10 chars, no '=' signs (log format), and start with a letter
+          TEXT_LINE=$(echo "$RECENT_OUTPUT" | grep -v '^INFO\|^ERROR\|^WARN\|^DEBUG\|service=\|status=\|permission=\|pattern=\|duration=\|cwd=\|git=' | grep -v '^\[\|^{' | grep '^[A-Za-z]' | tail -5 | awk 'length > 15' | tail -1 | head -c 70)
+          if [ -n "$TEXT_LINE" ]; then
+            LAST_STATUS="$TEXT_LINE"
+          else
+            # 4. JSON format: tool_name field
+            TOOL_NAME=$(echo "$RECENT_OUTPUT" | grep -o '"tool_name":"[^"]*"' | tail -1 | cut -d'"' -f4)
+            if [ -n "$TOOL_NAME" ]; then
+              LAST_STATUS="Using $TOOL_NAME..."
+            else
+              # 5. JSON format: text content
+              TEXT_PREVIEW=$(echo "$RECENT_OUTPUT" | grep -o '"text":"[^"]*"' | tail -1 | cut -d'"' -f4 | head -c 60)
+              if [ -n "$TEXT_PREVIEW" ]; then
+                LAST_STATUS="$TEXT_PREVIEW"
+              fi
+            fi
+          fi
         fi
       fi
     fi

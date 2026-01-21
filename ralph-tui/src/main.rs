@@ -963,36 +963,34 @@ fn vt100_to_ratatui_color(color: vt100::Color) -> Color {
 }
 
 /// Render the VT100 screen to a Vec of ratatui Lines (styled text)
-/// This function renders the visible content of the terminal emulator
+/// Uses screen.contents() to get the actual text, preserving ANSI colors
+/// where possible, and lets ratatui handle natural wrapping.
 fn render_vt100_screen(screen: &vt100::Screen) -> Vec<Line<'static>> {
     let (rows, cols) = screen.size();
     let mut lines = Vec::with_capacity(rows as usize);
 
-    // Render each visible row
+    // Get raw text content row by row, trimming trailing whitespace
     for row in 0..rows {
-        let mut spans = Vec::new();
+        let mut spans: Vec<Span<'static>> = Vec::new();
         let mut col = 0u16;
+        let mut last_style = Style::default();
+        let mut current_text = String::new();
 
         while col < cols {
             if let Some(cell) = screen.cell(row, col) {
-                let contents = cell.contents();
-
                 // Skip wide character continuations
                 if cell.is_wide_continuation() {
                     col += 1;
                     continue;
                 }
 
-                let display_str = if contents.is_empty() {
-                    " ".to_string()
-                } else {
-                    contents.to_string()
-                };
+                let contents = cell.contents();
+                let display_str = if contents.is_empty() { " " } else { contents };
 
+                // Build style from cell attributes
                 let mut style = Style::default();
                 style = style.fg(vt100_to_ratatui_color(cell.fgcolor()));
                 style = style.bg(vt100_to_ratatui_color(cell.bgcolor()));
-
                 if cell.bold() {
                     style = style.add_modifier(Modifier::BOLD);
                 }
@@ -1006,23 +1004,66 @@ fn render_vt100_screen(screen: &vt100::Screen) -> Vec<Line<'static>> {
                     style = style.add_modifier(Modifier::REVERSED);
                 }
 
-                spans.push(Span::styled(display_str, style));
-
-                // Wide characters take 2 columns
-                if cell.is_wide() {
-                    col += 2;
-                } else {
-                    col += 1;
+                // If style changed, flush current text and start new span
+                if style != last_style && !current_text.is_empty() {
+                    spans.push(Span::styled(std::mem::take(&mut current_text), last_style));
                 }
+                current_text.push_str(display_str);
+                last_style = style;
+
+                col += if cell.is_wide() { 2 } else { 1 };
             } else {
-                spans.push(Span::raw(" "));
+                current_text.push(' ');
                 col += 1;
             }
         }
-        lines.push(Line::from(spans));
+
+        // Flush remaining text
+        if !current_text.is_empty() {
+            spans.push(Span::styled(current_text, last_style));
+        }
+
+        // Trim trailing whitespace from spans
+        trim_trailing_whitespace(&mut spans);
+
+        // Check if this row continues to the next (soft wrap)
+        // If so, we'll mark it but still emit as separate line for now
+        // (ratatui will re-wrap based on display width)
+        if spans.is_empty() {
+            lines.push(Line::from(""));
+        } else {
+            lines.push(Line::from(spans));
+        }
+    }
+
+    // Remove trailing empty lines
+    while lines
+        .last()
+        .is_some_and(|l| l.spans.is_empty() || l.to_string().trim().is_empty())
+    {
+        lines.pop();
     }
 
     lines
+}
+
+/// Trim trailing whitespace spans from a span vector
+fn trim_trailing_whitespace(spans: &mut Vec<Span<'static>>) {
+    // Remove completely whitespace-only spans from the end
+    while let Some(span) = spans.last() {
+        if span.content.trim().is_empty() {
+            spans.pop();
+        } else {
+            break;
+        }
+    }
+    // Trim the last span's trailing whitespace
+    if let Some(last) = spans.last_mut() {
+        let trimmed = last.content.trim_end();
+        if trimmed != last.content {
+            *last = Span::styled(trimmed.to_string(), last.style);
+        }
+    }
 }
 
 /// Strip ANSI escape sequences from a string for reliable text matching
@@ -1412,6 +1453,50 @@ fn find_ralph_sessions() -> Vec<(String, String)> {
     }
 }
 
+/// Get the task directory for a running ralph tmux session
+/// Uses tmux's pane_current_path to find the working directory
+fn get_task_dir_from_session(session_name: &str) -> Option<PathBuf> {
+    // Get the working directory from the tmux session
+    let output = std::process::Command::new("tmux")
+        .args([
+            "display-message",
+            "-t",
+            session_name,
+            "-p",
+            "#{pane_current_path}",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let working_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if working_dir.is_empty() {
+        return None;
+    }
+
+    // The task name is the part after "ralph-" in the session name
+    let task_name = session_name.strip_prefix("ralph-").unwrap_or(session_name);
+
+    // Construct the full task directory path
+    let task_dir = PathBuf::from(&working_dir).join("tasks").join(task_name);
+
+    if task_dir.exists() && task_dir.join("prd.json").exists() {
+        Some(task_dir)
+    } else {
+        // Fallback: try just tasks/{task_name} relative to cwd
+        let fallback = PathBuf::from(format!("tasks/{}", task_name));
+        if fallback.exists() && fallback.join("prd.json").exists() {
+            Some(fallback)
+        } else {
+            // Last resort: just use the working dir + tasks/task_name even if it doesn't exist yet
+            Some(task_dir)
+        }
+    }
+}
+
 /// Prompt user to select from running ralph sessions
 fn prompt_session_selection(sessions: &[(String, String)]) -> io::Result<String> {
     println!();
@@ -1553,23 +1638,31 @@ fn parse_args() -> io::Result<CliConfig> {
             } else {
                 println!("No running session for task: {}", dir.display());
                 if sessions.len() == 1 {
-                    let task_dir = PathBuf::from(format!("tasks/{}", sessions[0].1));
-                    (sessions[0].0.clone(), task_dir)
+                    let session = &sessions[0].0;
+                    let task_dir = get_task_dir_from_session(session)
+                        .unwrap_or_else(|| PathBuf::from(format!("tasks/{}", sessions[0].1)));
+                    (session.clone(), task_dir)
                 } else {
                     let session = prompt_session_selection(&sessions)?;
-                    let task_name = session.strip_prefix("ralph-").unwrap_or(&session);
-                    let task_dir = PathBuf::from(format!("tasks/{}", task_name));
+                    let task_dir = get_task_dir_from_session(&session).unwrap_or_else(|| {
+                        let task_name = session.strip_prefix("ralph-").unwrap_or(&session);
+                        PathBuf::from(format!("tasks/{}", task_name))
+                    });
                     (session, task_dir)
                 }
             }
         } else if sessions.len() == 1 {
             println!("Found one running session: {}", sessions[0].0);
-            let task_dir = PathBuf::from(format!("tasks/{}", sessions[0].1));
-            (sessions[0].0.clone(), task_dir)
+            let session = &sessions[0].0;
+            let task_dir = get_task_dir_from_session(session)
+                .unwrap_or_else(|| PathBuf::from(format!("tasks/{}", sessions[0].1)));
+            (session.clone(), task_dir)
         } else {
             let session = prompt_session_selection(&sessions)?;
-            let task_name = session.strip_prefix("ralph-").unwrap_or(&session);
-            let task_dir = PathBuf::from(format!("tasks/{}", task_name));
+            let task_dir = get_task_dir_from_session(&session).unwrap_or_else(|| {
+                let task_name = session.strip_prefix("ralph-").unwrap_or(&session);
+                PathBuf::from(format!("tasks/{}", task_name))
+            });
             (session, task_dir)
         };
 
@@ -1789,6 +1882,8 @@ fn attach_to_tmux_session(
             }
 
             // Capture pane content with ANSI escape sequences
+            // -J joins wrapped lines so we get logical lines
+            // -e preserves escape sequences for colors
             let output = std::process::Command::new("tmux")
                 .args([
                     "capture-pane",
@@ -1796,6 +1891,7 @@ fn attach_to_tmux_session(
                     &session,
                     "-p", // print to stdout
                     "-e", // include escape sequences
+                    "-J", // join wrapped lines
                     "-S",
                     "-1000", // start from 1000 lines back (scrollback)
                 ])
@@ -1808,8 +1904,21 @@ fn attach_to_tmux_session(
                     // Only update if content changed
                     if content != last_content {
                         if let Ok(mut state) = pty_state.lock() {
-                            let (rows, cols) = state.parser.screen().size();
-                            state.parser = vt100::Parser::new(rows, cols, 1000);
+                            // Get the actual tmux pane dimensions
+                            let pane_width = std::process::Command::new("tmux")
+                                .args(["display-message", "-t", &session, "-p", "#{pane_width}"])
+                                .output()
+                                .ok()
+                                .and_then(|o| {
+                                    String::from_utf8_lossy(&o.stdout)
+                                        .trim()
+                                        .parse::<u16>()
+                                        .ok()
+                                })
+                                .unwrap_or(500);
+
+                            // Use tmux pane width so content isn't re-wrapped
+                            state.parser = vt100::Parser::new(2000, pane_width, 1000);
                             state.parser.process(content.as_bytes());
                             state.append_output(content.as_bytes());
                         }
@@ -3915,7 +4024,7 @@ fn run_attach_mode(
             let right_inner = right_block.inner(right_panel_area);
             frame.render_widget(right_block, right_panel_area);
 
-            // Render PTY content
+            // Render PTY content (don't wrap - content is pre-formatted)
             if let Ok(state) = app.pty_state.lock() {
                 let lines = render_vt100_screen(state.parser.screen());
                 let paragraph = Paragraph::new(lines);
@@ -3964,12 +4073,26 @@ fn run_attach_mode(
         // Handle input - view only
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
-                // Ctrl+Q to quit
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
-                    break;
-                }
-                // Escape also quits
-                if key.code == KeyCode::Esc {
+                // Quit on multiple key combinations
+                let should_quit = match key.code {
+                    // Escape key
+                    KeyCode::Esc => true,
+                    // Plain 'q' (no modifiers)
+                    KeyCode::Char('q') | KeyCode::Char('Q') if key.modifiers.is_empty() => true,
+                    // Ctrl+Q (comes through as Char with CONTROL modifier)
+                    KeyCode::Char('q') | KeyCode::Char('Q')
+                        if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        true
+                    }
+                    // Ctrl+Q might also come through as the control character (0x11 = DC1)
+                    KeyCode::Char('\x11') => true,
+                    // Ctrl+C as backup
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => true,
+                    _ => false,
+                };
+
+                if should_quit {
                     break;
                 }
             }
