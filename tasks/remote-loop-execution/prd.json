@@ -13,19 +13,58 @@
       "title": "Full architecture sketch",
       "description": "As a developer, I need a complete architectural document showing all components, their roles, communication paths, and how they compose into the remote execution system.",
       "acceptanceCriteria": [
-        { "description": "Diagram showing: ralph-uv daemon, loop runners, RPC layer, OpenZiti overlay, client(s)", "passes": false },
-        { "description": "Define the ralph-uv daemon's responsibilities (listen for start requests, manage loop lifecycles, expose per-loop RPC)", "passes": false },
-        { "description": "Define how loop runners register with the daemon and expose their RPC", "passes": false },
-        { "description": "Define client connection flow: client reads SQLite → if remote, connect via OpenZiti → remote daemon", "passes": false },
-        { "description": "Define the 'start loop' request/response contract (origin URL, branch, task dir, iterations, agent)", "passes": false },
-        { "description": "Define the remote bootstrapping flow: git push to remote bare repo → checkout → agent install check → task 0 (dep install) → loop start", "passes": false },
-        { "description": "Define how multiple concurrent loops are isolated (separate checkouts, separate sockets, separate Ziti services or multiplexed?)", "passes": false },
-        { "description": "Document which existing code is reused vs. what's new", "passes": false },
-        { "description": "Address: what happens on disconnect/reconnect, daemon crash, loop crash", "passes": false },
-        { "description": "Define loop completion flow: daemon pushes event → local SQLite marked completed/failed", "passes": false },
-        { "description": "Address stale state: how does local SQLite reconcile if no client was connected when loop finished?", "passes": false },
-        { "description": "Save architecture document to tasks/remote-loop-execution/architecture.md", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Diagram showing: ralph-uv daemon, loop runners, RPC layer, OpenZiti overlay, client(s)",
+          "passes": false
+        },
+        {
+          "description": "Define the ralph-uv daemon's responsibilities (listen for start requests, manage loop lifecycles, expose per-loop RPC)",
+          "passes": false
+        },
+        {
+          "description": "Define how loop runners register with the daemon and expose their RPC",
+          "passes": false
+        },
+        {
+          "description": "Define client connection flow: client reads SQLite \u2192 if remote, connect via OpenZiti \u2192 remote daemon",
+          "passes": false
+        },
+        {
+          "description": "Define the 'start loop' request/response contract (origin URL, branch, task dir, iterations, agent)",
+          "passes": false
+        },
+        {
+          "description": "Define the remote bootstrapping flow: git push to remote bare repo \u2192 checkout \u2192 agent install check \u2192 task 0 (dep install) \u2192 loop start",
+          "passes": false
+        },
+        {
+          "description": "Define how multiple concurrent loops are isolated (separate checkouts, separate sockets, separate Ziti services or multiplexed?)",
+          "passes": false
+        },
+        {
+          "description": "Document which existing code is reused vs. what's new",
+          "passes": false
+        },
+        {
+          "description": "Address: what happens on disconnect/reconnect, daemon crash, loop crash",
+          "passes": false
+        },
+        {
+          "description": "Define loop completion flow: daemon pushes event \u2192 local SQLite marked completed/failed",
+          "passes": false
+        },
+        {
+          "description": "Address stale state: how does local SQLite reconcile if no client was connected when loop finished?",
+          "passes": false
+        },
+        {
+          "description": "Save architecture document to tasks/remote-loop-execution/architecture.md",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 1,
       "passes": false,
@@ -36,13 +75,34 @@
       "title": "Audit current RPC transport layer",
       "description": "As a developer, I need to understand exactly how the current Unix socket RPC is implemented so I can identify extension points for OpenZiti transport.",
       "acceptanceCriteria": [
-        { "description": "Document all socket creation/binding code paths in rpc.py", "passes": false },
-        { "description": "Document all client connection code in attach.py", "passes": false },
-        { "description": "Identify where AF_UNIX is hardcoded vs. abstracted", "passes": false },
-        { "description": "Map the full lifecycle: server start → client connect → subscribe → events → disconnect", "passes": false },
-        { "description": "Note any assumptions that would break over a network (latency, ordering, disconnects)", "passes": false },
-        { "description": "Update notes in prd.json with findings", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Document all socket creation/binding code paths in rpc.py",
+          "passes": false
+        },
+        {
+          "description": "Document all client connection code in attach.py",
+          "passes": false
+        },
+        {
+          "description": "Identify where AF_UNIX is hardcoded vs. abstracted",
+          "passes": false
+        },
+        {
+          "description": "Map the full lifecycle: server start \u2192 client connect \u2192 subscribe \u2192 events \u2192 disconnect",
+          "passes": false
+        },
+        {
+          "description": "Note any assumptions that would break over a network (latency, ordering, disconnects)",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 2,
       "passes": false,
@@ -53,14 +113,38 @@
       "title": "Evaluate OpenZiti Python SDK capabilities",
       "description": "As a developer, I need to understand the OpenZiti Python SDK's capabilities for both server (daemon) and client (attach/TUI) use.",
       "acceptanceCriteria": [
-        { "description": "Document how to create a Ziti socket server (bind to a Ziti service) using openziti Python SDK", "passes": false },
-        { "description": "Document how to connect as a Ziti client to a service using openziti Python SDK", "passes": false },
-        { "description": "Determine if SDK supports asyncio (needed for RPC server integration)", "passes": false },
-        { "description": "Determine how identity files (.json/.jwt) are loaded and used", "passes": false },
-        { "description": "Test or document: can one SDK process host multiple services (one per loop)?", "passes": false },
-        { "description": "Identify SDK limitations, maturity, and maintenance status", "passes": false },
-        { "description": "Update notes in prd.json with findings", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Document how to create a Ziti socket server (bind to a Ziti service) using openziti Python SDK",
+          "passes": false
+        },
+        {
+          "description": "Document how to connect as a Ziti client to a service using openziti Python SDK",
+          "passes": false
+        },
+        {
+          "description": "Determine if SDK supports asyncio (needed for RPC server integration)",
+          "passes": false
+        },
+        {
+          "description": "Determine how identity files (.json/.jwt) are loaded and used",
+          "passes": false
+        },
+        {
+          "description": "Test or document: can one SDK process host multiple services (one per loop)?",
+          "passes": false
+        },
+        {
+          "description": "Identify SDK limitations, maturity, and maintenance status",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 3,
       "passes": false,
@@ -71,13 +155,34 @@
       "title": "Assess interactive mode over network",
       "description": "As a developer, I need to determine if real-time keystroke forwarding is feasible over OpenZiti with acceptable latency.",
       "acceptanceCriteria": [
-        { "description": "Analyze current interactive mode flow (Esc sending, keystroke forwarding via write_pty)", "passes": false },
-        { "description": "Identify latency requirements for interactive mode to feel responsive", "passes": false },
-        { "description": "Determine if JSON-RPC overhead per keystroke is acceptable or if batching/raw mode is needed", "passes": false },
-        { "description": "Test or estimate round-trip times for keystroke → agent response over OpenZiti", "passes": false },
-        { "description": "Document any protocol changes needed for responsive interactive mode", "passes": false },
-        { "description": "Update notes in prd.json with findings", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Analyze current interactive mode flow (Esc sending, keystroke forwarding via write_pty)",
+          "passes": false
+        },
+        {
+          "description": "Identify latency requirements for interactive mode to feel responsive",
+          "passes": false
+        },
+        {
+          "description": "Determine if JSON-RPC overhead per keystroke is acceptable or if batching/raw mode is needed",
+          "passes": false
+        },
+        {
+          "description": "Test or estimate round-trip times for keystroke \u2192 agent response over OpenZiti",
+          "passes": false
+        },
+        {
+          "description": "Document any protocol changes needed for responsive interactive mode",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 4,
       "passes": false,
@@ -88,13 +193,34 @@
       "title": "Design unified session DB schema for remote loops",
       "description": "As a developer, I need to extend the SQLite session schema so remote loops appear alongside local loops, with enough info for clients to connect via OpenZiti.",
       "acceptanceCriteria": [
-        { "description": "Design schema changes: add fields for remote vs local, Ziti service name, identity file path, remote host label", "passes": false },
-        { "description": "Define how a remote loop gets registered in local SQLite (on 'start remote loop' command? on first attach?)", "passes": false },
-        { "description": "Ensure ralph-uv status and ralph-tui can list remote loops without changes to their query logic", "passes": false },
-        { "description": "Define how stale remote entries are cleaned up (daemon unreachable, loop finished)", "passes": false },
-        { "description": "Document how ralph-tui connects to remote loops (Python SDK bridge? Ziti tunneler? embedded?)", "passes": false },
-        { "description": "Update notes in prd.json with findings", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Design schema changes: add fields for remote vs local, Ziti service name, identity file path, remote host label",
+          "passes": false
+        },
+        {
+          "description": "Define how a remote loop gets registered in local SQLite (on 'start remote loop' command? on first attach?)",
+          "passes": false
+        },
+        {
+          "description": "Ensure ralph-uv status and ralph-tui can list remote loops without changes to their query logic",
+          "passes": false
+        },
+        {
+          "description": "Define how stale remote entries are cleaned up (daemon unreachable, loop finished)",
+          "passes": false
+        },
+        {
+          "description": "Document how ralph-tui connects to remote loops (Python SDK bridge? Ziti tunneler? embedded?)",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 5,
       "passes": false,
@@ -105,18 +231,54 @@
       "title": "Design remote environment bootstrapping flow",
       "description": "As a developer, I need to understand how the remote machine gets the code, agent CLI, and project deps when a job is sent to it for the first time.",
       "acceptanceCriteria": [
-        { "description": "Design the code sync flow: local creates branch → pushes to origin → pushes to remote bare repo → daemon checks out working dir", "passes": false },
-        { "description": "Define how the remote bare repo is set up (one-time manual? auto-created by daemon on first push?)", "passes": false },
-        { "description": "Design agent CLI auto-install: daemon checks for claude/opencode binary, installs if missing on first use", "passes": false },
-        { "description": "Document what 'install claude CLI' and 'install opencode CLI' look like programmatically", "passes": false },
-        { "description": "Design 'task 0' pattern: first iteration installs project deps (npm install, pip install, etc.) before real work begins", "passes": false },
-        { "description": "Address lockfile discovery: how does task 0 find lockfiles that may not be in repo root?", "passes": false },
-        { "description": "Define what manual one-time setup the user must do on the remote (git, jq, python, API keys/claude auth)", "passes": false },
-        { "description": "Address: how does the remote get prompt.md, agents/ scripts, and AGENTS.md?", "passes": false },
-        { "description": "Design how subsequent jobs to the same remote reuse the existing checkout vs. create new ones", "passes": false },
-        { "description": "Document the full sequence: user runs 'ralph-uv start-remote' → what happens step by step until loop iteration 1 begins", "passes": false },
-        { "description": "Update notes in prd.json with findings", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Design the code sync flow: local creates branch \u2192 pushes to origin \u2192 pushes to remote bare repo \u2192 daemon checks out working dir",
+          "passes": false
+        },
+        {
+          "description": "Define how the remote bare repo is set up (one-time manual? auto-created by daemon on first push?)",
+          "passes": false
+        },
+        {
+          "description": "Design agent CLI auto-install: daemon checks for claude/opencode binary, installs if missing on first use",
+          "passes": false
+        },
+        {
+          "description": "Document what 'install claude CLI' and 'install opencode CLI' look like programmatically",
+          "passes": false
+        },
+        {
+          "description": "Design 'task 0' pattern: first iteration installs project deps (npm install, pip install, etc.) before real work begins",
+          "passes": false
+        },
+        {
+          "description": "Address lockfile discovery: how does task 0 find lockfiles that may not be in repo root?",
+          "passes": false
+        },
+        {
+          "description": "Define what manual one-time setup the user must do on the remote (git, jq, python, API keys/claude auth)",
+          "passes": false
+        },
+        {
+          "description": "Address: how does the remote get prompt.md, agents/ scripts, and AGENTS.md?",
+          "passes": false
+        },
+        {
+          "description": "Design how subsequent jobs to the same remote reuse the existing checkout vs. create new ones",
+          "passes": false
+        },
+        {
+          "description": "Document the full sequence: user runs 'ralph-uv start-remote' \u2192 what happens step by step until loop iteration 1 begins",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 6,
       "passes": false,
@@ -127,20 +289,51 @@
       "title": "Prototype feasibility test",
       "description": "As a developer, I need to validate the architecture with a minimal proof-of-concept over OpenZiti.",
       "acceptanceCriteria": [
-        { "description": "Set up OpenZiti network (controller + edge router, or CloudZiti)", "passes": false },
-        { "description": "Enroll a ralph-uv server identity and a client identity", "passes": false },
-        { "description": "Create a Ziti service for ralph RPC", "passes": false },
-        { "description": "Connect ralph-uv attach to a loop via OpenZiti (not Unix socket)", "passes": false },
-        { "description": "Verify event streaming works over Ziti (output events, state changes)", "passes": false },
-        { "description": "Test interactive mode keystroke forwarding over Ziti", "passes": false },
-        { "description": "Measure latency overhead vs Unix socket baseline", "passes": false },
-        { "description": "Document any issues discovered during prototype", "passes": false },
-        { "description": "Update notes in prd.json with findings and measurements", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        {
+          "description": "Set up OpenZiti network (controller + edge router, or CloudZiti)",
+          "passes": false
+        },
+        {
+          "description": "Enroll a ralph-uv server identity and a client identity",
+          "passes": false
+        },
+        {
+          "description": "Create a Ziti service for ralph RPC",
+          "passes": false
+        },
+        {
+          "description": "Connect ralph-uv attach to a loop via OpenZiti (not Unix socket)",
+          "passes": false
+        },
+        {
+          "description": "Verify event streaming works over Ziti (output events, state changes)",
+          "passes": false
+        },
+        {
+          "description": "Test interactive mode keystroke forwarding over Ziti",
+          "passes": false
+        },
+        {
+          "description": "Measure latency overhead vs Unix socket baseline",
+          "passes": false
+        },
+        {
+          "description": "Document any issues discovered during prototype",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings and measurements",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
       ],
       "priority": 7,
       "passes": false,
       "notes": ""
     }
-  ]
+  ],
+  "agent": "opencode"
 }

@@ -1,10 +1,15 @@
 """Ralph CLI entrypoint."""
 
+from __future__ import annotations
+
 import argparse
+import json
+import shutil
 import sys
 from pathlib import Path
 
 from ralph_uv import __version__
+from ralph_uv.agents import VALID_AGENTS
 from ralph_uv.attach import attach
 from ralph_uv.loop import LoopConfig, LoopRunner
 from ralph_uv.session import (
@@ -12,6 +17,241 @@ from ralph_uv.session import (
     get_status,
     stop_session,
 )
+
+DEFAULT_ITERATIONS = 10
+
+
+def _find_active_tasks() -> list[Path]:
+    """Find active task directories (those with prd.json, excluding archived)."""
+    tasks_dir = Path("tasks")
+    if not tasks_dir.is_dir():
+        return []
+
+    results: list[Path] = []
+    for prd_file in sorted(tasks_dir.rglob("prd.json")):
+        # Skip archived tasks
+        if "archived" in prd_file.parts:
+            continue
+        results.append(prd_file.parent)
+
+    return results
+
+
+def _display_task_info(task_dir: Path) -> str:
+    """Format a task directory for display."""
+    prd_file = task_dir / "prd.json"
+    description = "No description"
+    total = "?"
+    done = "?"
+    prd_type = "feature"
+
+    try:
+        prd = json.loads(prd_file.read_text())
+        description = str(prd.get("description", "No description"))[:60]
+        stories = prd.get("userStories", [])
+        total = str(len(stories))
+        done = str(sum(1 for s in stories if s.get("passes", False)))
+        prd_type = str(prd.get("type", "feature"))
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    return f"{str(task_dir):<35} [{done}/{total}] ({prd_type})"
+
+
+def _detect_installed_agents() -> list[str]:
+    """Detect which supported agents are installed."""
+    installed: list[str] = []
+    for agent in VALID_AGENTS:
+        if shutil.which(agent) is not None:
+            installed.append(agent)
+    return installed
+
+
+def _prompt_task_selection() -> Path | None:
+    """Interactively prompt the user to select a task directory.
+
+    Returns the selected Path, or None if no tasks found / invalid selection.
+    """
+    tasks = _find_active_tasks()
+
+    if not tasks:
+        if not Path("tasks").is_dir():
+            print("No tasks/ directory found in current project.")
+        else:
+            print("No active tasks found in tasks/.")
+        print()
+        print("To create a new task:")
+        print("  1. Use /prd in Claude Code to create a PRD")
+        print("  2. Use /ralph to convert it to prd.json")
+        print("  3. Run: ralph-uv run tasks/{effort-name}")
+        return None
+
+    if len(tasks) == 1:
+        print(f"Found one active task: {tasks[0]}")
+        return tasks[0]
+
+    # Multiple tasks — prompt
+    print()
+    print("=" * 67)
+    print("  Ralph - Select a Task")
+    print("=" * 67)
+    print()
+    print("Active tasks:")
+    print()
+
+    for i, task in enumerate(tasks, 1):
+        print(f"  {i}) {_display_task_info(task)}")
+
+    print()
+    try:
+        selection = input(f"Select task [1-{len(tasks)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+
+    try:
+        idx = int(selection) - 1
+        if 0 <= idx < len(tasks):
+            return tasks[idx]
+    except ValueError:
+        pass
+
+    print("Invalid selection.")
+    return None
+
+
+def _prompt_iterations() -> int:
+    """Interactively prompt for max iterations. Returns the chosen number."""
+    try:
+        raw = input(f"Max iterations [{DEFAULT_ITERATIONS}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return DEFAULT_ITERATIONS
+
+    if not raw:
+        return DEFAULT_ITERATIONS
+
+    try:
+        n = int(raw)
+        if n > 0:
+            return n
+    except ValueError:
+        pass
+
+    print(f"Invalid number. Using default of {DEFAULT_ITERATIONS}.")
+    return DEFAULT_ITERATIONS
+
+
+def _resolve_agent(
+    cli_agent: str | None,
+    task_dir: Path,
+    skip_prompts: bool,
+) -> str:
+    """Resolve which agent to use.
+
+    Priority:
+    1. CLI --agent flag
+    2. Agent saved in prd.json
+    3. Interactive prompt (if multiple installed)
+    4. Only installed agent
+    5. Default: claude
+
+    Args:
+        cli_agent: Agent name from CLI flag, or None.
+        task_dir: The task directory (to check prd.json).
+        skip_prompts: If True, skip interactive prompts.
+
+    Returns:
+        The resolved agent name.
+    """
+    # 1. CLI override
+    if cli_agent:
+        if shutil.which(cli_agent) is None:
+            print(f"Warning: Agent '{cli_agent}' not found in PATH.")
+        return cli_agent
+
+    # 2. Check prd.json for saved agent
+    prd_file = task_dir / "prd.json"
+    if prd_file.is_file():
+        try:
+            prd = json.loads(prd_file.read_text())
+            saved_agent = str(prd.get("agent", ""))
+            if saved_agent and saved_agent in VALID_AGENTS:
+                if shutil.which(saved_agent) is not None:
+                    print(f"Using saved agent: {saved_agent}")
+                    return saved_agent
+                else:
+                    print(
+                        f"Warning: Saved agent '{saved_agent}' not installed. "
+                        "Selecting another."
+                    )
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # 3. Detect installed agents
+    installed = _detect_installed_agents()
+
+    if not installed:
+        print("Error: No supported AI coding agents found.")
+        print()
+        print("Please install one of the following:")
+        print("  - Claude Code: npm install -g @anthropic-ai/claude-code")
+        print("  - OpenCode: curl -fsSL https://opencode.ai/install | bash")
+        sys.exit(1)
+
+    if len(installed) == 1:
+        print(f"Using only installed agent: {installed[0]}")
+        return installed[0]
+
+    # Multiple agents available
+    if skip_prompts:
+        # Default to first in priority order
+        return installed[0]
+
+    # Interactive prompt
+    print()
+    print("=" * 67)
+    print("  Select AI Coding Agent")
+    print("=" * 67)
+    print()
+    print("Available agents:")
+    print()
+
+    for i, agent in enumerate(installed, 1):
+        print(f"  {i}) {agent}")
+
+    print()
+    try:
+        raw = input(f"Select agent [1-{len(installed)}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return installed[0]
+
+    try:
+        idx = int(raw) - 1
+        if 0 <= idx < len(installed):
+            chosen = installed[idx]
+            # Save to prd.json
+            _save_agent_to_prd(prd_file, chosen)
+            return chosen
+    except ValueError:
+        pass
+
+    print(f"Invalid selection. Using {installed[0]}.")
+    return installed[0]
+
+
+def _save_agent_to_prd(prd_file: Path, agent: str) -> None:
+    """Save the agent selection to prd.json."""
+    if not prd_file.is_file():
+        return
+    try:
+        prd = json.loads(prd_file.read_text())
+        prd["agent"] = agent
+        prd_file.write_text(json.dumps(prd, indent=2) + "\n")
+        print(f"Agent preference saved to prd.json")
+    except (json.JSONDecodeError, OSError):
+        pass
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -32,24 +272,45 @@ def create_parser() -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Run the agent loop for a task")
     run_parser.add_argument(
         "task_dir",
-        help="Path to the task directory containing prd.json",
+        nargs="?",
+        default=None,
+        help="Path to the task directory containing prd.json (interactive if omitted)",
     )
     run_parser.add_argument(
+        "-i",
         "--max-iterations",
         type=int,
-        default=50,
-        help="Maximum number of iterations (default: 50)",
+        default=None,
+        help=f"Maximum number of iterations (prompts if omitted, default: {DEFAULT_ITERATIONS})",
     )
     run_parser.add_argument(
+        "-a",
         "--agent",
-        choices=["claude", "opencode"],
+        choices=list(VALID_AGENTS),
         default=None,
-        help="Agent to use (default: from prd.json or claude)",
+        help="Agent to use (prompts if omitted)",
     )
     run_parser.add_argument(
         "--base-branch",
         default=None,
         help="Base branch to start from (default: current branch)",
+    )
+    run_parser.add_argument(
+        "-y",
+        "--yes",
+        action="store_true",
+        dest="skip_prompts",
+        help="Skip interactive prompts, use defaults",
+    )
+    run_parser.add_argument(
+        "--yolo",
+        action="store_true",
+        help="Skip agent permission checks (dangerously-skip-permissions)",
+    )
+    run_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose agent output",
     )
 
     # status command
@@ -82,12 +343,47 @@ def create_parser() -> argparse.ArgumentParser:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute the 'run' subcommand."""
-    task_dir = Path(args.task_dir).resolve()
+    skip_prompts = args.skip_prompts
+
+    # --- Resolve task directory ---
+    if args.task_dir:
+        task_dir = Path(args.task_dir).resolve()
+    elif skip_prompts:
+        print("Error: task_dir is required with --yes flag.")
+        return 1
+    else:
+        selected = _prompt_task_selection()
+        if selected is None:
+            return 1
+        task_dir = selected.resolve()
+
+    # Validate task dir
+    if not task_dir.is_dir():
+        print(f"Error: Task directory not found: {task_dir}", file=sys.stderr)
+        return 1
+    if not (task_dir / "prd.json").is_file():
+        print(f"Error: prd.json not found in {task_dir}", file=sys.stderr)
+        return 1
+
+    # --- Resolve iterations ---
+    if args.max_iterations is not None:
+        max_iterations = args.max_iterations
+    elif skip_prompts:
+        max_iterations = DEFAULT_ITERATIONS
+    else:
+        max_iterations = _prompt_iterations()
+
+    # --- Resolve agent ---
+    agent = _resolve_agent(args.agent, task_dir, skip_prompts)
+
     config = LoopConfig(
         task_dir=task_dir,
-        max_iterations=args.max_iterations,
-        agent_override=args.agent,  # None if not specified, resolved at runtime
-        base_branch=args.base_branch,  # None if not specified, uses current branch
+        max_iterations=max_iterations,
+        agent=agent,
+        agent_override=args.agent,
+        base_branch=args.base_branch,
+        yolo_mode=args.yolo,
+        verbose=args.verbose,
     )
     runner = LoopRunner(config)
     return runner.run()

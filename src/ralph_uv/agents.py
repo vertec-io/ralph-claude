@@ -14,6 +14,8 @@ import subprocess
 import tempfile
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Generator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -357,9 +359,105 @@ class ClaudeAgent(Agent):
         """Build PTY command for Claude.
 
         In PTY mode, we use --print which accepts prompt from stdin.
-        The PTY handles the terminal interaction.
+        The prompt is delivered via a pipe (stdin_file), not the PTY.
         """
         return self._build_command(config)
+
+    @contextmanager
+    def _prompt_as_fd(self, prompt: str) -> Generator[int, None, None]:
+        """Write prompt to a temp file and yield a readable fd for it.
+
+        This allows passing the prompt to claude --print via stdin as a pipe,
+        which is required because claude --print won't read from a TTY stdin.
+
+        Args:
+            prompt: The prompt text.
+
+        Yields:
+            A file descriptor open for reading with the prompt content.
+        """
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", prefix="ralph-prompt-", suffix=".txt", delete=False
+        )
+        try:
+            tmp.write(prompt)
+            tmp.close()
+            fd = os.open(tmp.name, os.O_RDONLY)
+            try:
+                yield fd
+            finally:
+                os.close(fd)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    def run_with_pty(
+        self,
+        config: AgentConfig,
+        pty_agent: PtyAgent,
+        interactive_controller: InteractiveController,
+    ) -> AgentResult:
+        """Run Claude with PTY for output capture but pipe-based prompt delivery.
+
+        Claude --print requires a piped stdin (not a TTY) to read the prompt.
+        We write the prompt to a temp file, open it as a file descriptor, and
+        pass it as stdin_file to the PTY agent. The PTY is only used for
+        stdout/stderr, enabling interactive mode toggling.
+        """
+        start_time = time.time()
+        try:
+            cmd = self.build_pty_command(config)
+            env = self.build_pty_env(config)
+
+            with self._prompt_as_fd(config.prompt) as prompt_fd:
+                pty_agent.start(cmd, env, config.working_dir, stdin_file=prompt_fd)
+
+                # Main loop: read output, check completion
+                while not pty_agent.is_done():
+                    output_bytes = interactive_controller.check_output(timeout=0.2)
+
+                    if output_bytes and not interactive_controller.is_interactive:
+                        # In autonomous mode, check for completion
+                        text = output_bytes.decode("utf-8", errors="replace")
+                        if interactive_controller.should_detect_completion(text):
+                            pty_agent.terminate()
+                            break
+
+                    # Small sleep to prevent busy-waiting
+                    if not output_bytes:
+                        time.sleep(0.05)
+
+            output = pty_agent.output
+            exit_code = pty_agent.exit_code
+            completed = (
+                COMPLETION_SIGNAL in output
+                and not interactive_controller.suppress_completion
+            )
+            failed = self._detect_failure(exit_code, output, "")
+            error_message = ""
+            if failed:
+                error_message = self._extract_error(exit_code, output, "")
+
+            return AgentResult(
+                output=output,
+                exit_code=exit_code,
+                duration_seconds=time.time() - start_time,
+                completed=completed,
+                failed=failed,
+                error_message=error_message,
+            )
+        except OSError as e:
+            return AgentResult(
+                output="",
+                exit_code=1,
+                duration_seconds=time.time() - start_time,
+                failed=True,
+                error_message=f"Failed to start Claude with PTY: {e}",
+            )
+        finally:
+            pty_agent.cleanup()
 
     def _build_env(self, config: AgentConfig) -> dict[str, str]:
         """Build the environment for Claude subprocess."""

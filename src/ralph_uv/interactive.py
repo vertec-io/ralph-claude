@@ -101,20 +101,34 @@ class PtyAgent:
         """All captured output so far."""
         return self._raw_output.decode("utf-8", errors="replace")
 
-    def start(self, cmd: list[str], env: dict[str, str], cwd: Path) -> None:
+    def start(
+        self,
+        cmd: list[str],
+        env: dict[str, str],
+        cwd: Path,
+        stdin_file: int | None = None,
+    ) -> None:
         """Start the agent with a PTY.
 
         Args:
             cmd: The command to run (e.g., ["claude", "--print", ...]).
             env: Environment variables for the subprocess.
             cwd: Working directory for the subprocess.
+            stdin_file: Optional file descriptor to use for stdin instead of
+                the PTY. When provided, the PTY is only used for stdout/stderr,
+                allowing pipe-based prompt delivery while retaining PTY output
+                capture for interactive mode.
         """
         # Create a PTY pair
         self._master_fd, self._slave_fd = pty.openpty()
 
+        # Use stdin_file for stdin if provided (pipe-based prompt delivery),
+        # otherwise use PTY slave for full PTY stdin/stdout/stderr
+        stdin_fd = stdin_file if stdin_file is not None else self._slave_fd
+
         self._process = subprocess.Popen(
             cmd,
-            stdin=self._slave_fd,
+            stdin=stdin_fd,
             stdout=self._slave_fd,
             stderr=self._slave_fd,
             env=env,
