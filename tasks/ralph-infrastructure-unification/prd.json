@@ -46,16 +46,16 @@
       "title": "Agent Abstraction Layer",
       "description": "As a developer, I want a pluggable agent interface so ralph-uv can run different coding agents (claude code, opencode) with agent-specific completion detection.",
       "acceptanceCriteria": [
-        { "description": "Abstract Agent base class with start(), is_done(), get_output() methods", "passes": false },
-        { "description": "ClaudeAgent implementation using claude --print --output-format stream-json", "passes": false },
-        { "description": "OpencodeAgent implementation (placeholder, full implementation in US-008)", "passes": false },
-        { "description": "Agent selection configurable per-task in prd.json and overridable at launch", "passes": false },
-        { "description": "Failover logic: switch agents after N consecutive failures (configurable threshold)", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Abstract Agent base class with start(), is_done(), get_output() methods", "passes": true },
+        { "description": "ClaudeAgent implementation using claude --print --output-format stream-json", "passes": true },
+        { "description": "OpencodeAgent implementation (placeholder, full implementation in US-008)", "passes": true },
+        { "description": "Agent selection configurable per-task in prd.json and overridable at launch", "passes": true },
+        { "description": "Failover logic: switch agents after N consecutive failures (configurable threshold)", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Agent module at src/ralph_uv/agents.py. Agent, ClaudeAgent, OpencodeAgent classes. resolve_agent() handles priority: CLI > story > prd > default. FailureTracker moved from loop.py to agents.py. create_agent() factory function. Loop.py now uses agent abstraction instead of shell scripts."
     },
     {
       "id": "US-004",

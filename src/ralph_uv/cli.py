@@ -72,7 +72,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     config = LoopConfig(
         task_dir=task_dir,
         max_iterations=args.max_iterations,
-        agent=args.agent or "claude",
+        agent_override=args.agent,  # None if not specified, resolved at runtime
     )
     runner = LoopRunner(config)
     return runner.run()
