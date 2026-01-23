@@ -29,17 +29,17 @@
       "title": "Core Loop Logic in Python",
       "description": "As a developer, I want the core iteration loop ported from bash to Python so it's maintainable and testable.",
       "acceptanceCriteria": [
-        { "description": "Iteration loop spawns agent subprocess, waits for completion, checks results", "passes": false },
-        { "description": "Supports max iteration count (configurable, default 50)", "passes": false },
-        { "description": "Detects <promise>COMPLETE</promise> in agent output to stop loop", "passes": false },
-        { "description": "Progress.txt rotation logic works (threshold configurable, default 300 lines)", "passes": false },
-        { "description": "Consecutive failure tracking per agent works", "passes": false },
-        { "description": "Graceful shutdown on SIGINT/SIGTERM", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Iteration loop spawns agent subprocess, waits for completion, checks results", "passes": true },
+        { "description": "Supports max iteration count (configurable, default 50)", "passes": true },
+        { "description": "Detects <promise>COMPLETE</promise> in agent output to stop loop", "passes": true },
+        { "description": "Progress.txt rotation logic works (threshold configurable, default 300 lines)", "passes": true },
+        { "description": "Consecutive failure tracking per agent works", "passes": true },
+        { "description": "Graceful shutdown on SIGINT/SIGTERM", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 2,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Core loop implemented in src/ralph/loop.py. LoopRunner class handles iteration, agent subprocess spawning via shell agent scripts, stream-json output parsing, failure detection with error pattern matching, per-agent failover tracking, progress.txt rotation, and SIGINT/SIGTERM graceful shutdown."
     },
     {
       "id": "US-003",

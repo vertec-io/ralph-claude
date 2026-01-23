@@ -2,8 +2,10 @@
 
 import argparse
 import sys
+from pathlib import Path
 
 from ralph import __version__
+from ralph.loop import LoopConfig, LoopRunner
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -64,6 +66,35 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    """Execute the run command."""
+    task_dir = Path(args.task_dir).resolve()
+
+    # Determine agent (CLI flag > prd.json > default)
+    agent = args.agent or "claude"
+    if args.agent is None:
+        # Try to read from prd.json
+        prd_file = task_dir / "prd.json"
+        if prd_file.is_file():
+            import json
+
+            try:
+                prd = json.loads(prd_file.read_text())
+                prd_agent = prd.get("agent", "")
+                if prd_agent:
+                    agent = prd_agent
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    config = LoopConfig(
+        task_dir=task_dir,
+        max_iterations=args.max_iterations,
+        agent=agent,
+    )
+    runner = LoopRunner(config)
+    return runner.run()
+
+
 def main() -> int:
     """Main entry point for the ralph CLI."""
     parser = create_parser()
@@ -73,13 +104,9 @@ def main() -> int:
         parser.print_help()
         return 0
 
-    # Placeholder implementations - will be filled in by subsequent stories
     match args.command:
         case "run":
-            print(f"Would run task: {args.task_dir}")
-            print(f"  max-iterations: {args.max_iterations}")
-            print(f"  agent: {args.agent or 'auto'}")
-            print(f"  base-branch: {args.base_branch or 'current'}")
+            return _cmd_run(args)
         case "status":
             print("No running sessions.")
         case "stop":
