@@ -1,0 +1,297 @@
+{
+  "project": "ralph-claude",
+  "taskDir": "tasks/ralph-tui",
+  "branchName": "ralph/ralph-tui",
+  "type": "feature",
+  "description": "Ralph TUI - Interactive terminal interface with embedded Claude Code session, statistics dashboard, and modal interaction",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Split ralph.sh into non-interactive and legacy interactive versions",
+      "description": "As a developer, I need to separate the clean Ralph loop from the tmux interactive code so we have a clean foundation.",
+      "acceptanceCriteria": [
+        "Create ralph-i.sh containing the current tmux-based interactive functionality",
+        "Remove all tmux/interactive code from ralph.sh (lines related to -I flag, tmux sessions, spinner UI for interactive mode)",
+        "ralph.sh only supports non-interactive mode (remove -I/--interactive flag)",
+        "ralph-i.sh works exactly as current ralph.sh -I does",
+        "Update usage/help text in both scripts",
+        "Both scripts tested and functional"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Initialize Rust project with ratatui and dependencies",
+      "description": "As a developer, I need a Rust project structure with the necessary dependencies for building the TUI.",
+      "acceptanceCriteria": [
+        "Create ralph-tui/ directory in project root",
+        "Initialize Cargo project with appropriate metadata",
+        "Add dependencies: ratatui, crossterm, portable-pty, tokio, serde, serde_json",
+        "Create basic main.rs that initializes terminal and shows 'Hello Ralph' then exits cleanly",
+        "cargo build --release succeeds",
+        "Binary runs without errors"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Implement basic two-panel layout",
+      "description": "As a user, I want to see a split-screen layout with Ralph status on the left and Claude area on the right.",
+      "acceptanceCriteria": [
+        "Left panel (30% width) shows 'Ralph Status' header",
+        "Right panel (70% width) shows 'Claude Code' header",
+        "Bottom bar shows keybinding hints",
+        "Panels have visible borders",
+        "Layout resizes correctly when terminal is resized",
+        "Press 'q' to quit cleanly",
+        "cargo build --release succeeds"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Implement PTY subprocess management",
+      "description": "As a developer, I need to spawn Claude Code in a pseudo-terminal so we can capture and display its full terminal output.",
+      "acceptanceCriteria": [
+        "Use portable-pty to create a PTY pair",
+        "Spawn a simple command (e.g., bash) as proof of concept",
+        "Capture stdout from PTY and store in buffer",
+        "PTY properly cleaned up on exit",
+        "Handle PTY resize when terminal resizes",
+        "cargo build --release succeeds"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Render PTY output in Claude panel",
+      "description": "As a user, I want to see the Claude Code terminal output rendered in the right panel.",
+      "acceptanceCriteria": [
+        "PTY output displayed in right panel with proper scrolling",
+        "ANSI escape codes interpreted (colors, cursor movement, clearing)",
+        "Output updates in real-time as subprocess produces output",
+        "Panel shows most recent output (auto-scroll to bottom)",
+        "Handle terminal control sequences properly (cursor positioning, etc.)",
+        "cargo build --release succeeds"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Used vt100 crate (0.16.2) for proper escape sequence interpretation"
+    },
+    {
+      "id": "US-006",
+      "title": "Implement modal input system",
+      "description": "As a user, I want to toggle between controlling Ralph and interacting with Claude Code.",
+      "acceptanceCriteria": [
+        "Default mode is 'Ralph' mode (focus on left panel)",
+        "Press 'i' or Tab to enter 'Claude' mode (focus on right panel)",
+        "Press Escape to exit 'Claude' mode back to 'Ralph' mode",
+        "Visual indicator shows current mode (highlighted border or mode label)",
+        "In Claude mode, status bar shows 'Press Esc to return to Ralph'",
+        "cargo build --release succeeds"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Mode enum added with Ralph (default) and Claude states. Visual indicators include [ACTIVE] in title and green/bold borders for active panel."
+    },
+    {
+      "id": "US-007",
+      "title": "Forward keyboard input to PTY in Claude mode",
+      "description": "As a user, I want my keystrokes to go to Claude Code when in Claude mode.",
+      "acceptanceCriteria": [
+        "All printable characters forwarded to PTY stdin",
+        "Special keys work: Enter, Backspace, Delete, Arrow keys",
+        "Ctrl+C sends interrupt signal to PTY (not to TUI)",
+        "Tab key works within Claude (not captured by TUI when in Claude mode)",
+        "Escape exits Claude mode (does not forward to PTY)",
+        "cargo build --release succeeds"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Added forward_key_to_pty() function with ANSI escape sequences for special keys, Ctrl/Alt modifiers. Uses MasterPty::take_writer() for PTY input."
+    },
+    {
+      "id": "US-008",
+      "title": "Parse prd.json and display story progress",
+      "description": "As a user, I want to see which story Ralph is working on and overall progress.",
+      "acceptanceCriteria": [
+        "Accept task directory as CLI argument",
+        "Read and parse prd.json from task directory",
+        "Display: description, branch name, total stories, completed stories",
+        "Show current story being worked on (first with passes: false)",
+        "Progress updates when prd.json changes on disk (file watch or polling)",
+        "cargo build --release succeeds"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Added PRD struct with serde deserialization. CLI requires task-directory argument. File watching via notify crate with 1-second poll interval. Left panel shows task description, branch, progress (X/Y stories with percentage), and current story."
+    },
+    {
+      "id": "US-009",
+      "title": "Spawn Claude Code with Ralph prompt",
+      "description": "As a developer, I need to spawn Claude Code with the Ralph agent prompt instead of a test shell.",
+      "acceptanceCriteria": [
+        "Construct prompt from task directory, prd path, progress path, and prompt.md",
+        "Spawn 'claude --dangerously-skip-permissions' with prompt piped to stdin",
+        "Claude Code runs in PTY and output displayed in right panel",
+        "Handle Claude Code exit (iteration complete)",
+        "cargo build --release succeeds"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Uses build_ralph_prompt() to construct prompt from prompt.md and task paths. Spawns via bash -c with temp file to avoid command line length limits. Claude --print mode used for non-interactive output."
+    },
+    {
+      "id": "US-010",
+      "title": "Implement iteration loop",
+      "description": "As a user, I want Ralph TUI to automatically start the next iteration when Claude completes.",
+      "acceptanceCriteria": [
+        "Accept max iterations as CLI argument (default 10)",
+        "When Claude process exits, check for completion signal in output",
+        "If <promise>COMPLETE</promise> found, show completion message and exit",
+        "If not complete and iterations remain, start next iteration automatically",
+        "Display current iteration number (e.g., 'Iteration 3/10')",
+        "2-second delay between iterations (matching ralph.sh behavior)",
+        "cargo build --release succeeds"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Implemented IterationState enum, spawn_claude() for restarting, run_delay() for countdown between iterations. CLI arg -i/--iterations (default 10). Completion signal detection via recent_output buffer."
+    },
+    {
+      "id": "US-011",
+      "title": "Track and display elapsed time",
+      "description": "As a user, I want to see how long the current iteration and total session have been running.",
+      "acceptanceCriteria": [
+        "Display iteration elapsed time (MM:SS format)",
+        "Display total session elapsed time",
+        "Timers update every second",
+        "Timer resets for each new iteration (iteration timer)",
+        "cargo build --release succeeds"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Uses session_start and iteration_start Instant fields. format_duration() formats as MM:SS. iteration_start reset on new iteration."
+    },
+    {
+      "id": "US-012",
+      "title": "Parse Claude output for token usage",
+      "description": "As a user, I want to see token usage statistics from Claude Code.",
+      "acceptanceCriteria": [
+        "Parse Claude Code output for token usage information",
+        "Display input tokens, output tokens, total tokens",
+        "Accumulate totals across iterations",
+        "Update display in real-time as tokens are reported",
+        "Handle cases where token info isn't available",
+        "cargo build --release succeeds"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "TokenStats struct with parse_from_output() for parsing. Patterns: 'input tokens', 'output tokens'. Display shows iter tokens (↓↑) and session total. Tokens accumulated on iteration end."
+    },
+    {
+      "id": "US-013",
+      "title": "Calculate and display cost estimates",
+      "description": "As a user, I want to see estimated costs based on token usage.",
+      "acceptanceCriteria": [
+        "Calculate cost based on Claude Sonnet pricing (or configurable model)",
+        "Display cost for current iteration",
+        "Display cumulative cost for session",
+        "Format as currency (e.g., '$0.42')",
+        "Cost updates as token usage updates",
+        "cargo build --release succeeds"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "Uses Claude 3.5 Sonnet pricing ($3/M input, $15/M output). TokenStats.calculate_cost() and format_cost() methods added. Cost displays in green next to token counts."
+    },
+    {
+      "id": "US-014",
+      "title": "Show recent activity log",
+      "description": "As a user, I want to see a summary of recent Claude actions in the status panel.",
+      "acceptanceCriteria": [
+        "Parse Claude output for tool calls (Read, Edit, Write, Bash, etc.)",
+        "Display last 5-10 actions in status panel",
+        "Show action type and brief context (e.g., 'Reading src/auth.ts')",
+        "New actions push old ones up (scrolling log)",
+        "Actions timestamped or in order",
+        "cargo build --release succeeds"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "Activity struct stores action_type and target. parse_activities() scans output for tool patterns. PtyState.activities Vec stores last 10 activities. Display shows 5 most recent in status panel with bullet points."
+    },
+    {
+      "id": "US-015",
+      "title": "Handle progress.txt rotation",
+      "description": "As a user, I want the TUI to handle progress file rotation like ralph.sh does.",
+      "acceptanceCriteria": [
+        "Check progress.txt line count before each iteration",
+        "If over threshold (configurable, default 300), perform rotation",
+        "Create progress-N.txt with old content",
+        "Create new progress.txt with summary header",
+        "Support --rotate-at CLI argument",
+        "cargo build --release succeeds"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Graceful error handling and cleanup",
+      "description": "As a user, I want the TUI to handle errors gracefully and always restore my terminal.",
+      "acceptanceCriteria": [
+        "Catch panics and restore terminal before showing error",
+        "Handle Ctrl+C gracefully (cleanup PTY, restore terminal)",
+        "Handle Claude process crashes (show error, allow retry or quit)",
+        "Handle file read errors (prd.json missing, etc.) with clear messages",
+        "Terminal always restored to normal state on exit",
+        "cargo build --release succeeds"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Add CLI argument parsing",
+      "description": "As a user, I want to configure the TUI via command line arguments.",
+      "acceptanceCriteria": [
+        "Parse task directory argument (required, or prompt if missing)",
+        "--iterations / -i for max iterations (default 10)",
+        "--rotate-at for progress rotation threshold (default 300)",
+        "--help shows usage information",
+        "--version shows version",
+        "Invalid arguments show helpful error messages",
+        "cargo build --release succeeds"
+      ],
+      "priority": 17,
+      "passes": true,
+      "notes": "Implemented with manual CLI parsing (no clap). Features: find_active_tasks() discovers tasks with prd.json, prompt_task_selection() for interactive selection, prompt_iterations() when -i not provided, prompt_rotation_threshold() when progress.txt is near threshold. Supports -y/--yes to skip prompts."
+    },
+    {
+      "id": "US-018",
+      "title": "Create installation and build instructions",
+      "description": "As a user, I want clear instructions for building and using the TUI.",
+      "acceptanceCriteria": [
+        "Add build instructions to README.md",
+        "Document all CLI arguments",
+        "Provide example usage commands",
+        "Note Rust toolchain requirements",
+        "Add to project's existing documentation structure"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

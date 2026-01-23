@@ -1,0 +1,223 @@
+{
+  "schemaVersion": "2.0",
+  "project": "ralph-claude",
+  "taskDir": "tasks/remote-daemon",
+  "branchName": "ralph/remote-loop-execution",
+  "mergeTarget": "ralph/remote-loop-execution",
+  "autoMerge": false,
+  "type": "feature",
+  "description": "Remote Daemon (ralphd) - Long-running daemon that accepts loop requests over OpenZiti and executes them via opencode serve HTTP API",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Daemon CLI entrypoint and configuration loading",
+      "description": "As a developer, I need a ralphd entrypoint that loads configuration and starts the daemon process.",
+      "acceptanceCriteria": [
+        { "description": "New CLI entrypoint 'ralphd' registered in pyproject.toml (separate from ralph-uv)", "passes": false },
+        { "description": "Loads config from ~/.config/ralph/daemon.toml (workspace_dir, max_concurrent_loops, ziti identity path)", "passes": false },
+        { "description": "Loads environment variables from ~/.config/ralph/env (API keys, PATH extensions)", "passes": false },
+        { "description": "Accepts --identity flag to override Ziti identity path", "passes": false },
+        { "description": "Accepts --workspace-dir flag to override workspace directory", "passes": false },
+        { "description": "Logs to ~/.local/state/ralph-uv/daemon.log with rotation", "passes": false },
+        { "description": "Graceful shutdown on SIGTERM/SIGINT (cleanup active loops)", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "OpenZiti SDK integration and control service binding",
+      "description": "As a developer, I need the daemon to load a Ziti identity and bind a control service for receiving requests.",
+      "acceptanceCriteria": [
+        { "description": "Load Ziti identity JSON file using openziti Python SDK", "passes": false },
+        { "description": "Bind to Ziti service ralph-control-{hostname} for incoming RPC connections", "passes": false },
+        { "description": "Accept multiple concurrent client connections on the control service", "passes": false },
+        { "description": "Handle connection lifecycle (accept, read, respond, close)", "passes": false },
+        { "description": "Log Ziti enrollment/binding status on startup", "passes": false },
+        { "description": "Graceful Ziti teardown on shutdown (unbind services, close context)", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Daemon control RPC protocol",
+      "description": "As a developer, I need the daemon to handle JSON-RPC 2.0 requests for managing loops.",
+      "acceptanceCriteria": [
+        { "description": "start_loop method: accepts origin_url, branch, task_dir, max_iterations, agent params", "passes": false },
+        { "description": "stop_loop method: accepts loop_id, sends abort to the running loop", "passes": false },
+        { "description": "list_loops method: returns all active loops with status, iteration, agent, task info", "passes": false },
+        { "description": "get_health method: returns daemon uptime, active loop count, system resources", "passes": false },
+        { "description": "get_agents method: returns available agent CLIs with versions", "passes": false },
+        { "description": "JSON-RPC 2.0 error responses for invalid params, agent not found, max loops exceeded", "passes": false },
+        { "description": "NDJSON framing on the Ziti stream (same as existing RPC protocol)", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Git workspace management",
+      "description": "As a developer, I need the daemon to manage git workspaces for incoming loop requests.",
+      "acceptanceCriteria": [
+        { "description": "Resolve project name from origin URL (strip .git suffix, take last path component)", "passes": false },
+        { "description": "Create ~/ralph-workspaces/{project}/bare.git via git clone --bare on first use", "passes": false },
+        { "description": "Validate origin URL matches existing bare repo (error if mismatch)", "passes": false },
+        { "description": "git fetch origin {branch} into bare repo on each start_loop request", "passes": false },
+        { "description": "Create isolated worktree: git worktree add checkouts/{task}-{uuid} {branch}", "passes": false },
+        { "description": "git worktree prune on daemon startup to clean stale worktrees", "passes": false },
+        { "description": "Return checkout path in start_loop response", "passes": false },
+        { "description": "Handle errors: origin unreachable, branch not found, disk full", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Agent CLI detection and auto-install",
+      "description": "As a developer, I need the daemon to verify agent availability and attempt auto-install if missing.",
+      "acceptanceCriteria": [
+        { "description": "Check 'which opencode' before starting a loop", "passes": false },
+        { "description": "If missing: attempt curl -fsSL https://opencode.ai/install | bash", "passes": false },
+        { "description": "Verify installation succeeded with which opencode after install", "passes": false },
+        { "description": "Return structured error if auto-install fails (with install instructions)", "passes": false },
+        { "description": "Cache agent availability (don't re-check on every loop start)", "passes": false },
+        { "description": "get_agents RPC returns installed agents with version numbers", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "OpenCode serve lifecycle management",
+      "description": "As a developer, I need the daemon to start opencode serve for each loop and manage its lifecycle.",
+      "acceptanceCriteria": [
+        { "description": "Start 'opencode serve --port {auto} --hostname 127.0.0.1' per loop", "passes": false },
+        { "description": "Port allocation: start at 4096, increment if in use", "passes": false },
+        { "description": "Wait for health check: GET /global/health returns 200 before proceeding", "passes": false },
+        { "description": "Track opencode server PID and port per loop in daemon's internal registry", "passes": false },
+        { "description": "Set OPENCODE_PERMISSION env to allow all permissions (yolo mode)", "passes": false },
+        { "description": "Set API key environment variables from daemon's loaded env", "passes": false },
+        { "description": "Set working directory to the worktree checkout path", "passes": false },
+        { "description": "On stop_loop: send POST /session/:id/abort, then SIGTERM, then SIGKILL after timeout", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Loop iteration driver via opencode HTTP API",
+      "description": "As a developer, I need the daemon to drive loop iterations by sending prompts to opencode's HTTP API and detecting completion via SSE.",
+      "acceptanceCriteria": [
+        { "description": "Create a new session via POST /session at start of each iteration", "passes": false },
+        { "description": "Build prompt using existing prompt.md template system (reuse prompt.py)", "passes": false },
+        { "description": "Send prompt via POST /session/{id}/message (synchronous, waits for response)", "passes": false },
+        { "description": "Monitor completion via SSE GET /event stream (wait for session.idle event)", "passes": false },
+        { "description": "After each iteration: read prd.json from worktree to check story completion", "passes": false },
+        { "description": "If all stories pass: mark loop completed, push to origin, clean up", "passes": false },
+        { "description": "If max iterations reached: mark loop exhausted, push to origin", "passes": false },
+        { "description": "Handle iteration failures: log error, increment failure counter, retry with backoff", "passes": false },
+        { "description": "Include First-Run Setup section in prompt for iteration 1", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Per-loop Ziti service registration for client attachment",
+      "description": "As a developer, I need each active loop to have its own Ziti service so clients can attach directly.",
+      "acceptanceCriteria": [
+        { "description": "Register Ziti service ralph-loop-{task}-{uuid} when loop starts", "passes": false },
+        { "description": "Ziti service proxies to the opencode serve HTTP port (TCP forwarding)", "passes": false },
+        { "description": "Clients can opencode attach http://{ziti-intercept}:{port} through the Ziti service", "passes": false },
+        { "description": "Deregister Ziti service when loop completes or is stopped", "passes": false },
+        { "description": "Multiple clients can connect to the same loop service simultaneously", "passes": false },
+        { "description": "Log service registration/deregistration events", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Git push-back after iterations",
+      "description": "As a developer, I need the daemon to push committed work back to origin so progress is visible.",
+      "acceptanceCriteria": [
+        { "description": "After each successful iteration: git push origin {branch} --force-with-lease", "passes": false },
+        { "description": "Push is non-fatal: if push fails, log warning and continue", "passes": false },
+        { "description": "Configurable push frequency: every N iterations (default: 1)", "passes": false },
+        { "description": "Final push on loop completion (ensure all work is pushed)", "passes": false },
+        { "description": "Handle push conflicts gracefully (force-with-lease protects against data loss)", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Loop completion events and client notification",
+      "description": "As a developer, I need the daemon to notify connected clients when loops complete.",
+      "acceptanceCriteria": [
+        { "description": "On loop completion: emit loop_completed event on the control service", "passes": false },
+        { "description": "Event payload includes: loop_id, task_name, status, iterations_used, final_story, branch", "passes": false },
+        { "description": "On loop failure: emit loop_failed event with error details", "passes": false },
+        { "description": "Clients subscribed to control service receive events in real-time", "passes": false },
+        { "description": "If no client connected: events are logged but not queued", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "ralphd check validation command",
+      "description": "As a developer, I need a self-check command that validates the remote machine is ready.",
+      "acceptanceCriteria": [
+        { "description": "ralphd check runs system validation and reports status", "passes": false },
+        { "description": "Checks: Python version, git, Ziti identity (enrolled), workspace dir (writable)", "passes": false },
+        { "description": "Checks: API keys set (ANTHROPIC_API_KEY), agent CLIs available", "passes": false },
+        { "description": "Checks: Git auth configured (SSH key or credential helper)", "passes": false },
+        { "description": "Reports ready/not-ready status with actionable fix instructions", "passes": false },
+        { "description": "Exit code 0 if ready, non-zero if issues found", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Concurrent loop isolation and resource limits",
+      "description": "As a developer, I need the daemon to enforce resource limits and isolate concurrent loops.",
+      "acceptanceCriteria": [
+        { "description": "Enforce max_concurrent_loops (configurable, default: 4)", "passes": false },
+        { "description": "Return error if max loops exceeded on start_loop request", "passes": false },
+        { "description": "Each loop gets: separate worktree, separate opencode serve port, separate Ziti service", "passes": false },
+        { "description": "Per-loop timeout (configurable, default: 24h) - terminate loop if exceeded", "passes": false },
+        { "description": "Track active loops in daemon's internal registry", "passes": false },
+        { "description": "On daemon restart: detect orphaned loop processes, clean up or re-adopt", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+# Ralph Progress Log
+Effort: remote-daemon
+Type: Feature
+Started: 2026-01-23
+---

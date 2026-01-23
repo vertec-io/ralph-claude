@@ -1,0 +1,344 @@
+# Ralph Progress Log
+Effort: ralph-infrastructure-unification
+Type: Feature
+Started: 2026-01-23
+
+## Codebase Patterns
+- Python package is `ralph-uv` with `src/ralph_uv/` layout and hatchling build backend
+- CLI command is `ralph-uv` (not `ralph`) to coexist with ralph.sh
+- pyproject.toml contains all tool config (mypy, ruff) - no separate config files
+- CLI uses argparse with subparsers for subcommands
+- uv is the package manager; `uv run ralph-uv` for dev, never install globally
+- mypy runs in strict mode: `uv run mypy src/ralph_uv/`
+- py.typed marker file present for PEP 561 compliance
+- .gitignore uses /prd.json and /progress.txt (root-only) so task dir files are tracked
+- Loop module (src/ralph_uv/loop.py) is the core: LoopConfig, LoopRunner
+- Agent module (src/ralph_uv/agents.py): Agent ABC, ClaudeAgent, OpencodeAgent, FailureTracker, create_agent(), resolve_agent()
+- Branch module (src/ralph_uv/branch.py): BranchConfig, setup_branch(), handle_completion(), create_branch_config()
+- Session module (src/ralph_uv/session.py): SessionDB (SQLite), SessionInfo, tmux ops, signal files, start/stop/checkpoint
+- Interactive module (src/ralph_uv/interactive.py): PtyAgent, InteractiveController, InteractiveState
+- Attach module (src/ralph_uv/attach.py): RpcClient (Unix socket JSON-RPC client), AttachViewer (terminal UI)
+- Agent resolution priority: CLI --agent > story.agent > prd.agent > "claude" default
+- LoopConfig.agent_override holds the CLI override; resolve_agent() does the priority logic
+- Agents invoke CLIs directly (claude, opencode) - no shell script intermediaries
+- Agents have both run() (pipe-based) and run_with_pty() (PTY-based) methods
+- LoopRunner always uses run_with_pty() so interactive mode can be toggled at any time
+- Use `signal._HANDLER` type (not `signal.Handlers`) for signal handler storage
+- Git operations use subprocess.run with BranchError exception for error handling
+- PR creation/merge uses `gh` CLI with graceful fallback if not installed
+- Session data at ~/.local/share/ralph/ (sessions.db, signals/, sockets/)
+- Tmux sessions prefixed with "ralph-" to avoid collisions with user sessions
+- Signal files are one-shot: consumed on read to prevent duplicate processing
+- Prompt module (src/ralph_uv/prompt.py): PromptContext, build_prompt(), load_prompt_template(), substitute_variables(), find_agents_md(), preprocess_agent_sections()
+- Template search order: task dir > ~/.config/ralph/ > project root > ~/.local/share/ralph/ > fallback
+- Variable substitution uses {VAR_NAME} pattern (uppercase+underscores) with regex
+- Agent-specific sections use <!-- agent:X --> / <!-- /agent:X --> HTML comment markers
+- RPC module (src/ralph_uv/rpc.py): RpcServer, SessionState, EventSubscriber, get_socket_path(), cleanup_socket()
+- RPC server runs asyncio event loop in a daemon thread (threading.Thread + asyncio.new_event_loop)
+- JSON-RPC 2.0 over NDJSON on Unix sockets at ~/.local/share/ralph/sockets/<task>.sock
+- RPC methods: get_status, stop, checkpoint, inject_prompt, set_interactive_mode, subscribe, unsubscribe
+- RPC set_interactive_mode triggers on_set_interactive callback -> InteractiveController.set_mode()
+- Events broadcast via _broadcast_event(): "output" and "state_change" types
+- Use asyncio.run_coroutine_threadsafe() for cross-thread async coordination
+- Socket permissions set to 0o600 for security
+- Opencode plugin at plugins/opencode-ralph-hook/ (TypeScript, built with tsc to dist/)
+- OpencodeAgent deploys plugin to .opencode/plugins/ralph-hook/ in working dir before spawn
+- Signal file mechanism: RALPH_SIGNAL_FILE env var -> temp dir -> plugin writes idle.signal JSON
+- OpencodeAgent.run_with_pty() overrides base to add signal-file-aware completion detection
+- Signal files discarded during interactive mode to prevent stale completions
+- Plugin is no-op when RALPH_SIGNAL_FILE not set (safe for global install)
+- deploy_plugin_globally() and is_plugin_installed_globally() utilities in agents.py
+- PTY-based execution uses pty.openpty() + subprocess.Popen with slave fd as stdin/stdout/stderr
+- InteractiveController sends Esc key on enable, suppresses completion until disable
+- Attach command uses tty.setcbreak() for hotkey capture (not full raw mode)
+- Terminal mode MUST be restored in finally blocks to avoid corrupted terminal state
+- write_pty RPC method: only forwards when interactive_mode=True (server-side guard prevents stray writes)
+- RPC callbacks bridge async (RPC thread) to sync (main loop): on_write_pty -> InteractiveController.forward_input()
+- Attach client detects connection loss via socket returning empty bytes or OSError -> sets self._sock = None
+- ralph-tui wizard module at ralph-tui/src/wizard.rs: WizardState, WizardStep, TaskInfo, render_wizard(), handle_wizard_input()
+- Wizard uses InputMode::Wizard variant and wizard_state: Option<WizardState> in App struct
+- Wizard launches ralph-uv run as detached subprocess (stdin/stdout/stderr null)
+- Hotkey 'w' opens wizard in both standalone and attach modes
+---
+
+## 2026-01-23 - US-001: Python Package Scaffold
+- Created src/ralph/__init__.py with __version__
+- Created src/ralph/cli.py with argparse-based CLI (run, status, stop, checkpoint, attach subcommands)
+- Created src/ralph/py.typed marker
+- Created pyproject.toml with hatchling backend, Python >=3.12, [project.scripts] entry
+- Added mypy as dev dependency, configured strict mode
+- Updated .gitignore for Python artifacts and fixed prd.json/progress.txt patterns
+- Files changed: pyproject.toml, src/ralph/__init__.py, src/ralph/cli.py, src/ralph/py.typed, .gitignore, uv.lock
+- **Learnings for future iterations:**
+  - uv creates a .venv directory automatically on first `uv run` - already in .gitignore
+  - hatchling needs `packages = ["src/ralph"]` in [tool.hatch.build.targets.wheel] for src layout
+  - Python 3.12+ enables match/case statements (used in CLI)
+  - The project had Python 3.14 installed via mise - pyproject.toml requires >=3.12 so it's compatible
+---
+
+## 2026-01-23 - US-002: Core Loop Logic in Python
+- Fixed mypy type errors in loop.py (signal handler types, Any returns)
+- Added _cmd_run() function to cli.py to wire up LoopRunner
+- Core loop module at src/ralph/loop.py already existed with:
+  - LoopConfig dataclass (task_dir, max_iterations=50, agent, rotate_threshold=300, failover_threshold=3)
+  - LoopRunner class with _run_loop(), _run_agent(), _rotate_progress_if_needed()
+  - FailureTracker class for per-agent consecutive failure tracking + failover
+  - IterationResult dataclass for structured agent output
+  - SIGINT/SIGTERM handling with checkpoint writing
+  - <promise>COMPLETE</promise> detection in agent output
+  - Progress.txt rotation when exceeding threshold
+- Files changed: src/ralph/cli.py, src/ralph/loop.py, tasks/ralph-infrastructure-unification/prd.json
+- **Learnings for future iterations:**
+  - signal.getsignal() returns `signal._HANDLER` type, not `signal.Handlers` - use `signal._HANDLER` for type annotations
+  - For `dict[str, Any]` returns from json.loads(), use explicit type annotation on the receiving variable to avoid no-any-return
+  - Use `str()` wrapper on `.get()` results to satisfy strict mypy return type checks
+  - The agents/ directory contains bash wrapper scripts (claude.sh, opencode.sh) that accept prompts via stdin
+  - ruff is configured in pyproject.toml but not installed as dev dependency (only mypy is)
+---
+
+## 2026-01-23 - US-001: Python Package Scaffold (rename to ralph-uv)
+- Renamed src/ralph/ to src/ralph_uv/ to match PRD requirements
+- Updated all imports from `ralph` to `ralph_uv`
+- Updated pyproject.toml: project name to ralph-uv, scripts entry to ralph-uv, build packages to src/ralph_uv, mypy packages to ralph_uv
+- Updated CLI prog name to ralph-uv, version string to ralph-uv
+- Regenerated uv.lock for the renamed package
+- Verified: `uv run ralph-uv --version` prints "ralph-uv 0.1.0"
+- Verified: `uv run ralph-uv --help` shows all subcommands
+- Verified: `uv run mypy src/ralph_uv/` passes with no errors
+- Files changed: src/ralph_uv/ (renamed from src/ralph/), pyproject.toml, uv.lock, prd.json, progress.txt
+- **Learnings for future iterations:**
+  - Package import name is `ralph_uv` (underscore), CLI command is `ralph-uv` (hyphen)
+  - After renaming a package, must regenerate uv.lock with `uv lock`
+   - hatchling build target must match the actual directory: `packages = ["src/ralph_uv"]`
+---
+
+## 2026-01-23 - US-003: Agent Abstraction Layer
+- Created src/ralph_uv/agents.py with Agent ABC, ClaudeAgent, OpencodeAgent, FailureTracker, create_agent(), resolve_agent()
+- Agent base class has abstract start(), is_done(), get_output() methods + concrete run() convenience method
+- ClaudeAgent: invokes `claude --print --output-format stream-json`, parses stream-json for result
+- OpencodeAgent: invokes `opencode run`, placeholder for full implementation in US-008
+- resolve_agent() implements priority: CLI --agent > story.agent > prd.agent > "claude" default
+- FailureTracker moved from loop.py to agents.py (same logic, now co-located with agents)
+- Refactored loop.py: removed _run_agent shell-script approach, _find_agents_dir, _extract_output, _detect_failure, _extract_error
+- Added LoopConfig.agent_override field for CLI pass-through
+- Updated cli.py to pass agent_override instead of resolved agent name
+- mypy passes clean (4 source files, no errors)
+- Files changed: src/ralph_uv/agents.py (new), src/ralph_uv/loop.py, src/ralph_uv/cli.py, prd.json
+- **Learnings for future iterations:**
+  - Agents invoke CLIs directly via subprocess.Popen - no need for bash wrapper scripts in agents/
+  - Agent.run() handles the full lifecycle: start -> write prompt to stdin -> wait -> get_output
+  - process.communicate() handles reading remaining stdout/stderr after stdin.close()
+  - ClaudeAgent uses `--print` mode which reads prompt from stdin when piped
+  - OpenCode uses `opencode run` which also reads prompt from stdin
+   - The `data: dict[str, Any] = json.loads(line)` pattern satisfies mypy strict for json parsing
+---
+
+## 2026-01-23 - US-004: Branch Management
+- Created src/ralph_uv/branch.py with BranchConfig, setup_branch(), handle_completion(), validate_branch_state()
+- Added base_branch field to LoopConfig dataclass
+- Wired --base-branch CLI arg through to LoopConfig
+- Integrated _setup_branch() at start of _run_loop() and _handle_branch_completion() at both completion paths
+- Branch setup: validates clean working tree, checks out or creates task branch from base
+- Completion handling: pushes branch, creates PR (and optionally merges) via gh CLI
+- All git operations via subprocess with proper error handling (BranchError exception class)
+- Files changed: src/ralph_uv/branch.py (new), src/ralph_uv/loop.py, src/ralph_uv/cli.py, prd.json, progress.txt
+- **Learnings for future iterations:**
+  - Branch module uses _run_git() helper that wraps subprocess.run with check=True and BranchError conversion
+  - PR creation/merge uses gh CLI - gracefully handles missing gh or existing PRs
+  - BranchConfig is created from prd.json data via create_branch_config() factory
+  - setup_branch() is idempotent: if already on task branch, it's a no-op
+  - handle_completion() is safe: no mergeTarget means no action taken
+---
+
+## 2026-01-23 - US-005: Session Management (tmux + SQLite)
+- Created src/ralph_uv/session.py with SessionDB, SessionInfo, tmux operations, signal file ops
+- SessionDB: SQLite at ~/.local/share/ralph/sessions.db with register/update/list/remove
+- Tmux: create_session (detached, gets pane PID), kill_session, session_exists, list_sessions
+- Signal files: ~/.local/share/ralph/signals/<task>.signal for stop/checkpoint communication
+- start_session(): creates tmux session running ralph-uv, registers in DB
+- stop_session(): writes "stop" signal + sends SIGINT to process
+- checkpoint_session(): writes "checkpoint" signal (loop pauses after current iteration)
+- cleanup_session(): kills tmux, updates DB status, clears signals
+- get_status(): formats session list as table or JSON (--json flag)
+- Integrated into LoopRunner: register at start, update progress each iteration, check signals, set final status
+- Added _checkpoint_requested flag alongside _shutdown_requested for distinguishing stop vs checkpoint
+- CLI commands wired: status (--json), stop <task>, checkpoint <task>
+- Files changed: src/ralph_uv/session.py (new), src/ralph_uv/loop.py, src/ralph_uv/cli.py, prd.json
+- **Learnings for future iterations:**
+  - SessionDB validates running sessions against actual tmux state (list_running stale detection)
+  - Signal files are consumed on read (one-shot) to prevent duplicate processing
+  - tmux session names prefixed with "ralph-" to avoid collisions
+  - task_name_from_dir() uses the directory name (e.g., "my-feature" from tasks/my-feature/)
+  - LoopRunner checks signals at start of each iteration AND after agent run returns
+  - _shell_quote() handles command args for tmux new-session; uses single-quoting strategy
+  - sqlite3.Row factory enables dict-like access to query results
+---
+
+## 2026-01-23 - US-006: Prompt Preprocessing
+- Created src/ralph_uv/prompt.py with PromptContext, build_prompt(), load_prompt_template(), substitute_variables(), find_agents_md(), preprocess_agent_sections()
+- PromptContext dataclass holds task_dir, prd_file, progress_file, branch_name, agent, extra_vars
+- load_prompt_template() searches: task dir > ~/.config/ralph/ > project root > ~/.local/share/ralph/ > fallback
+- substitute_variables() replaces {VAR_NAME} patterns (uppercase+underscores) with context values
+- find_agents_md() collects AGENTS.md from project root and task directory
+- preprocess_agent_sections() filters <!-- agent:X --> conditional blocks (keeps current agent, removes others)
+- build_prompt() is the main entry: load template -> filter agents -> substitute vars -> inject AGENTS.md -> add header
+- Refactored loop.py: removed _load_prompt_template(), simplified _build_prompt() to use PromptContext + build_prompt()
+- _run_agent() now passes agent_name to _build_prompt() for agent-specific section filtering
+- Files changed: src/ralph_uv/prompt.py (new), src/ralph_uv/loop.py, prd.json
+- **Learnings for future iterations:**
+  - The {VARIABLE} regex only matches uppercase+underscores to avoid matching JSON `{"key": "value"}` patterns
+  - preprocess_agent_sections() uses re.DOTALL flag to handle multi-line agent blocks
+  - AGENTS.md is injected between the header and the prompt template content
+  - PromptContext.to_vars() returns a flat dict used by substitute_variables()
+---
+
+## 2026-01-23 - US-007: TUI Communication Protocol (JSON-RPC over Unix Socket)
+- Created src/ralph_uv/rpc.py with RpcServer, SessionState, EventSubscriber, RpcError classes
+- JSON-RPC 2.0 server over Unix domain sockets at ~/.local/share/ralph/sockets/<task>.sock
+- SessionState dataclass holds mutable state: iteration, story, agent, interactive_mode, recent_output
+- RPC methods: get_status, stop, checkpoint, inject_prompt, set_interactive_mode, subscribe, unsubscribe
+- Event subscription system: clients subscribe to "output", "state_change", or "*" events
+- Events broadcast as JSON-RPC notifications (no id) to all subscribed clients
+- RpcServer runs asyncio event loop in a separate daemon thread (non-blocking to main loop)
+- Integrated into LoopRunner: _start_rpc_server() at run start, _stop_rpc_server() in finally block
+- _update_rpc_state() emits state_change events on iteration/story/agent changes
+- _rpc_append_output() captures last 50 lines of agent output per iteration for TUI
+- inject_prompt support: injected text prepended to next agent prompt, then cleared
+- RPC stop/checkpoint commands trigger same shutdown flags as signal-file approach
+- Created docs/protocol.md with full protocol documentation, examples in Python and Rust
+- Protocol is additive: ralph-tui can still read prd.json and progress.txt directly
+- Files changed: src/ralph_uv/rpc.py (new), src/ralph_uv/loop.py, docs/protocol.md (new), prd.json
+- **Learnings for future iterations:**
+  - asyncio.run_coroutine_threadsafe() bridges sync main loop to async RPC server
+  - asyncio.new_event_loop() + threading.Thread for running asyncio alongside synchronous code
+  - NDJSON (newline-delimited JSON) is the simplest framing protocol for streaming
+  - deque(maxlen=N) is ideal for bounded output buffers
+  - Socket cleanup is critical: always unlink stale .sock files before bind
+  - os.chmod(path, 0o600) restricts socket access to owner only
+   - loop.call_soon_threadsafe() is needed for cross-thread event loop scheduling
+---
+
+## 2026-01-23 - US-008: Opencode Stop-Hook Plugin
+- Created plugins/opencode-ralph-hook/ TypeScript package:
+  - package.json with typescript + @types/node devDeps
+  - tsconfig.json targeting ES2022/CommonJS
+  - src/index.ts: plugin that hooks session.idle, writes signal file
+- Plugin reads RALPH_SIGNAL_FILE env var to find signal path
+- Signal format: { event: "idle", timestamp: ISO, session_id: id }
+- Atomic write via temp file + rename to prevent partial reads
+- Rewrote OpencodeAgent in agents.py:
+  - _setup_signal_file(): creates temp dir for signal
+  - _deploy_plugin(): copies built dist/ to .opencode/plugins/ralph-hook/
+  - _build_env(): sets RALPH_SIGNAL_FILE + RALPH_SESSION_ID env vars
+  - _check_signal_file(): polls for signal file existence
+  - _discard_signal_file(): consumes stale signals during interactive mode
+  - _cleanup_signal(): removes temp dir after run
+  - run() override: interactive_mode-aware completion loop
+- Added deploy_plugin_globally() and is_plugin_installed_globally() utilities
+- Updated .gitignore: node_modules/ and plugin dist/ excluded
+- Documented plugin mechanism in README.md
+- Both mypy (Python) and tsc (TypeScript) pass cleanly
+- Files changed: plugins/opencode-ralph-hook/ (new), src/ralph_uv/agents.py, .gitignore, README.md, prd.json
+- **Learnings for future iterations:**
+  - OpenCode (now archived, renamed to Crush) is a Go app - its plugin system is convention-based, not a formal API
+  - TypeScript plugin uses CommonJS module.exports for require() compatibility
+  - Atomic file writes (write tmp + rename) prevent partial-read race conditions
+  - tempfile.mkdtemp() creates unique dirs per-run, shutil.rmtree() cleans up
+  - AgentConfig.interactive_mode flag lets OpencodeAgent suppress completion
+  - Plugin is safe for global install: no-op without RALPH_SIGNAL_FILE env var
+   - The _PLUGIN_DIR class variable uses Path(__file__).parent.parent.parent to find bundled plugin
+---
+
+## 2026-01-23 - US-012: Interactive Agent Control Mode
+- Created src/ralph_uv/interactive.py: PtyAgent, InteractiveController, InteractiveState
+  - PtyAgent: wraps subprocess with PTY (pty.openpty()), provides read_available/write_input/send_escape
+  - InteractiveController: manages toggle lifecycle (enable sends Esc, disable resumes detection)
+  - InteractiveState: tracks enabled flag and suppress_completion state
+- Created src/ralph_uv/attach.py: RpcClient, AttachViewer
+  - RpcClient: JSON-RPC 2.0 client over Unix socket with subscribe/call/read_events
+  - AttachViewer: terminal UI with hotkeys (i=toggle, s=stop, c=checkpoint, q=quit)
+  - Uses tty.setcbreak() for hotkey capture, restored in finally block
+- Updated src/ralph_uv/agents.py:
+  - Added run_with_pty() to Agent base class for PTY-based execution
+  - Added build_pty_command() and build_pty_env() abstract methods
+  - ClaudeAgent: PTY command same as pipe command (--print mode)
+  - OpencodeAgent: overrides run_with_pty() to add signal-file awareness with PTY
+  - Signal files discarded during interactive mode in OpencodeAgent.run_with_pty()
+- Updated src/ralph_uv/loop.py:
+  - LoopRunner._run_agent() now uses run_with_pty() with InteractiveController
+  - Added _rpc_on_set_interactive() callback wired to RPC set_interactive_mode
+  - InteractiveController created per-iteration, cleaned up after each run
+- Updated src/ralph_uv/rpc.py:
+  - RpcServer.set_callbacks() now accepts on_set_interactive parameter
+  - _handle_set_interactive_mode() calls on_set_interactive callback
+  - SessionState.to_dict() includes mode_indicator ("autonomous"/"interactive")
+- Updated src/ralph_uv/cli.py: attach command now calls attach() from attach module
+- All 10 source files pass mypy strict mode with no errors
+- Files changed: src/ralph_uv/interactive.py (new), src/ralph_uv/attach.py (new), src/ralph_uv/agents.py, src/ralph_uv/loop.py, src/ralph_uv/rpc.py, src/ralph_uv/cli.py, AGENTS.md, prd.json, progress.txt
+- **Learnings for future iterations:**
+  - pty.openpty() returns (master_fd, slave_fd); close slave_fd in parent after Popen
+  - PTY subprocess needs start_new_session=True for proper process group handling
+  - Ctrl+D (b"\x04") signals EOF to PTY stdin (not closing the fd)
+  - select.select() with timeout enables non-blocking PTY reads
+  - tty.setcbreak() is preferable to tty.setraw() for attach - preserves signal handling
+  - TYPE_CHECKING import guard avoids circular imports between agents.py and interactive.py
+  - Agent._build_command_list() provides a hook for subclasses that PTY execution can use
+  - InteractiveState._suppress_completion prevents race between mode toggle and stale signals
+---
+
+## 2026-01-23 - US-009: TUI Loop Start Wizard
+- Created ralph-tui/src/wizard.rs with full wizard implementation:
+  - WizardStep enum (SelectTask, ConfigureBranch, SetIterations, SelectAgent, Confirm)
+  - WizardState struct tracking all configuration being built
+  - TaskInfo struct for displaying task metadata in selection
+  - discover_tasks() scans tasks/ directory for prd.json files
+  - get_current_branch() reads current git branch for default
+  - render_wizard() renders modal overlay with step-specific content
+  - handle_wizard_input() processes keyboard input per-step
+  - Launch spawns `ralph-uv run` as detached subprocess
+- Updated ralph-tui/src/main.rs:
+  - Added `mod wizard;` module declaration
+  - Added `Wizard` variant to InputMode enum
+  - Added `wizard_state: Option<wizard::WizardState>` to App struct
+  - Added 'w' hotkey in Ralph mode (standalone) to open wizard
+  - Added 'w' hotkey in attach mode normal key handling
+  - Added wizard input handling in both run() and run_attach_mode() event loops
+  - Added wizard modal rendering in both draw closures
+  - Updated footer bar keybindings text to show 'w: New Loop'
+- Both `cargo check` and `cargo build` pass with no new warnings
+- `uv run mypy src/ralph_uv/` passes (Python side unchanged)
+- Files changed: ralph-tui/src/wizard.rs (new), ralph-tui/src/main.rs, prd.json, progress.txt
+- **Learnings for future iterations:**
+  - ratatui `Clear` widget is used to clear area before rendering modal overlays
+  - InputMode enum pattern works well for modal state - add new variant and handle in event loop
+  - Wizard module can be kept separate from main.rs to avoid bloating the already large file
+  - Task discovery reuses the same patterns as find_active_tasks() in main.rs but returns richer data
+  - Detached subprocess launch uses Stdio::null() for all three handles
+  - The wizard integrates with ralph-uv session management: ralph-uv registers in SQLite on start
+  - Agent default can be read from prd.json's "agent" field during wizard step navigation
+---
+
+## 2026-01-23 - US-010: Ralph Attach (Single-Loop View)
+- Rewrote src/ralph_uv/attach.py with complete attach viewer implementation:
+  - RpcClient: JSON-RPC 2.0 client with proper connection tracking and disconnect detection
+  - AttachViewer: terminal UI with hotkeys, live event streaming, interactive mode support
+- Added `write_pty` RPC method to src/ralph_uv/rpc.py for forwarding keystrokes to agent PTY
+- Added `_rpc_on_write_pty` callback to src/ralph_uv/loop.py wiring RPC to InteractiveController
+- Updated docs/protocol.md with write_pty method documentation
+- Key improvements over prior attach.py:
+  - Uses `write_pty` RPC for real-time PTY input forwarding (not inject_prompt)
+  - Esc key exits interactive mode (in addition to 'i' toggle)
+  - Connection loss detected via socket disconnect (client.connected property)
+  - Proper request ID incrementing for RPC calls
+  - Shows session status and recent output in header
+  - Reads up to 32 bytes per input read for escape sequence handling
+- All 10 source files pass mypy strict mode
+- Files changed: src/ralph_uv/attach.py, src/ralph_uv/rpc.py, src/ralph_uv/loop.py, docs/protocol.md, prd.json
+- **Learnings for future iterations:**
+  - write_pty RPC method is only effective when interactive_mode=True (server-side guard)
+  - RpcClient.connected property enables clean connection-loss detection in the event loop
+  - os.read(fd, 32) reads up to 32 bytes which handles multi-byte escape sequences
+  - tty.setcbreak() is better than tty.setraw() for attach: preserves SIGINT handling
+  - RPC method handlers must be defined on the class before __init__ references them (Python resolves at call time, but LSP may warn)
+  - The on_write_pty callback bridges RPC thread -> main thread -> InteractiveController.forward_input()
+---

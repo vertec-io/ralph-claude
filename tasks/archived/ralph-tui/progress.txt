@@ -1,0 +1,250 @@
+# Ralph Progress Log
+Effort: ralph-tui
+Type: Feature
+Started: 2026-01-17
+---
+
+## Codebase Patterns
+- Rust TUI uses ratatui + crossterm for terminal handling
+- Always enable_raw_mode() and EnterAlternateScreen at startup, disable_raw_mode() and LeaveAlternateScreen at exit
+- Use portable-pty crate for PTY subprocess management
+- Build with `cargo build --release` from ralph-tui/ directory
+- Use vt100 crate for terminal emulation (ANSI escape code interpretation)
+- Access vt100 screen via `parser.screen()` for reading, `parser.screen_mut()` for resizing
+- Convert vt100::Color to ratatui::Color (Default->Reset, Idx->Indexed, Rgb->Rgb)
+- Modal input: Mode enum controls input handling; match on mode in event loop
+- PTY input: Use MasterPty::take_writer() to get writer, call try_clone_reader() BEFORE take_writer()
+- Key forwarding: Convert KeyCode to ANSI escape sequences for special keys (arrows, function keys, etc.)
+- PRD parsing: Use serde with rename_all = "camelCase" for field mapping; #[serde(rename = "type")] for reserved keywords
+- File watching: Use notify crate with RecommendedWatcher; watch parent directory since editors replace files
+- Claude spawning: Use temp file for prompt to avoid command line length limits; spawn via bash -c with cat piping
+- Iteration loop: IterationState enum tracks Running/Completed/NeedsRestart/WaitingDelay states
+- Completion detection: Track PTY output in recent_output buffer, check for <promise>COMPLETE</promise>
+- Multi-iteration: spawn_claude() extracted as separate function for re-spawning between iterations
+- Interactive CLI: find_active_tasks() scans tasks/ for prd.json; prompt_task_selection() for numbered list
+- CLI config: CliConfig struct holds task_dir, max_iterations, rotate_threshold, skip_prompts
+- Elapsed time: session_start and iteration_start Instant fields; format_duration() for MM:SS format
+- Token tracking: TokenStats struct with parse_from_output(); patterns 'input tokens', 'output tokens'. session_tokens in App accumulates across iterations.
+- Cost calculation: TokenStats.calculate_cost() and format_cost() methods; pricing constants PRICE_PER_M_INPUT/OUTPUT at top of file.
+- Activity tracking: Activity struct with action_type/target. parse_activities() scans for patterns. PtyState.activities Vec with last_activity_parse_pos for incremental parsing.
+
+---
+
+## 2026-01-17 - US-014
+- Implemented: Recent activity log display in status panel
+- Files changed:
+  - ralph-tui/src/main.rs - Added Activity struct, parse_activities() function, activities field in PtyState, display in status panel
+  - tasks/ralph-tui/prd.json - marked US-014 as passes: true
+- **Learnings for future iterations:**
+  - Activity struct stores action_type (Read, Edit, Write, Bash, etc.) and target (file path or command)
+  - parse_activities() scans line-by-line for tool patterns like "reading ", "editing ", "running ", etc.
+  - Use slice type `&[(&str, &[&str])]` for pattern arrays with varying sizes
+  - PtyState.last_activity_parse_pos tracks parsed position to avoid re-parsing entire output
+  - MAX_ACTIVITIES constant (10) limits memory usage; display shows 5 most recent
+  - Activities shown with bullet points and truncated paths for narrow panels
+  - Activity.format() truncates long paths with "..." prefix to fit panel width
+---
+
+## 2026-01-17 - US-013
+- Implemented: Cost estimates based on token usage
+- Files changed:
+  - ralph-tui/src/main.rs - Added PRICE_PER_M_INPUT/OUTPUT constants, calculate_cost() and format_cost() methods to TokenStats, updated status display to show costs
+  - tasks/ralph-tui/prd.json - marked US-013 as passes: true
+- **Learnings for future iterations:**
+  - Pricing constants at module level: PRICE_PER_M_INPUT ($3.00) and PRICE_PER_M_OUTPUT ($15.00) for Claude 3.5 Sonnet
+  - calculate_cost() returns f64 in USD: (input_tokens / 1M * input_price) + (output_tokens / 1M * output_price)
+  - format_cost() returns currency string: "$0.42" for >= $0.01, "$0.003" for smaller amounts
+  - Cost displays in green (Color::Green) next to token counts in status panel
+  - Updates in real-time as token counts update during iteration
+---
+
+## 2026-01-17 - US-012
+- Implemented: Token usage parsing and display
+- Files changed:
+  - ralph-tui/src/main.rs - Added TokenStats struct with parse_from_output(), iteration_tokens in PtyState, session_tokens in App, display in status panel
+  - tasks/ralph-tui/prd.json - marked US-012 as passes: true
+- **Learnings for future iterations:**
+  - TokenStats uses find_number_after() helper for flexible pattern matching
+  - Patterns: 'input tokens', 'output tokens', 'input:', 'output:', 'in:', 'out:'
+  - Token display shows iter tokens (↓↑ arrows for input/output) and session total
+  - Tokens accumulated to session_tokens when child_exited detected
+  - update_tokens() called during render loop and on exit for real-time updates
+---
+
+## 2026-01-17 - US-011
+- Implemented: Elapsed time tracking and display
+- Files changed:
+  - ralph-tui/src/main.rs - Already had session_start, iteration_start, format_duration(), and display code. Fixed: iteration_start reset on new iteration (line 996)
+  - tasks/ralph-tui/prd.json - marked US-011 as passes: true
+- **Learnings for future iterations:**
+  - Use std::time::Instant for elapsed time tracking (not chrono)
+  - format_duration() converts Duration to MM:SS format
+  - Display updates happen on every draw cycle (~50ms polling interval)
+  - Remember to reset iteration-specific state when starting new iterations
+---
+
+## 2026-01-17 - US-017
+- Implemented: Interactive CLI with task discovery and selection prompts
+- Files changed:
+  - ralph-tui/src/main.rs - Added find_active_tasks(), prompt_task_selection(), prompt_iterations(), prompt_rotation_threshold(), CliConfig struct
+  - tasks/ralph-tui/prd.json - marked US-017 as passes: true
+- **Learnings for future iterations:**
+  - find_active_tasks() scans tasks/ subdirs for prd.json, excludes archived/
+  - get_task_info() parses prd.json to show progress (completed/total) in selection list
+  - Interactive prompts run BEFORE enable_raw_mode() so user can type normally
+  - -y/--yes flag skips all interactive prompts for scripted usage
+  - VERSION constant uses env!("CARGO_PKG_VERSION") from Cargo.toml
+  - Rotation threshold prompt triggers when within 50 lines of threshold or has prior rotations
+---
+
+## 2026-01-17 - US-010
+- Implemented: Iteration loop with automatic restart when Claude completes without COMPLETE signal
+- Files changed:
+  - ralph-tui/src/main.rs - Added IterationState enum, spawn_claude(), run_delay(), CLI args parsing
+  - tasks/ralph-tui/prd.json - marked US-010 as passes: true
+- **Learnings for future iterations:**
+  - IterationState enum manages loop state: Running, Completed, NeedsRestart, WaitingDelay
+  - spawn_claude() is extracted to allow re-spawning Claude between iterations
+  - PtyState.recent_output tracks raw output for completion signal detection (10KB buffer)
+  - portable_pty::Child is a trait, not a struct - use Box<dyn Child + Send + Sync>
+  - run_delay() provides countdown UI between iterations (2s delay)
+  - CLI parsing uses simple loop - -i/--iterations for max iterations (default 10)
+  - Must reset PtyState.child_exited and clear recent_output when spawning new iteration
+---
+
+## 2026-01-17 - US-009
+- Implemented: Spawn Claude Code with Ralph prompt instead of test bash shell
+- Files changed:
+  - ralph-tui/src/main.rs - added build_ralph_prompt() function, spawn Claude with prompt via temp file
+  - tasks/ralph-tui/prd.json - marked US-009 as passes: true
+- **Learnings for future iterations:**
+  - build_ralph_prompt() walks up from task_dir to find prompt.md (project root)
+  - Prompt format matches ralph.sh: header with task paths, then prompt.md content
+  - Use temp file for prompt to avoid command line length/quoting issues
+  - Spawn as: `bash -c 'cat /tmp/prompt.txt | claude --dangerously-skip-permissions --print; rm -f /tmp/prompt.txt'`
+  - Claude --print mode is non-interactive: reads from stdin, outputs to stdout, then exits
+  - Temp file includes process ID in name for uniqueness: ralph_prompt_{pid}.txt
+---
+
+## 2026-01-17 - US-008
+- Implemented: PRD parsing, CLI argument handling, and progress display
+- Files changed:
+  - ralph-tui/Cargo.toml - added notify crate for file watching
+  - ralph-tui/Cargo.lock - updated with new dependencies
+  - ralph-tui/src/main.rs - added Prd/UserStory structs, CLI args, file watcher, progress display
+  - tasks/ralph-tui/prd.json - marked US-008 as passes: true
+- **Learnings for future iterations:**
+  - serde_json requires #[serde(rename_all = "camelCase")] for JSON with camelCase fields
+  - Use #[serde(rename = "type")] for fields that are Rust reserved words
+  - notify crate: watch parent directory, not the file itself (editors replace files)
+  - File reload flag pattern: Arc<Mutex<bool>> checked/cleared in render loop
+  - wrap_text() helper needed for long text in narrow panels
+  - CLI error handling: print_usage() before returning error for good UX
+---
+
+## 2026-01-17 - US-007
+- Implemented: Keyboard input forwarding to PTY in Claude mode
+- Files changed:
+  - ralph-tui/src/main.rs - added pty_writer field, write_to_pty(), forward_key_to_pty()
+  - tasks/ralph-tui/prd.json - marked US-007 as passes: true
+- **Learnings for future iterations:**
+  - MasterPty::take_writer() returns a writer for sending input to the PTY
+  - IMPORTANT: Call try_clone_reader() BEFORE take_writer() or reader will fail
+  - Printable chars: Ctrl+A-Z maps to 0x01-0x1A; Alt+key sends ESC + char
+  - Special keys use ANSI escape sequences: arrows are ESC [ A/B/C/D
+  - Enter sends \r (carriage return), Backspace sends 0x7f (DEL), Tab sends \t
+  - Function keys F1-F4 use ESC O P/Q/R/S; F5-F12 use ESC [ <num> ~
+  - Home/End: ESC [ H / ESC [ F; PageUp/Down: ESC [ 5/6 ~
+  - Escape key exits Claude mode (not forwarded); all other keys forwarded
+---
+
+## 2026-01-17 - US-006
+- Implemented: Modal input system with Ralph/Claude modes
+- Files changed:
+  - ralph-tui/src/main.rs - added Mode enum, mode field to App, mode switching with i/Tab/Esc, visual indicators
+  - tasks/ralph-tui/prd.json - marked US-006 as passes: true
+- **Learnings for future iterations:**
+  - Mode enum with Ralph (default) and Claude variants controls input handling
+  - Use match on app.mode in input handling to determine behavior per mode
+  - Visual indicators: [ACTIVE] suffix in panel title, green bold border for active panel, gray for inactive
+  - Status bar text changes based on mode (Ralph shows all controls, Claude shows "Press Esc to return")
+  - 'i' and Tab both switch to Claude mode; Escape switches back to Ralph mode
+  - 'q' only quits in Ralph mode (future: keys forwarded to PTY in Claude mode)
+---
+
+## 2026-01-17 - US-005
+- Implemented: PTY output rendering with ANSI escape code interpretation using vt100 crate
+- Files changed:
+  - ralph-tui/Cargo.toml - added vt100 = "0.16" dependency, upgraded ratatui to 0.30 for compatibility
+  - ralph-tui/Cargo.lock - updated with new dependencies
+  - ralph-tui/src/main.rs - replaced raw output buffer with vt100::Parser, added render_vt100_screen() function
+  - tasks/ralph-tui/prd.json - marked US-005 as passes: true
+- **Learnings for future iterations:**
+  - vt100::Parser::new(rows, cols, scrollback_len) creates terminal emulator
+  - Feed PTY output bytes to parser via parser.process(&bytes)
+  - parser.screen() returns immutable Screen reference
+  - parser.screen_mut().set_size(rows, cols) for resizing
+  - screen.cell(row, col) returns Option<&Cell> with text and styling
+  - Cell has fgcolor(), bgcolor(), bold(), italic(), underline(), inverse() methods
+  - Handle is_wide_continuation() cells by skipping them (wide chars take 2 columns)
+  - vt100 handles auto-scroll internally - just render the visible screen
+  - ratatui 0.30 needed to resolve unicode-width version conflict with vt100
+---
+
+## 2026-01-17 - US-004
+- Implemented: PTY subprocess management using portable-pty
+- Files changed:
+  - ralph-tui/src/main.rs - added PTY creation, spawning bash, output capture to buffer, cleanup, and resize handling
+  - tasks/ralph-tui/prd.json - marked US-004 as passes: true
+- **Learnings for future iterations:**
+  - Use `native_pty_system()` to get the system-appropriate PTY implementation
+  - `openpty(PtySize { rows, cols, ... })` creates the PTY pair
+  - Drop `pair.slave` after spawning to allow proper EOF detection
+  - Use `try_clone_reader()` to get a reader that can be moved to another thread
+  - Background thread reads PTY output into shared buffer (Arc<Mutex<PtyState>>)
+  - Limit buffer size to prevent memory issues (keep last 50KB when buffer exceeds 100KB)
+  - PTY resize via `master.resize(PtySize { ... })` on terminal resize events
+  - Proper cleanup order: wait for child, drop master PTY, join reader thread
+  - Poll for input every 50ms for responsive UI
+---
+
+## 2026-01-17 - US-003
+- Implemented: Basic two-panel layout with Ralph Status (30%) and Claude Code (70%) panels
+- Files changed:
+  - ralph-tui/src/main.rs - implemented split layout with Layout constraints, added bottom bar
+  - tasks/ralph-tui/prd.json - marked US-003 as passes: true
+- **Learnings for future iterations:**
+  - Use Layout::default().direction(Direction::Vertical/Horizontal) for splitting areas
+  - Constraint::Percentage(n) for proportional sizing, Constraint::Length(n) for fixed sizes
+  - Constraint::Min(n) ensures minimum height for dynamic areas
+  - Paragraph widget with custom Style for status bar (fg/bg colors)
+  - Layout resizing is automatic when using percentage/min constraints
+---
+
+## 2026-01-17 - US-002
+- Implemented: Initialize Rust project with ratatui and dependencies
+- Files changed:
+  - ralph-tui/Cargo.toml - project config with metadata and all dependencies
+  - ralph-tui/Cargo.lock - dependency lockfile
+  - ralph-tui/src/main.rs - basic TUI showing "Hello Ralph" with quit on 'q'
+  - .gitignore - added ralph-tui/target/
+  - tasks/ralph-tui/prd.json - marked US-002 as passes: true
+- **Learnings for future iterations:**
+  - TUI apps can't be easily tested in non-interactive mode (raw terminal requirements)
+  - ratatui 0.29 uses frame.area() instead of frame.size()
+  - Cargo edition 2024 is supported on current Rust toolchain
+  - Binary output is at ralph-tui/target/release/ralph-tui (~848KB)
+---
+
+## 2026-01-17 - US-001
+- Implemented: Split ralph.sh into non-interactive and legacy interactive versions
+- Files changed:
+  - ralph.sh - removed all tmux/interactive code (~300 lines removed)
+  - ralph-i.sh - new file containing interactive tmux functionality
+  - tasks/ralph-tui/prd.json - marked US-001 as passes: true
+- **Learnings for future iterations:**
+  - ralph.sh is now a clean non-interactive loop (simpler foundation for ralph-tui)
+  - ralph-i.sh is the legacy interactive mode using tmux
+  - Both scripts share the same core functionality (task selection, progress rotation, iteration loop)
+  - The split allows ralph-tui to eventually replace ralph-i.sh as the primary interactive mode
+---
