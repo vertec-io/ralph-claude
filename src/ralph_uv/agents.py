@@ -585,13 +585,14 @@ class OpencodeAgent(Agent):
         Overrides base run() to add interactive_mode awareness:
         - When interactive_mode is True, signal file writes are ignored
         - When interactive_mode becomes False, detection resumes
+
+        The prompt is passed as a CLI argument to `opencode run`, not via stdin.
         """
         start_time = time.time()
         try:
             process = self.start(config)
-            # Write prompt to stdin and close it
+            # Close stdin - prompt is passed as CLI arg, not via stdin
             if process.stdin is not None:
-                process.stdin.write(config.prompt)
                 process.stdin.close()
 
             # Wait for completion, respecting interactive_mode
@@ -688,8 +689,32 @@ class OpencodeAgent(Agent):
             shutil.copy2(str(pkg_json), str(target_dir / "package.json"))
 
     def _build_command(self, config: AgentConfig) -> list[str]:
-        """Build the opencode CLI command."""
+        """Build the opencode CLI command for pipe-based (non-interactive) mode.
+
+        Uses `opencode run "prompt"` which runs non-interactively and exits.
+        The prompt is passed as a positional argument.
+        """
         cmd = ["opencode", "run"]
+
+        if config.model:
+            cmd.extend(["--model", config.model])
+
+        if config.verbose:
+            cmd.extend(["--print-logs", "--log-level", "DEBUG"])
+
+        # Prompt goes as positional arg for `opencode run`
+        cmd.append(config.prompt)
+
+        return cmd
+
+    def _build_pty_command(self, config: AgentConfig) -> list[str]:
+        """Build the opencode CLI command for PTY (interactive) mode.
+
+        Uses `opencode --prompt "prompt"` which starts the TUI with
+        the prompt pre-filled. The TUI needs a terminal (provided by PTY)
+        and supports interactive attach/detach via ralph-uv attach.
+        """
+        cmd = ["opencode", "--prompt", config.prompt]
 
         if config.model:
             cmd.extend(["--model", config.model])
@@ -701,11 +726,11 @@ class OpencodeAgent(Agent):
 
     def _build_command_list(self, config: AgentConfig) -> list[str]:
         """Build command list (used by PTY execution)."""
-        return self._build_command(config)
+        return self._build_pty_command(config)
 
     def build_pty_command(self, config: AgentConfig) -> list[str]:
         """Build PTY command for OpenCode."""
-        return self._build_command(config)
+        return self._build_pty_command(config)
 
     def _build_env(self, config: AgentConfig) -> dict[str, str]:
         """Build the environment for OpenCode subprocess.
@@ -762,8 +787,8 @@ class OpencodeAgent(Agent):
             env = self.build_pty_env(config)
             pty_agent.start(cmd, env, config.working_dir)
 
-            # Write prompt to the PTY
-            pty_agent.write_prompt(config.prompt)
+            # No need to write prompt - it's passed as --prompt flag to the TUI.
+            # The TUI starts with the prompt pre-filled and begins processing.
 
             # Main loop: read output, check signal file and completion
             while not pty_agent.is_done():
