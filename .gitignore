@@ -16,6 +16,10 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
+/dist/
 .venv/
 .mypy_cache/
+
+# Node.js (plugin builds)
+node_modules/
+plugins/opencode-ralph-hook/dist/

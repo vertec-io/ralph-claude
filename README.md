@@ -471,6 +471,44 @@ cp ~/.config/ralph/prompt.md ralph/prompt.md
 # Edit ralph/prompt.md with project-specific instructions
 ```
 
+## OpenCode Stop-Hook Plugin
+
+When using `opencode` as the agent, ralph-uv uses a TypeScript plugin to detect when opencode finishes processing a request. This provides reliable completion detection without polling.
+
+### How it works
+
+1. Before spawning opencode, ralph-uv copies the plugin to `.opencode/plugins/ralph-hook/` in the working directory
+2. ralph-uv sets the `RALPH_SIGNAL_FILE` environment variable pointing to a temporary signal file
+3. When opencode finishes processing (fires `session.idle`), the plugin writes a JSON signal:
+   ```json
+   { "event": "idle", "timestamp": "2025-01-23T10:30:00Z", "session_id": "12345" }
+   ```
+4. ralph-uv detects the signal file and proceeds to the next iteration
+
+### Plugin installation
+
+The plugin is deployed automatically per-project. For global installation:
+
+```bash
+# Build the plugin (requires Node.js)
+cd plugins/opencode-ralph-hook
+npm install && npm run build
+
+# The plugin is auto-deployed to .opencode/plugins/ per working directory
+# For global installation (all projects):
+# Copy dist/ to ~/.config/opencode/plugins/ralph-hook/
+mkdir -p ~/.config/opencode/plugins/ralph-hook
+cp dist/* package.json ~/.config/opencode/plugins/ralph-hook/
+```
+
+### Interactive mode
+
+When interactive mode is active, signal file writes are consumed and discarded - completion detection is suppressed until the user exits interactive mode. This prevents false iteration completions during manual interaction.
+
+### Fallback behavior
+
+If the plugin fails to load (e.g., Node.js not available, opencode doesn't support plugins), ralph-uv falls back to process exit detection. The plugin is designed to be a no-op when `RALPH_SIGNAL_FILE` is not set, so it's safe to install globally without side effects.
+
 ## References
 
 - [Geoffrey Huntley's Ralph article](https://ghuntley.com/ralph/)

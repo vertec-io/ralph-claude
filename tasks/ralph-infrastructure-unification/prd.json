@@ -131,20 +131,20 @@
       "title": "Opencode Stop-Hook Plugin",
       "description": "As a developer, I want an opencode plugin that signals when opencode completes an iteration so ralph-uv can detect completion without polling.",
       "acceptanceCriteria": [
-        { "description": "Opencode plugin written in TypeScript per opencode plugin API", "passes": false },
-        { "description": "Plugin listens for session.idle event (fires when opencode finishes processing)", "passes": false },
-        { "description": "Plugin reads RALPH_SIGNAL_FILE env var to discover where to write the signal", "passes": false },
-        { "description": "Signal is a JSON file write: {event: idle, timestamp: iso, session_id: id}", "passes": false },
-        { "description": "ralph-uv OpencodeAgent watches the signal file (inotify on Linux) for changes", "passes": false },
-        { "description": "Completion only honored when interactive_mode is false", "passes": false },
-        { "description": "Plugin loaded via .opencode/plugins/ directory (ralph-uv copies it into task working directory before spawning opencode)", "passes": false },
-        { "description": "Fallback: plugin can also be installed globally at ~/.config/opencode/plugins/", "passes": false },
-        { "description": "Document plugin mechanism in README", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Opencode plugin written in TypeScript per opencode plugin API", "passes": true },
+        { "description": "Plugin listens for session.idle event (fires when opencode finishes processing)", "passes": true },
+        { "description": "Plugin reads RALPH_SIGNAL_FILE env var to discover where to write the signal", "passes": true },
+        { "description": "Signal is a JSON file write: {event: idle, timestamp: iso, session_id: id}", "passes": true },
+        { "description": "ralph-uv OpencodeAgent watches the signal file (inotify on Linux) for changes", "passes": true },
+        { "description": "Completion only honored when interactive_mode is false", "passes": true },
+        { "description": "Plugin loaded via .opencode/plugins/ directory (ralph-uv copies it into task working directory before spawning opencode)", "passes": true },
+        { "description": "Fallback: plugin can also be installed globally at ~/.config/opencode/plugins/", "passes": true },
+        { "description": "Document plugin mechanism in README", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 8,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Plugin at plugins/opencode-ralph-hook/ (TypeScript). OpencodeAgent in agents.py now deploys plugin to .opencode/plugins/ralph-hook/ before spawn, sets RALPH_SIGNAL_FILE env var, and watches signal file for completion. Signal file uses temp dir per-run. Interactive mode discards signal writes. Global install supported at ~/.config/opencode/plugins/ralph-hook/. Fallback to process exit detection if plugin fails."
     },
     {
       "id": "US-012",

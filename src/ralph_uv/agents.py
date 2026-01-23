@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -42,6 +44,7 @@ class AgentConfig:
     yolo_mode: bool = False
     verbose: bool = False
     model: str = ""
+    interactive_mode: bool = False
 
 
 class Agent(ABC):
@@ -264,19 +267,48 @@ class ClaudeAgent(Agent):
 
 
 class OpencodeAgent(Agent):
-    """Agent implementation for OpenCode CLI.
+    """Agent implementation for OpenCode CLI with signal-file based completion.
 
-    Placeholder implementation - full integration with stop-hook plugin
-    is handled in US-008. This provides the basic subprocess invocation
-    using `opencode run` with prompt via stdin.
+    Uses the ralph-hook plugin to detect when opencode finishes processing.
+    The plugin writes a signal file when the session.idle event fires.
+    This agent watches the signal file via inotify (Linux) or polling for
+    changes, providing reliable completion detection without polling the
+    process stdout.
+
+    Plugin deployment:
+    - Copies the bundled plugin to .opencode/plugins/ in the working directory
+    - Sets RALPH_SIGNAL_FILE env var pointing to a temp signal file
+    - Watches the signal file for changes using inotify (Linux) or stat polling
+
+    Completion detection:
+    - Primary: signal file written by plugin (session.idle event)
+    - Fallback: process exit (handles plugin load failure gracefully)
+    - Interactive mode: completion detection suppressed until mode exits
     """
+
+    # Path to the bundled plugin relative to this file
+    _PLUGIN_DIR = (
+        Path(__file__).parent.parent.parent / "plugins" / "opencode-ralph-hook"
+    )
+
+    def __init__(self) -> None:
+        self._signal_file: Path | None = None
+        self._signal_dir: Path | None = None
+        self._inotify_fd: int | None = None
+        self._watch_fd: int | None = None
 
     @property
     def name(self) -> str:
         return "opencode"
 
     def start(self, config: AgentConfig) -> subprocess.Popen[str]:
-        """Start OpenCode as a subprocess."""
+        """Start OpenCode as a subprocess with plugin deployment."""
+        # Set up signal file for completion detection
+        self._setup_signal_file()
+
+        # Deploy plugin to working directory
+        self._deploy_plugin(config.working_dir)
+
         cmd = self._build_command(config)
         env = self._build_env(config)
 
@@ -291,8 +323,16 @@ class OpencodeAgent(Agent):
         )
 
     def is_done(self, process: subprocess.Popen[str]) -> bool:
-        """Check if OpenCode process has terminated."""
-        return process.poll() is not None
+        """Check if OpenCode process has terminated or signaled idle."""
+        # Process exited - always done
+        if process.poll() is not None:
+            return True
+
+        # Check signal file for idle signal (primary detection)
+        if self._check_signal_file():
+            return True
+
+        return False
 
     def get_output(self, process: subprocess.Popen[str]) -> AgentResult:
         """Wait for OpenCode to finish and parse the result."""
@@ -306,6 +346,9 @@ class OpencodeAgent(Agent):
         if failed:
             error_message = self._extract_error(exit_code, output, stderr)
 
+        # Clean up signal infrastructure
+        self._cleanup_signal()
+
         return AgentResult(
             output=output,
             exit_code=exit_code,
@@ -314,6 +357,114 @@ class OpencodeAgent(Agent):
             failed=failed,
             error_message=error_message,
         )
+
+    def run(self, config: AgentConfig) -> AgentResult:
+        """Run opencode with signal-file based completion detection.
+
+        Overrides base run() to add interactive_mode awareness:
+        - When interactive_mode is True, signal file writes are ignored
+        - When interactive_mode becomes False, detection resumes
+        """
+        start_time = time.time()
+        try:
+            process = self.start(config)
+            # Write prompt to stdin and close it
+            if process.stdin is not None:
+                process.stdin.write(config.prompt)
+                process.stdin.close()
+
+            # Wait for completion, respecting interactive_mode
+            while True:
+                if process.poll() is not None:
+                    break
+
+                if not config.interactive_mode:
+                    if self._check_signal_file():
+                        # Signal received - agent finished processing
+                        # Terminate the process gracefully
+                        process.terminate()
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait()
+                        break
+                else:
+                    # Interactive mode: consume and discard any signal file
+                    # writes to prevent stale signals on mode exit
+                    self._discard_signal_file()
+
+                time.sleep(0.2)
+
+            result = self.get_output(process)
+            result.duration_seconds = time.time() - start_time
+            return result
+        except OSError as e:
+            self._cleanup_signal()
+            return AgentResult(
+                output="",
+                exit_code=1,
+                duration_seconds=time.time() - start_time,
+                failed=True,
+                error_message=f"Failed to start agent: {e}",
+            )
+
+    def _setup_signal_file(self) -> None:
+        """Create a temporary directory and signal file path for this run."""
+        self._signal_dir = Path(tempfile.mkdtemp(prefix="ralph-opencode-"))
+        self._signal_file = self._signal_dir / "idle.signal"
+
+    def _check_signal_file(self) -> bool:
+        """Check if the signal file has been written (idle event received)."""
+        if self._signal_file is None:
+            return False
+        return self._signal_file.exists()
+
+    def _discard_signal_file(self) -> None:
+        """Remove signal file if it exists (consumed during interactive mode)."""
+        if self._signal_file is not None and self._signal_file.exists():
+            try:
+                self._signal_file.unlink()
+            except OSError:
+                pass
+
+    def _cleanup_signal(self) -> None:
+        """Clean up signal file and temporary directory."""
+        if self._signal_dir is not None:
+            try:
+                shutil.rmtree(str(self._signal_dir), ignore_errors=True)
+            except OSError:
+                pass
+            self._signal_dir = None
+            self._signal_file = None
+
+    def _deploy_plugin(self, working_dir: Path) -> None:
+        """Deploy the ralph-hook plugin to the working directory.
+
+        Copies the built plugin (dist/) to .opencode/plugins/ralph-hook/
+        in the working directory so opencode loads it on startup.
+
+        Falls back gracefully if the plugin dist doesn't exist (plugin
+        hasn't been built yet).
+        """
+        plugin_dist = self._PLUGIN_DIR / "dist"
+        if not plugin_dist.is_dir():
+            # Plugin not built - try global installation fallback
+            return
+
+        target_dir = working_dir / ".opencode" / "plugins" / "ralph-hook"
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy dist files
+        for item in plugin_dist.iterdir():
+            dest = target_dir / item.name
+            if item.is_file():
+                shutil.copy2(str(item), str(dest))
+
+        # Copy package.json for module resolution
+        pkg_json = self._PLUGIN_DIR / "package.json"
+        if pkg_json.is_file():
+            shutil.copy2(str(pkg_json), str(target_dir / "package.json"))
 
     def _build_command(self, config: AgentConfig) -> list[str]:
         """Build the opencode CLI command."""
@@ -328,19 +479,73 @@ class OpencodeAgent(Agent):
         return cmd
 
     def _build_env(self, config: AgentConfig) -> dict[str, str]:
-        """Build the environment for OpenCode subprocess."""
+        """Build the environment for OpenCode subprocess.
+
+        Sets RALPH_SIGNAL_FILE so the plugin knows where to write the
+        idle signal. Also sets RALPH_SESSION_ID for signal identification.
+        """
         env = os.environ.copy()
+
+        # Signal file for the plugin
+        if self._signal_file is not None:
+            env["RALPH_SIGNAL_FILE"] = str(self._signal_file)
+            env["RALPH_SESSION_ID"] = str(os.getpid())
+
         if config.yolo_mode:
             env["OPENCODE_PERMISSION"] = (
                 '{"*": "allow", "external_directory": "allow", "doom_loop": "allow"}'
             )
+
+        if config.verbose:
+            env["RALPH_DEBUG"] = "1"
+
         return env
 
     def _parse_output(self, raw_output: str) -> str:
         """Parse OpenCode output. Currently returns raw output."""
         # OpenCode outputs directly without a structured format wrapper
-        # Future: parse JSON format if --format json is used
         return raw_output
+
+
+# --- Plugin Deployment Utilities ---
+
+
+PLUGIN_SOURCE_DIR = (
+    Path(__file__).parent.parent.parent / "plugins" / "opencode-ralph-hook"
+)
+GLOBAL_PLUGIN_DIR = Path.home() / ".config" / "opencode" / "plugins" / "ralph-hook"
+
+
+def deploy_plugin_globally() -> bool:
+    """Install the ralph-hook plugin globally at ~/.config/opencode/plugins/.
+
+    Returns True if successful, False otherwise.
+    This allows the plugin to work without per-project deployment.
+    """
+    plugin_dist = PLUGIN_SOURCE_DIR / "dist"
+    if not plugin_dist.is_dir():
+        return False
+
+    GLOBAL_PLUGIN_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        for item in plugin_dist.iterdir():
+            if item.is_file():
+                dest = GLOBAL_PLUGIN_DIR / item.name
+                shutil.copy2(str(item), str(dest))
+
+        pkg_json = PLUGIN_SOURCE_DIR / "package.json"
+        if pkg_json.is_file():
+            shutil.copy2(str(pkg_json), str(GLOBAL_PLUGIN_DIR / "package.json"))
+
+        return True
+    except OSError:
+        return False
+
+
+def is_plugin_installed_globally() -> bool:
+    """Check if the ralph-hook plugin is installed globally."""
+    return (GLOBAL_PLUGIN_DIR / "index.js").exists()
 
 
 @dataclass

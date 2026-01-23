@@ -1,0 +1,19 @@
+{
+  "name": "opencode-ralph-hook",
+  "version": "1.0.0",
+  "description": "OpenCode stop-hook plugin for Ralph - signals idle state to the ralph-uv loop runner",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  },
+  "files": [
+    "dist/"
+  ],
+  "license": "MIT"
+}

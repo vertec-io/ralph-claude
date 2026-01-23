@@ -36,6 +36,12 @@ Started: 2026-01-23
 - Events broadcast via _broadcast_event(): "output" and "state_change" types
 - Use asyncio.run_coroutine_threadsafe() for cross-thread async coordination
 - Socket permissions set to 0o600 for security
+- Opencode plugin at plugins/opencode-ralph-hook/ (TypeScript, built with tsc to dist/)
+- OpencodeAgent deploys plugin to .opencode/plugins/ralph-hook/ in working dir before spawn
+- Signal file mechanism: RALPH_SIGNAL_FILE env var -> temp dir -> plugin writes idle.signal JSON
+- OpencodeAgent.run() overrides base to add interactive_mode-aware signal detection
+- Plugin is no-op when RALPH_SIGNAL_FILE not set (safe for global install)
+- deploy_plugin_globally() and is_plugin_installed_globally() utilities in agents.py
 ---
 
 ## 2026-01-23 - US-001: Python Package Scaffold
@@ -192,5 +198,36 @@ Started: 2026-01-23
   - deque(maxlen=N) is ideal for bounded output buffers
   - Socket cleanup is critical: always unlink stale .sock files before bind
   - os.chmod(path, 0o600) restricts socket access to owner only
-  - loop.call_soon_threadsafe() is needed for cross-thread event loop scheduling
+   - loop.call_soon_threadsafe() is needed for cross-thread event loop scheduling
+---
+
+## 2026-01-23 - US-008: Opencode Stop-Hook Plugin
+- Created plugins/opencode-ralph-hook/ TypeScript package:
+  - package.json with typescript + @types/node devDeps
+  - tsconfig.json targeting ES2022/CommonJS
+  - src/index.ts: plugin that hooks session.idle, writes signal file
+- Plugin reads RALPH_SIGNAL_FILE env var to find signal path
+- Signal format: { event: "idle", timestamp: ISO, session_id: id }
+- Atomic write via temp file + rename to prevent partial reads
+- Rewrote OpencodeAgent in agents.py:
+  - _setup_signal_file(): creates temp dir for signal
+  - _deploy_plugin(): copies built dist/ to .opencode/plugins/ralph-hook/
+  - _build_env(): sets RALPH_SIGNAL_FILE + RALPH_SESSION_ID env vars
+  - _check_signal_file(): polls for signal file existence
+  - _discard_signal_file(): consumes stale signals during interactive mode
+  - _cleanup_signal(): removes temp dir after run
+  - run() override: interactive_mode-aware completion loop
+- Added deploy_plugin_globally() and is_plugin_installed_globally() utilities
+- Updated .gitignore: node_modules/ and plugin dist/ excluded
+- Documented plugin mechanism in README.md
+- Both mypy (Python) and tsc (TypeScript) pass cleanly
+- Files changed: plugins/opencode-ralph-hook/ (new), src/ralph_uv/agents.py, .gitignore, README.md, prd.json
+- **Learnings for future iterations:**
+  - OpenCode (now archived, renamed to Crush) is a Go app - its plugin system is convention-based, not a formal API
+  - TypeScript plugin uses CommonJS module.exports for require() compatibility
+  - Atomic file writes (write tmp + rename) prevent partial-read race conditions
+  - tempfile.mkdtemp() creates unique dirs per-run, shutil.rmtree() cleans up
+  - AgentConfig.interactive_mode flag lets OpencodeAgent suppress completion
+  - Plugin is safe for global install: no-op without RALPH_SIGNAL_FILE env var
+  - The _PLUGIN_DIR class variable uses Path(__file__).parent.parent.parent to find bundled plugin
 ---
