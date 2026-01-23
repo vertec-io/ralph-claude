@@ -98,16 +98,16 @@
       "title": "Prompt Preprocessing",
       "description": "As a developer, I want the prompt.md template system ported to Python so agents receive properly formatted instructions.",
       "acceptanceCriteria": [
-        { "description": "Loads prompt.md from task dir, then ~/.config/ralph/prompt.md, then bundled default", "passes": false },
-        { "description": "Preprocesses template with task context (prd.json path, progress.txt path, branch info)", "passes": false },
-        { "description": "Injects AGENTS.md content if present", "passes": false },
-        { "description": "Passes final prompt to agent subprocess", "passes": false },
-        { "description": "Supports the existing {VARIABLE} substitution pattern", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Loads prompt.md from task dir, then ~/.config/ralph/prompt.md, then bundled default", "passes": true },
+        { "description": "Preprocesses template with task context (prd.json path, progress.txt path, branch info)", "passes": true },
+        { "description": "Injects AGENTS.md content if present", "passes": true },
+        { "description": "Passes final prompt to agent subprocess", "passes": true },
+        { "description": "Supports the existing {VARIABLE} substitution pattern", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 6,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Prompt module at src/ralph_uv/prompt.py. PromptContext dataclass holds variables. load_prompt_template() searches 4 locations + fallback. substitute_variables() uses {VAR_NAME} pattern (uppercase+underscores). find_agents_md() loads project-root + task-dir AGENTS.md. preprocess_agent_sections() handles <!-- agent:X --> conditional blocks. build_prompt() is the main entry point."
     },
     {
       "id": "US-007",

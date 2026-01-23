@@ -28,6 +28,10 @@ from ralph_uv.branch import (
     handle_completion,
     setup_branch,
 )
+from ralph_uv.prompt import (
+    PromptContext,
+    build_prompt,
+)
 from ralph_uv.session import (
     SessionDB,
     SessionInfo,
@@ -303,7 +307,7 @@ class LoopRunner:
     def _run_agent(self, agent_name: str, story: dict[str, Any]) -> AgentResult:
         """Run the agent using the abstraction layer."""
         agent = create_agent(agent_name)
-        prompt = self._build_prompt()
+        prompt = self._build_prompt(agent_name)
         working_dir = self.config.task_dir.parent.parent  # Project root
 
         agent_config = AgentConfig(
@@ -315,44 +319,19 @@ class LoopRunner:
 
         return agent.run(agent_config)
 
-    def _build_prompt(self) -> str:
-        """Build the prompt for the agent."""
-        # Load prompt.md template
-        prompt_content = self._load_prompt_template()
+    def _build_prompt(self, agent_name: str) -> str:
+        """Build the prompt for the agent using the prompt module."""
+        prd = self._read_prd()
+        branch_name = str(prd.get("branchName", ""))
 
-        task_dir_rel = str(self.config.task_dir)
-        return (
-            f"# Ralph Agent Instructions\n\n"
-            f"Task Directory: {task_dir_rel}\n"
-            f"PRD File: {task_dir_rel}/prd.json\n"
-            f"Progress File: {task_dir_rel}/progress.txt\n\n"
-            f"{prompt_content}\n"
+        context = PromptContext(
+            task_dir=self.config.task_dir,
+            prd_file=self.config.prd_file,
+            progress_file=self.config.progress_file,
+            branch_name=branch_name,
+            agent=agent_name,
         )
-
-    def _load_prompt_template(self) -> str:
-        """Load prompt.md from task dir, config dir, or bundled default."""
-        # 1. Task directory
-        task_prompt = self.config.task_dir / "prompt.md"
-        if task_prompt.is_file():
-            return task_prompt.read_text()
-
-        # 2. User config
-        config_prompt = Path.home() / ".config" / "ralph" / "prompt.md"
-        if config_prompt.is_file():
-            return config_prompt.read_text()
-
-        # 3. Project root
-        project_root = self.config.task_dir.parent.parent
-        root_prompt = project_root / "prompt.md"
-        if root_prompt.is_file():
-            return root_prompt.read_text()
-
-        # 4. Installed location
-        installed_prompt = Path.home() / ".local" / "share" / "ralph" / "prompt.md"
-        if installed_prompt.is_file():
-            return installed_prompt.read_text()
-
-        return "# No prompt template found\nImplement the next story from prd.json."
+        return build_prompt(context)
 
     def _handle_failure(
         self, agent: str, story: dict[str, Any], result: AgentResult, iteration: int
