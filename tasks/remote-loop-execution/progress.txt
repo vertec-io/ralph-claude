@@ -17,7 +17,13 @@ Rotation: 1 (rotated at 2026-01-23 13:54)
 - OpenCode: Server stores sessions in `~/.opencode/data/storage/` (filesystem, not SQLite)
 - OpenCode: Multiple clients can connect simultaneously (SSE broadcast)
 - OpenCode: `OPENCODE_SERVER_PASSWORD` enables HTTP Basic Auth
+- OpenCode server mode: OpencodeServer class in opencode_server.py manages lifecycle
+- OpenCode server mode: Port range 14096-14196 for auto-assignment
+- OpenCode server mode: Loop sends sync prompts (POST /session/:id/message blocks until done)
+- OpenCode server mode: Process group created with os.setsid for clean shutdown
 - Session state tracked in SQLite at `~/.local/share/ralph/sessions.db`
+- Sessions table has session_type (tmux|opencode-server) and server_port columns
+- CLI routes agent=opencode to opencode-server mode, agent=claude to tmux mode
 - CLI uses Click, session management uses libtmux (not subprocess tmux calls)
 - Progress file rotation preserves Codebase Patterns section across rotations
 - For remote opencode: Ziti proxies the HTTP port, `opencode attach http://<ziti>:<port>` works
@@ -37,4 +43,59 @@ _See progress-1.txt for detailed iteration logs._
 CHECKPOINT at 2026-01-23 14:06
 Iteration: 7/20 | Stories: 3/7 | Agent: opencode
 Reason: shutdown signal
+---
+
+---
+CHECKPOINT at 2026-01-23 14:58
+Iteration: 10/20 | Stories: 3/8 | Agent: opencode
+Reason: shutdown signal
+---
+
+---
+CHECKPOINT at 2026-01-23 15:21
+Iteration: 5/20 | Stories: 3/8 | Agent: opencode
+Reason: shutdown signal
+---
+
+---
+CHECKPOINT at 2026-01-23 16:04
+Iteration: 3/20 | Stories: 3/8 | Agent: opencode
+Reason: shutdown signal
+---
+
+---
+CHECKPOINT at 2026-01-23 16:06
+Iteration: 1/20 | Stories: 3/8 | Agent: opencode
+Reason: shutdown signal
+---
+
+## 2026-01-23 16:30 - US-004
+- Implemented opencode server mode for local loops
+- Created new module: `src/ralph_uv/opencode_server.py` (~480 lines)
+  - `OpencodeServer` class: manages `opencode serve` subprocess lifecycle
+  - Port auto-assignment (range 14096-14196), health checking, HTTP API client
+  - `create_session()`, `send_prompt()`, `wait_for_idle()` (SSE), `abort_session()`
+  - Proper process group management (SIGTERM → SIGKILL with timeout)
+- Modified `src/ralph_uv/cli.py`:
+  - When agent=opencode, routes to `_spawn_opencode_server()` instead of tmux
+  - Starts server, waits for health, registers in SQLite, runs loop in-process
+- Modified `src/ralph_uv/loop.py`:
+  - `LoopRunner` accepts `opencode_server` parameter
+  - `_run_agent_via_server()`: creates sessions and sends sync prompts via HTTP
+- Modified `src/ralph_uv/attach.py`:
+  - Dispatches to `opencode attach http://localhost:<port>` for opencode-server sessions
+  - Falls back to tmux attach for tmux sessions
+- Modified `src/ralph_uv/session.py`:
+  - Added `session_type` and `server_port` columns with migration support
+  - `opencode_server_alive()` health check function
+  - `stop_session()` kills server process for opencode-server sessions
+  - `cleanup_session()` handles both session types
+  - `list_running()` and `get_status()` validate per session type
+- **Learnings for future iterations:**
+  - `opencode serve --port 0` lets OS assign a port, but the assigned port isn't printed to stdout — we find free ports ourselves
+  - `POST /session/:id/message` is synchronous (blocks until agent responds) — perfect for loop iteration model
+  - The `opencode attach <url>` command provides the native TUI over HTTP — no terminal proxying needed
+  - `preexec_fn=os.setsid` creates a process group, allowing clean SIGTERM to all children
+  - SQLite schema migration uses PRAGMA table_info to detect missing columns
+  - mypy strict mode requires explicit bool() for comparison expressions in returns
 ---

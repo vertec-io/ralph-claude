@@ -157,44 +157,44 @@
       "acceptanceCriteria": [
         {
           "description": "When agent=opencode, ralph-uv run starts opencode serve --port <auto> instead of tmux session",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Ralph-uv tracks the opencode server PID and port in SQLite session entry",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Loop runner sends prompts via HTTP API (POST /session/:id/message) instead of shell injection",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Loop runner monitors completion via SSE events (GET /event) \u2014 waits for session.idle event",
-          "passes": false
+          "passes": true
         },
         {
           "description": "ralph-uv attach <task> launches opencode attach http://localhost:<port> for opencode loops",
-          "passes": false
+          "passes": true
         },
         {
           "description": "ralph-uv stop <task> calls POST /session/:id/abort for opencode loops",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Health check on startup: verify GET /global/health returns before sending prompts",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Opencode server process managed with proper lifecycle (start, health check, kill on completion)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "Key opencode server APIs: POST /session (create), POST /session/:id/message (sync prompt), POST /session/:id/prompt_async (async prompt), GET /event (SSE), POST /session/:id/abort (stop), GET /global/health (liveness). Default port 4096, auto-increments if busy. Server stores sessions in ~/.opencode/data/storage/. OPENCODE_SERVER_PASSWORD for auth."
+      "passes": true,
+      "notes": "Implemented in opencode_server.py module. Key design decisions: (1) OpencodeServer class manages subprocess lifecycle with start/stop/health_check. (2) Port auto-assigned from range 14096-14196. (3) CLI routes agent=opencode to _spawn_opencode_server() which starts serve, waits for health, registers in SQLite, then runs loop with HTTP API. (4) LoopRunner accepts optional opencode_server param, _run_agent_via_server() creates sessions and sends sync prompts. (5) Attach dispatches to `opencode attach http://localhost:<port>`. (6) Stop kills the server process group. (7) Session DB extended with session_type and server_port columns with migration support."
     },
     {
       "id": "US-005",
