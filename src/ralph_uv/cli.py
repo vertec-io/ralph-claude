@@ -17,6 +17,7 @@ from ralph_uv import __version__
 from ralph_uv.agents import VALID_AGENTS
 from ralph_uv.attach import attach
 from ralph_uv.loop import LoopConfig, LoopRunner
+from ralph_uv.opencode_server import OpencodeServer, OpencodeServerError
 from ralph_uv.session import (
     SessionDB,
     SessionInfo,
@@ -109,7 +110,7 @@ def _prompt_task_selection() -> Path | None:
         click.echo(f"  {i}) {_display_task_info(task)}")
 
     click.echo()
-    selection = click.prompt(f"Select task [1-{len(tasks)}]", type=int, default=1)
+    selection: int = click.prompt(f"Select task [1-{len(tasks)}]", type=int, default=1)
 
     idx = selection - 1
     if 0 <= idx < len(tasks):
@@ -178,7 +179,9 @@ def _resolve_agent(
         click.echo(f"  {i}) {agent}")
     click.echo()
 
-    selection = click.prompt(f"Select agent [1-{len(installed)}]", type=int, default=1)
+    selection: int = click.prompt(
+        f"Select agent [1-{len(installed)}]", type=int, default=1
+    )
     idx = selection - 1
     if 0 <= idx < len(installed):
         chosen = installed[idx]
@@ -305,6 +308,114 @@ def _spawn_in_tmux(
     return 0
 
 
+def _spawn_opencode_server(
+    task_dir: Path,
+    max_iterations: int,
+    agent: str,
+    base_branch: str | None,
+    yolo: bool,
+    verbose: bool,
+) -> int:
+    """Spawn ralph-uv with opencode serve mode.
+
+    Starts an opencode serve process, registers it in SQLite, then runs
+    the loop directly (sending prompts via HTTP API).
+    Returns 0 on success.
+    """
+    task_name = task_name_from_dir(task_dir)
+    project_root = task_dir.parent.parent
+
+    # Check for existing session
+    db = SessionDB()
+    existing = db.get(task_name)
+    if existing and existing.status == "running":
+        if existing.session_type == "opencode-server":
+            from ralph_uv.session import opencode_server_alive
+
+            if opencode_server_alive(existing.server_port):
+                click.echo(
+                    f"Error: Session already running for '{task_name}'. "
+                    f"Use 'ralph-uv stop {task_name}' first.",
+                    err=True,
+                )
+                return 1
+        elif tmux_session_exists(tmux_session_name(task_name)):
+            click.echo(
+                f"Error: Session already running for '{task_name}'. "
+                f"Use 'ralph-uv stop {task_name}' first.",
+                err=True,
+            )
+            return 1
+        # Stale entry — clean it up
+        db.update_status(task_name, "failed")
+
+    # Start opencode serve
+    server = OpencodeServer(
+        working_dir=project_root,
+        verbose=verbose,
+    )
+
+    try:
+        server.start()
+    except OpencodeServerError as e:
+        click.echo(f"Error starting opencode server: {e}", err=True)
+        return 1
+
+    # Wait for health check
+    click.echo(f"  Starting opencode serve on port {server.port}...")
+    try:
+        server.wait_until_healthy()
+    except OpencodeServerError as e:
+        click.echo(f"Error: opencode server failed health check: {e}", err=True)
+        server.stop()
+        return 1
+
+    click.echo(f"  OpenCode server healthy at {server.url}")
+
+    # Register in database
+    now = datetime.now().isoformat()
+    session = SessionInfo(
+        task_name=task_name,
+        task_dir=str(task_dir),
+        pid=server.pid or os.getpid(),
+        tmux_session="",  # Not used for opencode-server
+        agent=agent,
+        status="running",
+        started_at=now,
+        updated_at=now,
+        iteration=0,
+        current_story="",
+        max_iterations=max_iterations,
+        session_type="opencode-server",
+        server_port=server.port,
+    )
+    db.register(session)
+
+    click.echo(f"  Attach with: opencode attach {server.url}")
+
+    # Run the loop directly (in this process) using the opencode server
+    config = LoopConfig(
+        task_dir=task_dir,
+        max_iterations=max_iterations,
+        agent=agent,
+        agent_override=agent,
+        base_branch=base_branch,
+        yolo_mode=yolo,
+        verbose=verbose,
+    )
+    runner = LoopRunner(config, opencode_server=server)
+    rc = 1
+    try:
+        rc = runner.run()
+    finally:
+        server.stop()
+        # Update session status
+        final_status = "completed" if rc == 0 else "stopped"
+        db.update_status(task_name, final_status)
+
+    return rc
+
+
 # --- Click CLI ---
 
 
@@ -401,8 +512,19 @@ def run(
         )
         runner = LoopRunner(config)
         raise SystemExit(runner.run())
+    elif resolved_agent == "opencode":
+        # OpenCode agent: use opencode serve mode (HTTP API)
+        rc = _spawn_opencode_server(
+            task_dir=resolved_dir,
+            max_iterations=max_iterations,
+            agent=resolved_agent,
+            base_branch=base_branch,
+            yolo=yolo,
+            verbose=verbose,
+        )
+        raise SystemExit(rc)
     else:
-        # Not in tmux — spawn ourselves in a tmux session
+        # Claude agent: spawn ourselves in a tmux session
         rc = _spawn_in_tmux(
             task_dir=resolved_dir,
             max_iterations=max_iterations,

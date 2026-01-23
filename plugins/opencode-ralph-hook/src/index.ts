@@ -12,6 +12,8 @@
  * Signal file format (JSON):
  *   { "event": "idle", "timestamp": "<ISO 8601>", "session_id": "<id>" }
  *
+ * Log file: ~/.local/state/ralph-uv/plugin.log (always written for debugging)
+ *
  * The plugin is loaded by opencode via the .opencode/plugins/ directory
  * mechanism. It hooks into the session lifecycle to detect when the agent
  * finishes processing a request.
@@ -19,6 +21,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import * as os from "os";
 
 /** Signal payload written to the signal file on session idle. */
 interface IdleSignal {
@@ -31,6 +34,7 @@ interface IdleSignal {
 interface PluginConfig {
   signalFile: string;
   sessionId: string;
+  logFile: string;
 }
 
 /**
@@ -43,10 +47,27 @@ function getConfig(): PluginConfig | null {
     return null;
   }
 
+  const logDir = path.join(os.homedir(), ".local", "state", "ralph-uv");
+  fs.mkdirSync(logDir, { recursive: true });
+
   return {
     signalFile,
     sessionId: process.env.RALPH_SESSION_ID || "unknown",
+    logFile: path.join(logDir, "plugin.log"),
   };
+}
+
+/**
+ * Append a timestamped log entry to the plugin log file.
+ */
+function log(config: PluginConfig, level: string, message: string): void {
+  const timestamp = new Date().toISOString();
+  const entry = `${timestamp} ${level} [ralph-hook] ${message}\n`;
+  try {
+    fs.appendFileSync(config.logFile, entry);
+  } catch {
+    // Best-effort logging
+  }
 }
 
 /**
@@ -84,9 +105,9 @@ function writeSignal(config: PluginConfig): void {
  *
  * Plugin lifecycle:
  * 1. opencode loads the plugin on startup
- * 2. Plugin registers an event handler
- * 3. When agent finishes processing, opencode fires session.idle
- * 4. Plugin writes the signal file
+ * 2. Plugin registers an event handler and tracks the root session ID
+ * 3. Subagent idle events (e.g. @explore) are ignored
+ * 4. When the ROOT session goes idle, plugin writes the signal file
  * 5. ralph-uv detects the signal file and terminates the process
  */
 export const RalphHook = async (ctx: any) => {
@@ -97,25 +118,63 @@ export const RalphHook = async (ctx: any) => {
     return {};
   }
 
-  if (process.env.RALPH_DEBUG) {
-    console.error("[ralph-hook] Plugin loaded, watching for session.idle");
-    console.error("[ralph-hook] Signal file:", config.signalFile);
-  }
+  log(config, "INFO", `Plugin loaded, signal_file=${config.signalFile}`);
+
+  // Track the root session ID (the first session created without a parentID).
+  // Subagents (e.g. @explore) have a parentID and their idle events must be
+  // ignored — only the root session going idle means the task is complete.
+  let rootSessionId: string | null = null;
 
   return {
     event: async ({ event }: { event: { type: string; properties?: any } }) => {
+      // Log session lifecycle events for debugging
+      if (
+        event.type === "session.idle" ||
+        event.type === "session.status" ||
+        event.type === "session.error" ||
+        event.type === "session.created"
+      ) {
+        const props = event.properties
+          ? JSON.stringify(event.properties)
+          : "";
+        log(config, "INFO", `event: ${event.type} ${props}`);
+      }
+
+      // Track root session: first session.created without a parentID
+      if (event.type === "session.created" && event.properties?.info) {
+        const info = event.properties.info;
+        if (!info.parentID && !rootSessionId) {
+          rootSessionId = info.id;
+          log(config, "INFO", `Root session identified: ${rootSessionId}`);
+        }
+      }
+
       if (event.type === "session.idle") {
+        const idleSessionId = event.properties?.sessionID;
+
+        // Only signal when the ROOT session goes idle, not subagents
+        if (rootSessionId && idleSessionId !== rootSessionId) {
+          log(
+            config,
+            "INFO",
+            `Ignoring idle from subagent session ${idleSessionId} (root=${rootSessionId})`,
+          );
+          return;
+        }
+
         try {
           writeSignal(config);
-          if (process.env.RALPH_DEBUG) {
-            console.error("[ralph-hook] Signal written:", config.signalFile);
-          }
+          log(
+            config,
+            "INFO",
+            `Signal written to ${config.signalFile} (root session ${idleSessionId} is idle)`,
+          );
         } catch (err) {
-          // Silently fail - don't crash opencode if signal write fails
-          // ralph-uv has a fallback (process exit detection)
-          if (process.env.RALPH_DEBUG) {
-            console.error("[ralph-hook] Failed to write signal:", err);
-          }
+          log(
+            config,
+            "ERROR",
+            `Failed to write signal: ${err}`,
+          );
         }
       }
     },

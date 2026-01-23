@@ -7,6 +7,7 @@ OpenCode) with agent-specific completion detection and failover logic.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -17,6 +18,19 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+
+def _get_agent_logger() -> logging.Logger:
+    """Get or create the ralph-uv agent file logger."""
+    logger = logging.getLogger("ralph_uv.agents")
+    if not logger.handlers:
+        log_dir = Path.home() / ".local" / "state" / "ralph-uv"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_dir / "agent.log")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+    return logger
 
 
 COMPLETION_SIGNAL = "<promise>COMPLETE</promise>"
@@ -450,15 +464,22 @@ class OpencodeAgent(Agent):
             if process.stdin is not None:
                 process.stdin.close()
 
-            # Wait for completion, respecting interactive_mode
+            # Wait for signal file (clean completion) or process exit (crash).
+            # session.idle fires ONLY at true completion — no debounce needed.
+            log = _get_agent_logger()
+            signal_received = False
+
             while True:
                 if process.poll() is not None:
                     break
 
                 if not config.interactive_mode:
                     if self._check_signal_file():
-                        # Signal received - agent finished processing
-                        # Terminate the process gracefully
+                        signal_received = True
+                        log.info(
+                            "run: signal file detected, terminating pid=%d",
+                            process.pid,
+                        )
                         process.terminate()
                         try:
                             process.wait(timeout=10)
@@ -471,7 +492,13 @@ class OpencodeAgent(Agent):
                     # writes to prevent stale signals on mode exit
                     self._discard_signal_file()
 
-                time.sleep(0.2)
+                time.sleep(0.5)
+
+            if not signal_received and process.returncode is not None:
+                log.warning(
+                    "run: process exited without signal, exit_code=%d",
+                    process.returncode,
+                )
 
             result = self.get_output(process)
             result.duration_seconds = time.time() - start_time
@@ -538,14 +565,16 @@ class OpencodeAgent(Agent):
 
         Uses `opencode run "prompt"` which runs non-interactively and exits.
         The prompt is passed as a positional argument.
+
+        Always enables DEBUG logging to ~/.local/share/opencode/log/.
         """
-        cmd = ["opencode", "run"]
+        cmd = ["opencode", "run", "--log-level", "DEBUG"]
 
         if config.model:
             cmd.extend(["--model", config.model])
 
         if config.verbose:
-            cmd.extend(["--print-logs", "--log-level", "DEBUG"])
+            cmd.append("--print-logs")
 
         # Prompt goes as positional arg for `opencode run`
         cmd.append(config.prompt)
@@ -558,14 +587,17 @@ class OpencodeAgent(Agent):
         Uses `opencode --prompt "prompt"` which starts the TUI with
         the prompt pre-filled. The TUI inherits the terminal directly
         (from the tmux pane).
+
+        Always enables DEBUG logging to ~/.local/share/opencode/log/ so
+        crashes can be diagnosed from the log files.
         """
-        cmd = ["opencode", "--prompt", config.prompt]
+        cmd = ["opencode", "--log-level", "DEBUG", "--prompt", config.prompt]
 
         if config.model:
             cmd.extend(["--model", config.model])
 
         if config.verbose:
-            cmd.extend(["--print-logs", "--log-level", "DEBUG"])
+            cmd.append("--print-logs")
 
         return cmd
 
@@ -598,11 +630,24 @@ class OpencodeAgent(Agent):
         The opencode TUI inherits the terminal (stdin/stdout/stderr) directly,
         so the user sees the TUI when they attach to the tmux session.
         Completion is detected via the signal file (session.idle plugin event).
-        When the signal fires, we terminate the process.
+
+        The session.idle event fires ONLY when the full session loop exits —
+        subagent completions are handled internally and do NOT trigger idle.
+        When the signal fires, we terminate the TUI process immediately.
+
+        If the process exits WITHOUT the signal file, it's a crash — we mark
+        it as failed so the loop runner can handle it appropriately.
         """
+        log = _get_agent_logger()
+
         # Deploy plugin and set up signal file
         self._deploy_plugin(config.working_dir)
         self._setup_signal_file()
+        log.info(
+            "run_in_terminal: starting opencode TUI, signal_file=%s, cwd=%s",
+            self._signal_file,
+            config.working_dir,
+        )
 
         start_time = time.time()
         try:
@@ -618,36 +663,72 @@ class OpencodeAgent(Agent):
                 env=env,
                 cwd=str(config.working_dir),
             )
+            log.info("run_in_terminal: opencode started, pid=%d", process.pid)
 
-            # Poll for signal file (completion) or process exit
+            # Wait for either: signal file (clean completion) or process exit (crash)
+            signal_received = False
             while process.poll() is None:
                 if self._check_signal_file():
-                    # Agent went idle — iteration complete
+                    # session.idle fired — agent is truly done
+                    signal_received = True
+                    elapsed = time.time() - start_time
+                    log.info(
+                        "run_in_terminal: signal file detected after %.1fs, "
+                        "terminating pid=%d",
+                        elapsed,
+                        process.pid,
+                    )
                     process.terminate()
                     try:
                         process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
+                        log.warning("run_in_terminal: SIGTERM timeout, sending SIGKILL")
                         process.kill()
                         process.wait()
                     break
                 time.sleep(0.5)
 
             exit_code = process.returncode or 0
+            elapsed = time.time() - start_time
 
-            failed = self._detect_failure(exit_code, "", "")
-            error_message = ""
-            if failed:
-                error_message = self._extract_error(exit_code, "", "")
-
-            return AgentResult(
-                output="",  # TUI output goes to terminal, not captured
-                exit_code=exit_code,
-                duration_seconds=time.time() - start_time,
-                completed=False,  # Let the loop check PRD for story completion
-                failed=failed,
-                error_message=error_message,
-            )
+            # Determine if this was a clean completion or a crash
+            if signal_received:
+                # Clean completion: signal file was written, we terminated
+                log.info(
+                    "run_in_terminal: clean completion, exit_code=%d, duration=%.1fs",
+                    exit_code,
+                    elapsed,
+                )
+                return AgentResult(
+                    output="",
+                    exit_code=exit_code,
+                    duration_seconds=elapsed,
+                    completed=False,  # Let loop check PRD
+                    failed=False,
+                    error_message="",
+                )
+            else:
+                # Process exited without signal — this is a crash
+                log.error(
+                    "run_in_terminal: process exited WITHOUT signal file! "
+                    "exit_code=%d, duration=%.1fs — treating as crash",
+                    exit_code,
+                    elapsed,
+                )
+                return AgentResult(
+                    output="",
+                    exit_code=exit_code,
+                    duration_seconds=elapsed,
+                    completed=False,
+                    failed=True,
+                    error_message=(
+                        f"opencode TUI exited unexpectedly "
+                        f"(exit_code={exit_code}, duration={elapsed:.1f}s). "
+                        f"No idle signal received — likely a crash."
+                    ),
+                )
         except OSError as e:
+            log.error("run_in_terminal: failed to start: %s", e)
             return AgentResult(
                 output="",
                 exit_code=1,

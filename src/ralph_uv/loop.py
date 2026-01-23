@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ralph_uv.agents import (
+    COMPLETION_SIGNAL,
     VALID_AGENTS,
     AgentConfig,
     AgentResult,
@@ -30,7 +31,7 @@ from ralph_uv.branch import (
     handle_completion,
     setup_branch,
 )
-
+from ralph_uv.opencode_server import OpencodeServer, OpencodeServerError
 from ralph_uv.prompt import (
     PromptContext,
     build_prompt,
@@ -83,7 +84,11 @@ class ShutdownRequested(Exception):
 class LoopRunner:
     """Runs the core Ralph iteration loop."""
 
-    def __init__(self, config: LoopConfig) -> None:
+    def __init__(
+        self,
+        config: LoopConfig,
+        opencode_server: OpencodeServer | None = None,
+    ) -> None:
         self.config = config
         self.failures = FailureTracker()
         self.current_iteration = 0
@@ -97,6 +102,8 @@ class LoopRunner:
         self._rpc_server: RpcServer | None = None
         self._rpc_thread: threading.Thread | None = None
         self._rpc_loop: asyncio.AbstractEventLoop | None = None
+        self._opencode_server = opencode_server
+        self._opencode_session_id: str | None = None
 
     def run(self) -> int:
         """Run the loop. Returns exit code (0 = complete, 1 = stopped/failed)."""
@@ -427,20 +434,26 @@ class LoopRunner:
         return resolve_agent(prd, story, self.config.agent_override)
 
     def _run_agent(self, agent_name: str, story: dict[str, Any]) -> AgentResult:
-        """Run the agent directly in the terminal (tmux pane).
+        """Run the agent for one iteration.
 
-        The agent inherits the terminal from the tmux session.
-        For opencode: TUI takes over the terminal, user can interact via tmux attach.
-        For claude: pipes stdin for prompt, stdout visible in tmux pane.
+        Two modes:
+        1. OpenCode server mode: Send prompts via HTTP API, monitor SSE for completion.
+        2. Terminal mode (tmux): Agent inherits the terminal from the tmux session.
         """
-        agent = create_agent(agent_name)
         prompt = self._build_prompt(agent_name)
-        working_dir = self.config.task_dir.parent.parent  # Project root
 
         # Check for injected prompt from TUI
         if self._rpc_server is not None and self._rpc_server.state.injected_prompt:
             prompt = self._rpc_server.state.injected_prompt + "\n\n" + prompt
             self._rpc_server.state.injected_prompt = ""
+
+        # OpenCode server mode: use HTTP API
+        if self._opencode_server is not None and agent_name == "opencode":
+            return self._run_agent_via_server(prompt)
+
+        # Terminal mode: agent inherits the terminal (tmux pane)
+        agent = create_agent(agent_name)
+        working_dir = self.config.task_dir.parent.parent  # Project root
 
         agent_config = AgentConfig(
             prompt=prompt,
@@ -457,6 +470,51 @@ class LoopRunner:
                 self._rpc_append_output(line)
 
         return result
+
+    def _run_agent_via_server(self, prompt: str) -> AgentResult:
+        """Run an iteration via the opencode HTTP server.
+
+        Creates a session (or reuses existing), sends the prompt,
+        and waits for the session to become idle.
+        """
+        assert self._opencode_server is not None
+        start_time = time.time()
+
+        try:
+            # Create a new session for each iteration
+            session = self._opencode_server.create_session()
+            self._opencode_session_id = session.session_id
+            print(f"  OpenCode session: {session.session_id}")
+
+            # Send prompt synchronously (blocks until agent responds)
+            # POST /session/:id/message is synchronous — it returns when done
+            response = self._opencode_server.send_prompt(session.session_id, prompt)
+
+            elapsed = time.time() - start_time
+
+            # Check for completion signal in the response
+            output = str(response) if response else ""
+            completed = COMPLETION_SIGNAL in output
+
+            return AgentResult(
+                output=output,
+                exit_code=0,
+                duration_seconds=elapsed,
+                completed=completed,
+                failed=False,
+                error_message="",
+            )
+
+        except OpencodeServerError as e:
+            elapsed = time.time() - start_time
+            return AgentResult(
+                output="",
+                exit_code=1,
+                duration_seconds=elapsed,
+                completed=False,
+                failed=True,
+                error_message=f"OpenCode server error: {e}",
+            )
 
     def _build_prompt(self, agent_name: str) -> str:
         """Build the prompt for the agent using the prompt module."""

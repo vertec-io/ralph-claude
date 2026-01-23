@@ -47,6 +47,10 @@ class SessionInfo:
     iteration: int = 0
     current_story: str = ""
     max_iterations: int = 50
+    session_type: str = "tmux"  # "tmux" or "opencode-server"
+    server_port: int | None = (
+        None  # Port for opencode serve (when session_type=opencode-server)
+    )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -83,9 +87,27 @@ class SessionDB:
                     updated_at TEXT NOT NULL,
                     iteration INTEGER NOT NULL DEFAULT 0,
                     current_story TEXT NOT NULL DEFAULT '',
-                    max_iterations INTEGER NOT NULL DEFAULT 50
+                    max_iterations INTEGER NOT NULL DEFAULT 50,
+                    session_type TEXT NOT NULL DEFAULT 'tmux',
+                    server_port INTEGER
                 )
             """)
+            # Migrate existing databases: add new columns if missing
+            self._migrate_schema(conn)
+
+    def _migrate_schema(self, conn: sqlite3.Connection) -> None:
+        """Add missing columns for opencode-server mode."""
+        cursor = conn.cursor()
+        columns = [row[1] for row in cursor.execute("PRAGMA table_info(sessions)")]
+
+        if "session_type" not in columns:
+            conn.execute(
+                "ALTER TABLE sessions ADD COLUMN "
+                "session_type TEXT NOT NULL DEFAULT 'tmux'"
+            )
+
+        if "server_port" not in columns:
+            conn.execute("ALTER TABLE sessions ADD COLUMN server_port INTEGER")
 
     def _connect(self) -> sqlite3.Connection:
         """Create a database connection."""
@@ -100,8 +122,9 @@ class SessionDB:
                 """
                 INSERT OR REPLACE INTO sessions
                 (task_name, task_dir, pid, tmux_session, agent, status,
-                 started_at, updated_at, iteration, current_story, max_iterations)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 started_at, updated_at, iteration, current_story, max_iterations,
+                 session_type, server_port)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.task_name,
@@ -115,6 +138,8 @@ class SessionDB:
                     session.iteration,
                     session.current_story,
                     session.max_iterations,
+                    session.session_type,
+                    session.server_port,
                 ),
             )
 
@@ -159,17 +184,23 @@ class SessionDB:
             return [self._row_to_session(row) for row in rows]
 
     def list_running(self) -> list[SessionInfo]:
-        """List only running sessions (validates against actual tmux state)."""
+        """List only running sessions (validates against actual state)."""
         sessions = self.list_all()
         running: list[SessionInfo] = []
         for s in sessions:
             if s.status == "running":
-                # Validate tmux session still exists
-                if tmux_session_exists(s.tmux_session):
-                    running.append(s)
+                if s.session_type == "opencode-server":
+                    # Validate opencode server is still alive
+                    if opencode_server_alive(s.server_port):
+                        running.append(s)
+                    else:
+                        self.update_status(s.task_name, "failed")
                 else:
-                    # Stale entry - mark as failed
-                    self.update_status(s.task_name, "failed")
+                    # Validate tmux session still exists
+                    if tmux_session_exists(s.tmux_session):
+                        running.append(s)
+                    else:
+                        self.update_status(s.task_name, "failed")
         return running
 
     def remove(self, task_name: str) -> None:
@@ -191,6 +222,8 @@ class SessionDB:
             iteration=row["iteration"],
             current_story=row["current_story"],
             max_iterations=row["max_iterations"],
+            session_type=row["session_type"],
+            server_port=row["server_port"],
         )
 
 
@@ -319,6 +352,29 @@ def tmux_attach_session(session_name: str) -> int:
     """
     result = subprocess.run(["tmux", "attach-session", "-t", session_name])
     return result.returncode
+
+
+# --- OpenCode Server Operations ---
+
+
+def opencode_server_alive(port: int | None) -> bool:
+    """Check if an opencode server is alive by hitting its health endpoint.
+
+    Args:
+        port: The port the opencode serve is listening on.
+
+    Returns:
+        True if the health endpoint responds with 200.
+    """
+    if port is None:
+        return False
+    try:
+        from urllib.request import urlopen
+
+        with urlopen(f"http://127.0.0.1:{port}/global/health", timeout=2) as resp:
+            return bool(resp.status == 200)
+    except Exception:
+        return False
 
 
 # --- Signal File Operations ---
@@ -463,6 +519,10 @@ def start_session(
 def stop_session(task_name: str, db: SessionDB | None = None) -> bool:
     """Send stop signal to a running session.
 
+    For opencode-server sessions, aborts the current session via HTTP API
+    and sends SIGTERM to the server process.
+    For tmux sessions, writes a signal file and sends SIGINT.
+
     Returns True if the signal was sent successfully.
     """
     if db is None:
@@ -480,7 +540,14 @@ def stop_session(task_name: str, db: SessionDB | None = None) -> bool:
         )
         return False
 
-    # Write stop signal file
+    if session.session_type == "opencode-server":
+        # For opencode-server: kill the server process
+        _kill_opencode_server(session.pid)
+        db.update_status(task_name, "stopped")
+        print(f"OpenCode server stopped for session '{task_name}'")
+        return True
+
+    # For tmux sessions: write stop signal file
     write_signal(task_name, "stop")
 
     # Also send SIGINT to the process as a backup
@@ -523,7 +590,7 @@ def checkpoint_session(task_name: str, db: SessionDB | None = None) -> bool:
 def cleanup_session(task_name: str, status: str, db: SessionDB | None = None) -> None:
     """Clean up a session on completion or crash.
 
-    Updates the database status and optionally kills the tmux session.
+    Updates the database status and kills the session (tmux or opencode server).
     """
     if db is None:
         db = SessionDB()
@@ -532,15 +599,35 @@ def cleanup_session(task_name: str, status: str, db: SessionDB | None = None) ->
     if session is None:
         return
 
-    # Kill tmux session if it's still running
-    if tmux_session_exists(session.tmux_session):
-        tmux_kill_session(session.tmux_session)
+    if session.session_type == "opencode-server":
+        # Kill the opencode serve process
+        _kill_opencode_server(session.pid)
+    else:
+        # Kill tmux session if it's still running
+        if tmux_session_exists(session.tmux_session):
+            tmux_kill_session(session.tmux_session)
 
     # Update status in database
     db.update_status(task_name, status)
 
     # Clear any pending signals
     clear_signal(task_name)
+
+
+def _kill_opencode_server(pid: int) -> None:
+    """Kill an opencode serve process by PID."""
+    import os as _os
+    import signal as _signal
+
+    try:
+        # Kill the process group (opencode serve + children)
+        _os.killpg(_os.getpgid(pid), _signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        try:
+            # Fallback: kill just the process
+            _os.kill(pid, _signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
 
 
 def get_status(as_json: bool = False, db: SessionDB | None = None) -> str:
@@ -553,11 +640,16 @@ def get_status(as_json: bool = False, db: SessionDB | None = None) -> str:
 
     sessions = db.list_all()
 
-    # Validate running sessions against tmux
+    # Validate running sessions against actual state
     for s in sessions:
-        if s.status == "running" and not tmux_session_exists(s.tmux_session):
-            db.update_status(s.task_name, "failed")
-            s.status = "failed"
+        if s.status == "running":
+            if s.session_type == "opencode-server":
+                if not opencode_server_alive(s.server_port):
+                    db.update_status(s.task_name, "failed")
+                    s.status = "failed"
+            elif not tmux_session_exists(s.tmux_session):
+                db.update_status(s.task_name, "failed")
+                s.status = "failed"
 
     if as_json:
         return json.dumps([s.to_dict() for s in sessions], indent=2)
