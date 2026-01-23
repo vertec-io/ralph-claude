@@ -52,6 +52,10 @@ Started: 2026-01-23
 - InteractiveController sends Esc key on enable, suppresses completion until disable
 - Attach command uses tty.setcbreak() for hotkey capture (not full raw mode)
 - Terminal mode MUST be restored in finally blocks to avoid corrupted terminal state
+- ralph-tui wizard module at ralph-tui/src/wizard.rs: WizardState, WizardStep, TaskInfo, render_wizard(), handle_wizard_input()
+- Wizard uses InputMode::Wizard variant and wizard_state: Option<WizardState> in App struct
+- Wizard launches ralph-uv run as detached subprocess (stdin/stdout/stderr null)
+- Hotkey 'w' opens wizard in both standalone and attach modes
 ---
 
 ## 2026-01-23 - US-001: Python Package Scaffold
@@ -277,4 +281,36 @@ Started: 2026-01-23
   - TYPE_CHECKING import guard avoids circular imports between agents.py and interactive.py
   - Agent._build_command_list() provides a hook for subclasses that PTY execution can use
   - InteractiveState._suppress_completion prevents race between mode toggle and stale signals
+---
+
+## 2026-01-23 - US-009: TUI Loop Start Wizard
+- Created ralph-tui/src/wizard.rs with full wizard implementation:
+  - WizardStep enum (SelectTask, ConfigureBranch, SetIterations, SelectAgent, Confirm)
+  - WizardState struct tracking all configuration being built
+  - TaskInfo struct for displaying task metadata in selection
+  - discover_tasks() scans tasks/ directory for prd.json files
+  - get_current_branch() reads current git branch for default
+  - render_wizard() renders modal overlay with step-specific content
+  - handle_wizard_input() processes keyboard input per-step
+  - Launch spawns `ralph-uv run` as detached subprocess
+- Updated ralph-tui/src/main.rs:
+  - Added `mod wizard;` module declaration
+  - Added `Wizard` variant to InputMode enum
+  - Added `wizard_state: Option<wizard::WizardState>` to App struct
+  - Added 'w' hotkey in Ralph mode (standalone) to open wizard
+  - Added 'w' hotkey in attach mode normal key handling
+  - Added wizard input handling in both run() and run_attach_mode() event loops
+  - Added wizard modal rendering in both draw closures
+  - Updated footer bar keybindings text to show 'w: New Loop'
+- Both `cargo check` and `cargo build` pass with no new warnings
+- `uv run mypy src/ralph_uv/` passes (Python side unchanged)
+- Files changed: ralph-tui/src/wizard.rs (new), ralph-tui/src/main.rs, prd.json, progress.txt
+- **Learnings for future iterations:**
+  - ratatui `Clear` widget is used to clear area before rendering modal overlays
+  - InputMode enum pattern works well for modal state - add new variant and handle in event loop
+  - Wizard module can be kept separate from main.rs to avoid bloating the already large file
+  - Task discovery reuses the same patterns as find_active_tasks() in main.rs but returns richer data
+  - Detached subprocess launch uses Stdio::null() for all three handles
+  - The wizard integrates with ralph-uv session management: ralph-uv registers in SQLite on start
+  - Agent default can be read from prd.json's "agent" field during wizard step navigation
 ---

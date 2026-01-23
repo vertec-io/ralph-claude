@@ -1,4 +1,5 @@
 mod theme;
+mod wizard;
 
 use theme::{
     get_pulse_color, get_spinner_frame, AMBER_WARNING, BG_PRIMARY, BG_SECONDARY, BG_TERTIARY,
@@ -11,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use rusqlite::Connection;
 
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
@@ -293,6 +296,7 @@ enum InputMode {
     PromptInput,    // User is typing a message to inject to the agent
     NotesEdit,      // User is editing notes for the current in-progress story
     ActivitySearch, // User is searching activities
+    Wizard,         // Loop start wizard is open
 }
 
 /// Recent activity from Claude Code (tool calls, actions)
@@ -446,6 +450,8 @@ struct PtyState {
     last_activity_parse_pos: usize,
     /// Raw text lines for attach mode (bypass VT100 parsing)
     raw_lines: Vec<String>,
+    /// Last time output was received from the agent (for idle timeout detection)
+    last_output_time: Instant,
 }
 
 impl PtyState {
@@ -457,11 +463,13 @@ impl PtyState {
             activities: Vec::new(),
             last_activity_parse_pos: 0,
             raw_lines: Vec::new(),
+            last_output_time: Instant::now(),
         }
     }
 
     /// Append output and trim to last 10KB to prevent memory issues
     fn append_output(&mut self, data: &[u8]) {
+        self.last_output_time = Instant::now();
         if let Ok(s) = std::str::from_utf8(data) {
             self.recent_output.push_str(s);
             // Keep only last 10KB to limit memory
@@ -623,6 +631,12 @@ struct App {
     tmux_session: Option<String>,
     // Yolo mode - permissive mode that skips all agent permission prompts
     yolo_mode: bool,
+    // Agent to use (claude or opencode)
+    agent: String,
+    // Idle timeout in seconds for non-interactive agents (0 = disabled)
+    idle_timeout_secs: u64,
+    // Scroll offset for agent output panel (0 = bottom/latest, >0 = lines scrolled up)
+    pty_scroll_offset: usize,
     // Activity panel scroll offset (for scrolling through activity history)
     activity_scroll_offset: usize,
     // Whether user has manually scrolled the activity panel (disables auto-scroll)
@@ -658,6 +672,8 @@ struct App {
     activity_search_matches: Vec<usize>,
     // Current match index (for n/N navigation)
     activity_search_match_index: usize,
+    // Wizard state (for launching new loops)
+    wizard_state: Option<wizard::WizardState>,
 }
 
 impl App {
@@ -698,6 +714,9 @@ impl App {
             run_mode: config.run_mode,
             tmux_session: config.tmux_session.clone(),
             yolo_mode: config.yolo_mode,
+            agent: config.agent,
+            idle_timeout_secs: config.idle_timeout_secs,
+            pty_scroll_offset: 0,
             activity_scroll_offset: 0,
             activity_user_scrolled: false,
             activity_panel_focused: false,
@@ -716,6 +735,7 @@ impl App {
             activity_search_cursor: 0,
             activity_search_matches: Vec::new(),
             activity_search_match_index: 0,
+            wizard_state: None,
         }
     }
 
@@ -728,12 +748,9 @@ impl App {
         }
     }
 
-    /// Get the agent name from PRD or default
+    /// Get the agent name
     fn agent_name(&self) -> &str {
-        self.prd
-            .as_ref()
-            .map(|p| p.agent.as_str())
-            .unwrap_or("claude-code")
+        &self.agent
     }
 
     /// Reload PRD from disk if flagged
@@ -1412,18 +1429,27 @@ fn print_usage() {
     eprintln!("Options:");
     eprintln!("  -a, --attach           Attach to running ralph session (view only)");
     eprintln!("  -i, --iterations <N>   Maximum iterations to run (default: 10)");
+    eprintln!("  --agent <NAME>         Agent to use: claude, opencode (default: claude)");
+    eprintln!("  --timeout <SECS>       Idle timeout for non-interactive agents (default: 300)");
     eprintln!("  --rotate-at <N>        Rotate progress file at N lines (default: 300)");
     eprintln!("  -y, --yes              Skip confirmation prompts");
     eprintln!("  --yolo                 Permissive mode: skip all agent permission prompts");
     eprintln!("  -h, --help             Show this help message");
     eprintln!("  -V, --version          Show version");
     eprintln!();
+    eprintln!("Agent Selection:");
+    eprintln!(
+        "  Agent is selected with precedence: --agent > RALPH_AGENT env > prd.json > default"
+    );
+    eprintln!("  To set in prd.json, add: \"agent\": \"opencode\"");
+    eprintln!();
     eprintln!("Examples:");
-    eprintln!("  ralph-tui                          # Interactive task selection");
-    eprintln!("  ralph-tui tasks/my-feature         # Run specific task");
-    eprintln!("  ralph-tui tasks/my-feature -i 5    # Run with 5 iterations");
-    eprintln!("  ralph-tui tasks/my-feature --yolo  # Run with permissive mode");
-    eprintln!("  ralph-tui --attach                 # Attach to running session");
+    eprintln!("  ralph-tui                              # Interactive task selection");
+    eprintln!("  ralph-tui tasks/my-feature             # Run specific task");
+    eprintln!("  ralph-tui tasks/my-feature -i 5        # Run with 5 iterations");
+    eprintln!("  ralph-tui tasks/my-feature --yolo      # Run with permissive mode");
+    eprintln!("  ralph-tui --agent opencode             # Use OpenCode instead of Claude");
+    eprintln!("  ralph-tui --attach                     # Attach to running session");
 }
 
 /// Run mode for the TUI
@@ -1435,6 +1461,9 @@ enum RunMode {
     Attach,
 }
 
+/// Valid agents
+const VALID_AGENTS: [&str; 2] = ["claude", "opencode"];
+
 /// Configuration from CLI arguments
 struct CliConfig {
     task_dir: PathBuf,
@@ -1445,6 +1474,10 @@ struct CliConfig {
     tmux_session: Option<String>,
     /// Yolo mode - permissive mode that skips all agent permission prompts
     yolo_mode: bool,
+    /// Agent to use (claude or opencode)
+    agent: String,
+    /// Idle timeout in seconds for non-interactive agents (0 = disabled, default 300)
+    idle_timeout_secs: u64,
 }
 
 /// Find active tasks (directories with prd.json, excluding archived)
@@ -1475,6 +1508,116 @@ fn find_active_tasks() -> Vec<PathBuf> {
 
     tasks.sort();
     tasks
+}
+
+/// A running Ralph session from the global registry
+#[derive(Debug, Clone)]
+struct RalphSession {
+    session_name: String,
+    task_dir: PathBuf,
+    agent: String,
+    started_at: String,
+    current_iteration: u32,
+    max_iterations: u32,
+    completed_stories: u32,
+    total_stories: u32,
+    status: String,
+}
+
+/// Get the path to the Ralph sessions database
+fn get_sessions_db_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("ralph").join("sessions.db"))
+}
+
+/// Get all running sessions from SQLite database
+fn get_running_sessions() -> Vec<RalphSession> {
+    let db_path = match get_sessions_db_path() {
+        Some(p) if p.exists() => p,
+        _ => return Vec::new(),
+    };
+
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT session_name, task_dir, agent, started_at, current_iteration, 
+                max_iterations, completed_stories, total_stories, status 
+         FROM sessions WHERE status = 'running' ORDER BY started_at DESC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    let sessions: Vec<RalphSession> = stmt
+        .query_map([], |row| {
+            Ok(RalphSession {
+                session_name: row.get(0)?,
+                task_dir: PathBuf::from(row.get::<_, String>(1)?),
+                agent: row.get(2)?,
+                started_at: row.get(3)?,
+                current_iteration: row.get(4)?,
+                max_iterations: row.get(5)?,
+                completed_stories: row.get(6)?,
+                total_stories: row.get(7)?,
+                status: row.get(8)?,
+            })
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default();
+
+    // Filter out sessions where tmux session no longer exists
+    sessions
+        .into_iter()
+        .filter(|s| {
+            std::process::Command::new("tmux")
+                .args(["has-session", "-t", &s.session_name])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Get all sessions (running and recent) from SQLite database  
+fn get_all_sessions() -> Vec<RalphSession> {
+    let db_path = match get_sessions_db_path() {
+        Some(p) if p.exists() => p,
+        _ => return Vec::new(),
+    };
+
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT session_name, task_dir, agent, started_at, current_iteration, 
+                max_iterations, completed_stories, total_stories, status 
+         FROM sessions ORDER BY started_at DESC LIMIT 20",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+
+    stmt.query_map([], |row| {
+        Ok(RalphSession {
+            session_name: row.get(0)?,
+            task_dir: PathBuf::from(row.get::<_, String>(1)?),
+            agent: row.get(2)?,
+            started_at: row.get(3)?,
+            current_iteration: row.get(4)?,
+            max_iterations: row.get(5)?,
+            completed_stories: row.get(6)?,
+            total_stories: row.get(7)?,
+            status: row.get(8)?,
+        })
+    })
+    .ok()
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
 }
 
 /// Get task info for display
@@ -1527,24 +1670,54 @@ fn get_task_info(task_dir: &PathBuf) -> (String, usize, usize, String) {
 
 /// Display task selection prompt and return selected task
 fn prompt_task_selection(tasks: &[PathBuf]) -> io::Result<PathBuf> {
+    // Get running sessions from global registry
+    let running_sessions = get_running_sessions();
+
     println!();
     println!("╔═══════════════════════════════════════════════════════════════╗");
     println!("║  Ralph TUI - Select a Task                                    ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
+
+    // Show running sessions first if any
+    if !running_sessions.is_empty() {
+        println!();
+        println!("Running sessions (attach with 'a'):");
+        println!();
+        for (i, session) in running_sessions.iter().enumerate() {
+            let task_name = session.task_dir.display().to_string();
+            println!(
+                "  a{}) {:35} [{}/{}] iter {}/{} [{}]",
+                i + 1,
+                task_name,
+                session.completed_stories,
+                session.total_stories,
+                session.current_iteration,
+                session.max_iterations,
+                session.agent
+            );
+        }
+    }
+
     println!();
-    println!("Active tasks:");
+    println!("Active tasks (start new):");
     println!();
 
     for (i, task) in tasks.iter().enumerate() {
         let (desc, completed, total, prd_type) = get_task_info(task);
         let task_name = task.display().to_string();
+
+        // Check if this task has a running session
+        let is_running = running_sessions.iter().any(|s| s.task_dir == *task);
+        let running_marker = if is_running { " [RUNNING]" } else { "" };
+
         println!(
-            "  {}) {:35} [{}/{}] ({})",
+            "  {}) {:35} [{}/{}] ({}){}",
             i + 1,
             task_name,
             completed,
             total,
-            prd_type
+            prd_type,
+            running_marker
         );
         if !desc.is_empty() {
             println!("     {}", desc);
@@ -1552,14 +1725,44 @@ fn prompt_task_selection(tasks: &[PathBuf]) -> io::Result<PathBuf> {
     }
 
     println!();
-    print!("Select task [1-{}]: ", tasks.len());
+    if !running_sessions.is_empty() {
+        print!(
+            "Select task [1-{}] or attach [a1-a{}]: ",
+            tasks.len(),
+            running_sessions.len()
+        );
+    } else {
+        print!("Select task [1-{}]: ", tasks.len());
+    }
     io::stdout().flush()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    // Check if attaching to running session
+    if input.starts_with('a') || input.starts_with('A') {
+        let num_str = &input[1..];
+        if let Ok(num) = num_str.parse::<usize>() {
+            if num >= 1 && num <= running_sessions.len() {
+                let session = &running_sessions[num - 1];
+                println!();
+                println!(
+                    "Attaching to session: {} ({})",
+                    session.session_name,
+                    session.task_dir.display()
+                );
+                println!();
+                return Ok(session.task_dir.clone());
+            }
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid session selection",
+        ));
+    }
 
     let selection: usize = input
-        .trim()
         .parse()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid selection"))?;
 
@@ -1829,6 +2032,8 @@ fn parse_args() -> io::Result<CliConfig> {
     let mut skip_prompts = false;
     let mut run_mode = RunMode::Standalone;
     let mut yolo_mode = false;
+    let mut agent: Option<String> = None;
+    let mut idle_timeout_secs: Option<u64> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -1847,6 +2052,44 @@ fn parse_args() -> io::Result<CliConfig> {
             i += 1;
         } else if arg == "--yolo" {
             yolo_mode = true;
+            i += 1;
+        } else if arg == "--agent" {
+            i += 1;
+            if i >= args.len() {
+                print_usage();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Missing value for --agent",
+                ));
+            }
+            let agent_value = &args[i];
+            if !VALID_AGENTS.contains(&agent_value.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "Invalid agent '{}'. Valid agents: {}",
+                        agent_value,
+                        VALID_AGENTS.join(", ")
+                    ),
+                ));
+            }
+            agent = Some(agent_value.clone());
+            i += 1;
+        } else if arg == "--timeout" {
+            i += 1;
+            if i >= args.len() {
+                print_usage();
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Missing value for --timeout",
+                ));
+            }
+            idle_timeout_secs = Some(args[i].parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Invalid timeout value: {}", args[i]),
+                )
+            })?);
             i += 1;
         } else if arg == "-i" || arg == "--iterations" {
             i += 1;
@@ -1941,6 +2184,21 @@ fn parse_args() -> io::Result<CliConfig> {
             (session, task_dir)
         };
 
+        // For attach mode, read agent from prd.json or use default
+        let prd_path = task_dir.join("prd.json");
+        let attach_agent = if let Ok(content) = std::fs::read_to_string(&prd_path) {
+            if let Ok(prd) = serde_json::from_str::<serde_json::Value>(&content) {
+                prd.get("agent")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "claude".to_string())
+            } else {
+                "claude".to_string()
+            }
+        } else {
+            "claude".to_string()
+        };
+
         return Ok(CliConfig {
             task_dir,
             max_iterations: 0,
@@ -1949,6 +2207,8 @@ fn parse_args() -> io::Result<CliConfig> {
             run_mode,
             tmux_session: Some(session_name),
             yolo_mode,
+            agent: attach_agent,
+            idle_timeout_secs: 300,
         });
     }
 
@@ -1999,6 +2259,37 @@ fn parse_args() -> io::Result<CliConfig> {
         }
     }
 
+    // Determine agent with precedence: CLI > env var > prd.json > default
+    let final_agent = if let Some(cli_agent) = agent {
+        cli_agent
+    } else if let Ok(env_agent) = std::env::var("RALPH_AGENT") {
+        if VALID_AGENTS.contains(&env_agent.as_str()) {
+            env_agent
+        } else {
+            eprintln!(
+                "Warning: Invalid RALPH_AGENT '{}', using default",
+                env_agent
+            );
+            "claude".to_string()
+        }
+    } else {
+        // Try to read from prd.json
+        let prd_path = task_dir.join("prd.json");
+        if let Ok(content) = std::fs::read_to_string(&prd_path) {
+            if let Ok(prd) = serde_json::from_str::<serde_json::Value>(&content) {
+                prd.get("agent")
+                    .and_then(|v| v.as_str())
+                    .filter(|a| VALID_AGENTS.contains(a))
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "claude".to_string())
+            } else {
+                "claude".to_string()
+            }
+        } else {
+            "claude".to_string()
+        }
+    };
+
     Ok(CliConfig {
         task_dir,
         max_iterations,
@@ -2007,12 +2298,14 @@ fn parse_args() -> io::Result<CliConfig> {
         run_mode,
         tmux_session: None,
         yolo_mode,
+        agent: final_agent,
+        idle_timeout_secs: idle_timeout_secs.unwrap_or(300),
     })
 }
 
-/// Spawn Claude Code process and return (child, reader_thread)
-/// Returns None if spawning fails
-fn spawn_claude(
+/// Spawn the agent process and return (child, reader_thread)
+/// Supports both Claude Code and OpenCode agents
+fn spawn_agent(
     app: &mut App,
     pty_rows: u16,
     pty_cols: u16,
@@ -2042,9 +2335,28 @@ fn spawn_claude(
         })
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
 
-    // Spawn Claude Code interactively with the prompt as a positional argument
-    // This runs Claude in full interactive mode with the Ralph prompt
-    let mut cmd = CommandBuilder::new("claude");
+    // Read prompt content and clean up temp file
+    let prompt_content = std::fs::read_to_string(&prompt_temp_file)?;
+    let _ = std::fs::remove_file(&prompt_temp_file);
+
+    // Build command based on selected agent
+    let mut cmd = match app.agent.as_str() {
+        "opencode" => {
+            // OpenCode: use `opencode run <prompt>` which exits when done
+            // This allows child_exited to naturally trigger the next iteration
+            let mut cmd = CommandBuilder::new("opencode");
+            cmd.arg("run");
+            cmd.arg(&prompt_content);
+            cmd
+        }
+        _ => {
+            // Claude (default): use interactive mode with prompt as positional arg
+            let mut cmd = CommandBuilder::new("claude");
+            cmd.arg("--dangerously-skip-permissions");
+            cmd.arg(&prompt_content);
+            cmd
+        }
+    };
 
     // Set working directory to current directory (where ralph-tui was invoked)
     if let Ok(cwd) = std::env::current_dir() {
@@ -2068,14 +2380,6 @@ fn spawn_claude(
             r#"{"*": "allow", "external_directory": "allow", "doom_loop": "allow"}"#,
         );
     }
-
-    cmd.arg("--dangerously-skip-permissions");
-    // Prompt is passed as the last positional argument
-    let prompt_content = std::fs::read_to_string(&prompt_temp_file)?;
-    cmd.arg(&prompt_content);
-
-    // Clean up temp file
-    let _ = std::fs::remove_file(&prompt_temp_file);
 
     let child = pair
         .slave
@@ -2109,6 +2413,7 @@ fn spawn_claude(
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to lock PTY state"))?;
         state.child_exited = false;
         state.clear_recent_output();
+        state.last_output_time = Instant::now();
         // Re-initialize parser to clear screen
         state.parser = vt100::Parser::new(pty_rows, pty_cols, 1000);
     }
@@ -2259,6 +2564,7 @@ fn main() -> io::Result<()> {
     println!("╚═══════════════════════════════════════════════════════════════╝");
     println!();
     println!("  Task:       {}", config.task_dir.display());
+    println!("  Agent:      {}", config.agent);
     if run_mode == RunMode::Attach {
         if let Some(ref session) = tmux_session {
             println!("  Session:    {}", session);
@@ -2317,7 +2623,7 @@ fn main() -> io::Result<()> {
         run_result
     } else {
         // Standalone mode: spawn and manage Claude processes
-        let (mut child, mut reader_thread) = spawn_claude(&mut app, pty_rows, pty_cols)?;
+        let (mut child, mut reader_thread) = spawn_agent(&mut app, pty_rows, pty_cols)?;
 
         // Run the main loop
         loop {
@@ -2376,7 +2682,7 @@ fn main() -> io::Result<()> {
                     }
 
                     // Spawn new Claude process
-                    match spawn_claude(&mut app, last_rows, last_cols) {
+                    match spawn_agent(&mut app, last_rows, last_cols) {
                         Ok((new_child, new_thread)) => {
                             child = new_child;
                             reader_thread = new_thread;
@@ -3489,16 +3795,40 @@ fn run(
                 ))]
             };
 
-            // Scroll to show the bottom of the terminal output (most recent content)
+            // Scroll to show agent output with scrollback support
             let content_height = claude_content_area.height as usize;
-            let scroll_offset = if lines.len() > content_height {
-                (lines.len() - content_height) as u16
+            let total_lines = lines.len();
+            // Cap pty_scroll_offset to maximum scrollable distance
+            let max_scroll_back = total_lines.saturating_sub(content_height);
+            let effective_scroll_back = app.pty_scroll_offset.min(max_scroll_back);
+            // scroll_offset is from top: to show bottom we go to max, to scroll back we subtract
+            let scroll_offset = if total_lines > content_height {
+                (total_lines - content_height - effective_scroll_back) as u16
             } else {
                 0
             };
 
             let claude_content = Paragraph::new(lines).scroll((scroll_offset, 0));
             frame.render_widget(claude_content, claude_content_area);
+
+            // Show scroll indicator if not at bottom
+            if effective_scroll_back > 0 {
+                let indicator = format!(" ↑ {} lines above ", effective_scroll_back);
+                let indicator_widget = Paragraph::new(Line::from(Span::styled(
+                    indicator,
+                    Style::default()
+                        .fg(AMBER_WARNING)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                // Render at top-right of the content area
+                let indicator_area = Rect::new(
+                    claude_content_area.x,
+                    claude_content_area.y,
+                    claude_content_area.width,
+                    1,
+                );
+                frame.render_widget(indicator_widget, indicator_area);
+            }
 
             // === RALPH TERMINAL ===
             // Create bordered block for Ralph terminal
@@ -3824,12 +4154,12 @@ fn run(
                 Mode::Ralph => (
                     "Monitoring",
                     CYAN_PRIMARY,
-                    "^I: Interactive | ^P: Inject | ^Q: Quit",
+                    "w: New Loop | ^I: Interactive | ^P: Inject | ^Q: Quit",
                 ),
                 Mode::Claude => (
                     "INTERACTIVE MODE",
                     GREEN_ACTIVE,
-                    "Esc: Return to Monitoring | ^Q: Quit",
+                    "S-Tab: Monitor | S-↑↓: Scroll | ^Q: Quit",
                 ),
             };
 
@@ -4202,6 +4532,13 @@ fn run(
                 frame.render_widget(hint_paragraph, modal_layout[1]);
             }
 
+            // Render wizard modal if active
+            if app.input_mode == InputMode::Wizard {
+                if let Some(ref wizard_state) = app.wizard_state {
+                    wizard::render_wizard(frame, area, wizard_state);
+                }
+            }
+
             // Render notes saved confirmation (briefly shown after saving)
             if let Some(saved_time) = app.notes_saved_confirmation {
                 if saved_time.elapsed() < std::time::Duration::from_secs(2) {
@@ -4244,36 +4581,45 @@ fn run(
         // Check if child exited or stop hook fired
         {
             let state_result = app.pty_state.lock();
-            let (child_exited, is_complete, stop_hook_fired, debug_info) = match state_result {
-                Ok(mut state) => {
-                    // Update activities one final time before checking exit
-                    state.update_activities();
-                    let stop_signal = state.has_stop_hook_signal();
-                    // Debug: capture last 500 chars of recent_output for logging
-                    let debug = if stop_signal {
-                        format!(
-                            "STOP HOOK DETECTED! Buffer len: {}",
-                            state.recent_output.len()
+            let (child_exited, is_complete, stop_hook_fired, idle_duration, debug_info) =
+                match state_result {
+                    Ok(mut state) => {
+                        // Update activities one final time before checking exit
+                        state.update_activities();
+                        let stop_signal = state.has_stop_hook_signal();
+                        let idle = state.last_output_time.elapsed();
+                        // Debug: capture last 500 chars of recent_output for logging
+                        let debug = if stop_signal {
+                            format!(
+                                "STOP HOOK DETECTED! Buffer len: {}",
+                                state.recent_output.len()
+                            )
+                        } else {
+                            let stripped = strip_ansi_codes(&state.recent_output);
+                            let lower = stripped.to_lowercase();
+                            format!(
+                                "No stop hook. Buffer len: {}. Contains 'stop hook': {}, 'iteration complete': {}",
+                                state.recent_output.len(),
+                                lower.contains("stop hook"),
+                                lower.contains("iteration complete")
+                            )
+                        };
+                        (
+                            state.child_exited,
+                            state.has_completion_signal(),
+                            stop_signal,
+                            idle,
+                            debug,
                         )
-                    } else {
-                        let stripped = strip_ansi_codes(&state.recent_output);
-                        let lower = stripped.to_lowercase();
-                        format!(
-                            "No stop hook. Buffer len: {}. Contains 'stop hook': {}, 'iteration complete': {}",
-                            state.recent_output.len(),
-                            lower.contains("stop hook"),
-                            lower.contains("iteration complete")
-                        )
-                    };
-                    (
-                        state.child_exited,
-                        state.has_completion_signal(),
-                        stop_signal,
-                        debug,
-                    )
-                }
-                Err(_) => (true, false, false, "Mutex poisoned".to_string()),
-            };
+                    }
+                    Err(_) => (
+                        true,
+                        false,
+                        false,
+                        std::time::Duration::from_secs(0),
+                        "Mutex poisoned".to_string(),
+                    ),
+                };
 
             // Write debug info periodically (every ~5 seconds based on loop timing)
             static DEBUG_COUNTER: std::sync::atomic::AtomicU32 =
@@ -4299,6 +4645,33 @@ fn run(
                     app.iteration_state = IterationState::NeedsRestart;
                 }
                 break;
+            }
+
+            // Idle timeout detection for non-interactive agents (e.g. OpenCode)
+            // If no output received for idle_timeout_secs, assume the agent is stuck
+            if app.agent != "claude" && app.idle_timeout_secs > 0 && !child_exited {
+                if idle_duration >= std::time::Duration::from_secs(app.idle_timeout_secs) {
+                    // Log the timeout event
+                    let elapsed = app.session_start.elapsed().as_secs();
+                    let timeout_msg = format!(
+                        "[+{}m{}s] Iteration {} timed out: no output for {}s, restarting agent\n",
+                        elapsed / 60,
+                        elapsed % 60,
+                        app.current_iteration,
+                        app.idle_timeout_secs,
+                    );
+                    let progress_path = app.task_dir.join("progress.txt");
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&progress_path)
+                        .and_then(|mut f| {
+                            std::io::Write::write_all(&mut f, timeout_msg.as_bytes())
+                        });
+
+                    app.iteration_state = IterationState::NeedsRestart;
+                    break;
+                }
             }
         }
 
@@ -4632,6 +5005,28 @@ fn run(
                     continue; // Skip normal key handling while in search mode
                 }
 
+                // Handle wizard mode (modal takes priority)
+                if app.input_mode == InputMode::Wizard {
+                    if let Some(ref mut wizard_state) = app.wizard_state {
+                        let result =
+                            wizard::handle_wizard_input(wizard_state, key.code, key.modifiers);
+                        match result {
+                            Some(_) => {
+                                // Wizard closed (complete or cancelled)
+                                app.input_mode = InputMode::Normal;
+                                app.wizard_state = None;
+                            }
+                            None => {
+                                // Continue wizard
+                            }
+                        }
+                    } else {
+                        // No wizard state, close
+                        app.input_mode = InputMode::Normal;
+                    }
+                    continue; // Skip normal key handling while wizard is open
+                }
+
                 // Handle Ctrl+P to open prompt input modal (before mode-specific handling)
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
                     app.input_mode = InputMode::PromptInput;
@@ -4816,6 +5211,11 @@ fn run(
                                     };
                                 app.ralph_scroll_offset = 0; // Reset scroll on view change
                             }
+                            // w: Open loop start wizard
+                            KeyCode::Char('w') => {
+                                app.wizard_state = Some(wizard::WizardState::new());
+                                app.input_mode = InputMode::Wizard;
+                            }
                             // /: Open activity search (when activity panel is focused)
                             KeyCode::Char('/') => {
                                 if app.activity_panel_focused {
@@ -4880,12 +5280,40 @@ fn run(
                         }
                     }
                     Mode::Claude => {
-                        // In Claude mode: Escape returns to Ralph mode
+                        // In Claude mode: Shift+Tab returns to Ralph mode
+                        // Shift+Up/Down scrolls the agent output panel
+                        // Escape is forwarded to PTY (used by opencode to pause)
                         // All other keys are forwarded to PTY
-                        if key.code == KeyCode::Esc {
+                        if key.code == KeyCode::BackTab {
+                            // Shift+Tab: return to Ralph mode
                             app.mode = Mode::Ralph;
+                            app.pty_scroll_offset = 0; // Reset scroll on mode switch
+                        } else if key.modifiers.contains(KeyModifiers::SHIFT)
+                            && key.code == KeyCode::Up
+                        {
+                            // Shift+Up: scroll up through agent output
+                            app.pty_scroll_offset = app.pty_scroll_offset.saturating_add(3);
+                        } else if key.modifiers.contains(KeyModifiers::SHIFT)
+                            && key.code == KeyCode::Down
+                        {
+                            // Shift+Down: scroll down (toward latest output)
+                            app.pty_scroll_offset = app.pty_scroll_offset.saturating_sub(3);
+                        } else if key.modifiers.contains(KeyModifiers::SHIFT)
+                            && key.code == KeyCode::PageUp
+                        {
+                            // Shift+PageUp: scroll up a full page
+                            app.pty_scroll_offset = app.pty_scroll_offset.saturating_add(20);
+                        } else if key.modifiers.contains(KeyModifiers::SHIFT)
+                            && key.code == KeyCode::PageDown
+                        {
+                            // Shift+PageDown: scroll down a full page
+                            app.pty_scroll_offset = app.pty_scroll_offset.saturating_sub(20);
                         } else {
-                            // Forward key to PTY
+                            // Reset scroll to bottom when user types (they want to see current output)
+                            if !key.modifiers.contains(KeyModifiers::SHIFT) {
+                                app.pty_scroll_offset = 0;
+                            }
+                            // Forward key to PTY (including Escape for opencode)
                             forward_key_to_pty(app, key.code, key.modifiers);
                         }
                     }
@@ -6016,7 +6444,7 @@ fn run_attach_mode(
             };
 
             let keybindings = if app.mode == Mode::Claude {
-                "Esc: Return to Monitoring"
+                "S-Tab: Monitor | S-↑↓: Scroll"
             } else if app.input_mode == InputMode::PromptInput {
                 "Enter: Send | Esc: Cancel"
             } else if app.activity_panel_focused {
@@ -6185,6 +6613,13 @@ fn run_attach_mode(
                 let hint_paragraph = Paragraph::new(hint_line);
                 frame.render_widget(hint_paragraph, modal_layout[1]);
             }
+
+            // Render wizard modal if active
+            if app.input_mode == InputMode::Wizard {
+                if let Some(ref wizard_state) = app.wizard_state {
+                    wizard::render_wizard(frame, area, wizard_state);
+                }
+            }
         })?;
 
         // Check if tmux session ended
@@ -6348,21 +6783,39 @@ fn run_attach_mode(
                             continue; // Skip normal key handling while in search mode
                         }
 
+                        // Handle wizard mode (modal takes priority)
+                        if app.input_mode == InputMode::Wizard {
+                            if let Some(ref mut wizard_state) = app.wizard_state {
+                                let result = wizard::handle_wizard_input(
+                                    wizard_state,
+                                    key.code,
+                                    key.modifiers,
+                                );
+                                match result {
+                                    Some(_) => {
+                                        app.input_mode = InputMode::Normal;
+                                        app.wizard_state = None;
+                                    }
+                                    None => {}
+                                }
+                            } else {
+                                app.input_mode = InputMode::Normal;
+                            }
+                            continue;
+                        }
+
                         // Handle interactive mode (forwarding to tmux)
                         if app.mode == Mode::Claude {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    // Return to monitoring mode
+                            if key.code == KeyCode::BackTab {
+                                // Shift+Tab: return to monitoring mode
+                                app.mode = Mode::Ralph;
+                            } else {
+                                // In interactive mode, actually attach to tmux
+                                // for full interaction (this takes over the terminal)
+                                if let Some(ref session) = app.tmux_session {
+                                    let _ = tmux_attach_interactive(session);
+                                    // After returning from tmux attach, go back to monitoring
                                     app.mode = Mode::Ralph;
-                                }
-                                _ => {
-                                    // In interactive mode, actually attach to tmux
-                                    // for full interaction (this takes over the terminal)
-                                    if let Some(ref session) = app.tmux_session {
-                                        let _ = tmux_attach_interactive(session);
-                                        // After returning from tmux attach, go back to monitoring
-                                        app.mode = Mode::Ralph;
-                                    }
                                 }
                             }
                             continue;
@@ -6394,6 +6847,11 @@ fn run_attach_mode(
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Char('Q') => {
                                 break;
+                            }
+                            KeyCode::Char('w') => {
+                                // Open loop start wizard
+                                app.wizard_state = Some(wizard::WizardState::new());
+                                app.input_mode = InputMode::Wizard;
                             }
                             KeyCode::Esc => {
                                 // Esc has multiple levels:

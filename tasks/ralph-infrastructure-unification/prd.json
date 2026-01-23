@@ -172,19 +172,19 @@
       "title": "TUI Loop Start Wizard",
       "description": "As a user, I want a full wizard in ralph-tui to start new loops so I don't need to use the CLI separately.",
       "acceptanceCriteria": [
-        { "description": "Wizard accessible via hotkey in ralph-tui", "passes": false },
-        { "description": "Step 1: Select task directory (list available tasks/ subdirectories)", "passes": false },
-        { "description": "Step 2: Configure base branch (default: current branch, option to type another)", "passes": false },
-        { "description": "Step 3: Set max iterations (default: 50, editable)", "passes": false },
-        { "description": "Step 4: Select agent (claude/opencode, default from prd.json or claude)", "passes": false },
-        { "description": "Step 5: Confirm and launch", "passes": false },
-        { "description": "Wizard sends start command to ralph-uv via JSON-RPC protocol", "passes": false },
-        { "description": "New loop appears in TUI session list immediately", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "Wizard accessible via hotkey in ralph-tui", "passes": true },
+        { "description": "Step 1: Select task directory (list available tasks/ subdirectories)", "passes": true },
+        { "description": "Step 2: Configure base branch (default: current branch, option to type another)", "passes": true },
+        { "description": "Step 3: Set max iterations (default: 50, editable)", "passes": true },
+        { "description": "Step 4: Select agent (claude/opencode, default from prd.json or claude)", "passes": true },
+        { "description": "Step 5: Confirm and launch", "passes": true },
+        { "description": "Wizard sends start command to ralph-uv via JSON-RPC protocol", "passes": true },
+        { "description": "New loop appears in TUI session list immediately", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Wizard accessible via 'w' hotkey in both standalone and attach modes. 5-step wizard: task selection, branch config, iterations, agent, confirm. Launches ralph-uv run as subprocess which registers in SQLite DB and starts its own RPC socket. Session appears in TUI via existing session polling. Wizard module at ralph-tui/src/wizard.rs."
     },
     {
       "id": "US-010",
