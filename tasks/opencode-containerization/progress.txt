@@ -1,0 +1,646 @@
+# Ralph Progress Log
+Effort: opencode-containerization
+Type: Feature
+Started: Mon Jan 19 2026
+---
+
+## Codebase Patterns
+- Ralph shell scripts are in the project root (ralph.sh, ralph-i.sh)
+- TypeScript code is in flowchart/ directory - run `npm run build` to typecheck
+- prd.json and progress.txt are gitignored by design - they're runtime files
+- Agent wrapper scripts go in agents/ directory
+- Agent precedence: story > CLI --agent > RALPH_AGENT env > prd.json agent > default (claude)
+- AGENT_SOURCE tracks provenance: "default", "env", "cli", "prd", "story", or "failover"
+- Per-iteration agent selection uses ITERATION_AGENT and ITERATION_AGENT_SCRIPT variables
+- Failover: FAILOVER_THRESHOLD (default 3), get_alternate_agent() returns the other agent
+- Failure tracking uses FAILURE_COUNT and LAST_FAILURE_MSG associative arrays
+
+---
+
+## 2026-01-19 22:47 - US-001
+- Created agents/ directory structure
+- Implemented agents/common.sh with shared utility functions:
+  - Error detection: detect_error_patterns(), extract_error_message()
+  - Output parsing: parse_stream_json_result(), extract_tool_calls()
+  - Task completion: is_task_complete()
+  - Environment: get_agent_name(), get_model(), validate_env_vars()
+  - Logging: log_info(), log_error(), log_warn()
+- Files changed: agents/common.sh (new)
+- **Learnings for future iterations:**
+  - The flowchart directory has TypeScript - need npm install before tsc works
+  - .gitignore excludes prd.json and progress.txt - don't try to git add them
+  - Ralph invokes `claude` directly in ralph.sh - future stories will abstract this
+---
+
+## 2026-01-19 22:52 - US-002
+- Created agents/claude.sh wrapper script for Claude CLI invocation
+- Script features:
+  - Accepts prompt via stdin
+  - Outputs to stdout using `--print` flag
+  - Handles `--dangerously-skip-permissions` via SKIP_PERMISSIONS env var (default: true)
+  - Supports `--output-format stream-json` via OUTPUT_FORMAT env var (default: stream-json)
+  - Verbose mode via RALPH_VERBOSE env var
+  - Sources common.sh for shared utilities
+  - Documents MODEL env var limitation (Claude CLI doesn't support model selection)
+- Files changed: agents/claude.sh (new)
+- **Learnings for future iterations:**
+  - Claude CLI invocation in ralph.sh uses: `claude --dangerously-skip-permissions --print --output-format stream-json --verbose`
+  - Claude CLI does NOT support model selection via command line (unlike OpenCode)
+  - The wrapper script interface: prompt via stdin, output via stdout, config via env vars
+---
+
+## 2026-01-19 22:55 - US-003
+- Created agents/opencode.sh wrapper script for OpenCode CLI invocation
+- Script features:
+  - Accepts prompt via stdin (same interface as claude.sh)
+  - Uses `opencode run "$prompt"` for non-interactive execution
+  - Outputs to stdout (compatible with Ralph)
+  - Supports MODEL env var for model selection (e.g., "anthropic/claude-sonnet-4")
+  - Supports OUTPUT_FORMAT env var: "json" or "default"
+  - Verbose mode via RALPH_VERBOSE env var (uses --print-logs --log-level DEBUG)
+  - Sources common.sh for shared utilities
+- Files changed: agents/opencode.sh (new)
+- **Learnings for future iterations:**
+  - OpenCode uses `opencode run "prompt"` for headless execution (not piped stdin)
+  - OpenCode supports --model provider/model format for model selection
+  - OpenCode has --format json|default for output format (different from Claude's --output-format)
+  - OpenCode --print-logs outputs debug logs to stderr
+---
+
+## 2026-01-19 22:56 - US-004
+- Created opencode.json configuration file for autonomous mode
+- Configuration sets `"permission": "allow"` for fully autonomous operation
+- Documented required API key environment variables in agents/opencode.sh:
+  - ANTHROPIC_API_KEY for Anthropic models
+  - OPENAI_API_KEY for OpenAI models
+  - AWS credentials for Bedrock models
+  - Google credentials for Vertex AI
+- Files changed: opencode.json (new), agents/opencode.sh (updated docs)
+- **Learnings for future iterations:**
+  - OpenCode config uses simple `"permission": "allow"` for autonomous mode
+  - Alternative: granular permissions via `"permission": { "tool": "allow|ask|deny" }`
+  - OpenCode stores credentials in ~/.local/share/opencode/auth.json
+  - `/connect` command in interactive mode can also set up credentials
+---
+
+## 2026-01-20 13:26 - US-006
+- Added --agent CLI flag to ralph.sh for agent selection
+- Implementation details:
+  - Added --agent case to argument parsing, sets AGENT variable
+  - Added VALID_AGENTS list ("claude opencode") for validation
+  - Added AGENT_SOURCE tracking (default/env/cli) for future US-009
+  - Validation after arg parsing with clear error message for invalid agents
+  - Updated help text with --agent option and AGENT env var documentation
+  - Updated usage line in both help and unknown option error
+- Files changed: ralph.sh (modified)
+- **Learnings for future iterations:**
+  - ralph.sh already had AGENT variable defaulting to "claude" - built on existing abstraction
+  - AGENT_SOURCE is tracked but not displayed yet (needed for US-009 banner)
+  - TypeScript typecheck is in flowchart/ subdirectory: `cd flowchart && npm run build`
+---
+
+## 2026-01-20 - US-007
+- Added RALPH_AGENT environment variable support to ralph.sh
+- Implementation details:
+  - Changed env var from generic AGENT to RALPH_AGENT for namespacing
+  - Agent config now reads RALPH_AGENT at startup, before CLI arg parsing
+  - CLI --agent flag still takes precedence (overwrites during arg parsing)
+  - Updated help text to document RALPH_AGENT instead of AGENT
+- Files changed: ralph.sh (modified)
+- **Learnings for future iterations:**
+  - Precedence order is now: CLI --agent > RALPH_AGENT env > default (claude)
+  - AGENT_SOURCE tracks where the value came from: "default", "env", or "cli"
+---
+
+## 2026-01-20 - US-008
+- Added support for reading `agent` field from prd.json in ralph.sh
+- Implementation details:
+  - After PRD_FILE validation, reads agent using `jq -r '.agent // empty'`
+  - Only applies prd.json agent if AGENT_SOURCE is still "default"
+  - Sets AGENT_SOURCE="prd" when agent comes from prd.json
+  - Full precedence: CLI --agent > RALPH_AGENT env > prd.json agent > default (claude)
+- Updated prd.json.example with agent field
+- Files changed: ralph.sh (modified), prd.json.example (modified)
+- **Learnings for future iterations:**
+  - AGENT_SOURCE now has 4 possible values: "default", "env", "cli", "prd"
+  - The prd.json check happens after file validation but before agent script validation
+  - This allows the agent validation error to still work correctly with prd.json-sourced agents
+---
+
+## 2026-01-20 - US-009
+- Added 'Agent:' line to Ralph startup banner in ralph.sh
+- Implementation details:
+  - Added line at ralph.sh:318: `echo "  Agent:      $AGENT ($AGENT_SOURCE)"`
+  - Shows agent name (claude/opencode) and source (default/env/cli/prd) in parentheses
+  - Placed after Branch line, before Progress line for logical grouping
+- Files changed: ralph.sh (modified)
+- **Learnings for future iterations:**
+  - AGENT_SOURCE values: "default", "env", "cli", "prd" - set during config parsing
+  - The startup banner displays key configuration info before the main loop starts
+---
+
+## 2026-01-20 - US-010
+- Added per-story agent override capability to prd.json schema
+- Implementation details:
+  - Added optional `agent` field to userStory schema in prd.json.example
+  - ralph.sh now reads story-level agent at start of each iteration
+  - Uses jq to find next story (highest priority where passes: false) and extract its agent
+  - ITERATION_AGENT and ITERATION_AGENT_SCRIPT variables track per-iteration agent
+  - Story-level agent is validated against VALID_AGENTS list
+  - Falls back to task-level AGENT if story has no agent or invalid agent
+  - Added "Agent: X (story override for Y)" message when story overrides task agent
+  - Updated spinner and completion messages to use ITERATION_AGENT
+- Files changed: ralph.sh (modified), prd.json.example (modified)
+- **Learnings for future iterations:**
+  - Full precedence order: story > CLI > env > prd > default
+  - ITERATION_AGENT_SOURCE can be "story" when story overrides task agent
+  - jq can extract first item from sorted array: `| sort_by(.priority) | first`
+---
+
+## 2026-01-20 - US-011
+- Added per-story model override capability to prd.json schema
+- Implementation details:
+  - Added optional `model` field to userStory schema in prd.json.example (e.g., "anthropic/claude-haiku-4")
+  - ralph.sh extracts NEXT_STORY_MODEL via jq alongside agent extraction
+  - ITERATION_MODEL variable tracks the model for each iteration
+  - MODEL env var is passed to agent wrapper scripts
+  - Display "Model: X (story override)" in iteration banner when set
+  - OpenCode agent already supported --model flag via MODEL env var
+  - Documented Claude CLI model limitation in agents/claude.sh header
+- Files changed: ralph.sh (modified), prd.json.example (modified), agents/claude.sh (docs updated)
+- **Learnings for future iterations:**
+  - Claude CLI does NOT support model selection via command line - controlled by subscription
+  - OpenCode supports --model provider/model format (e.g., "anthropic/claude-sonnet-4")
+  - For cost optimization with specific models, use OpenCode agent instead of Claude
+  - ITERATION_MODEL follows same pattern as ITERATION_AGENT for per-story overrides
+---
+
+## 2026-01-20 - US-012
+- Audited prompt.md for Claude-specific terminology and agent compatibility
+- Audit findings:
+  - prompt.md is MOSTLY AGENT-AGNOSTIC
+  - Only ONE Claude-specific reference: "MCP browser tools" on line 131 (Browser Testing section)
+  - This reference is listed as optional alongside Playwright (universal)
+  - The rest uses generic terminology: "autonomous coding agent", "browser automation tool"
+  - Standard git/shell commands that both agents support
+- Files changed: None (audit only, prd.json notes updated with findings)
+- **Learnings for future iterations:**
+  - prompt.md was written portably - no major changes needed for multi-agent support
+  - MCP (Model Context Protocol) is Claude-specific terminology
+  - For US-013, either add agent-specific marker around "MCP browser tools" OR keep as-is (it's optional)
+  - OpenCode's equivalent browser tools may have different naming - verify when implementing
+---
+
+## 2026-01-20 - US-013
+- Added agent-specific prompt sections with conditional markers
+- Implementation details:
+  - Created `preprocess_prompt()` function in agents/common.sh
+  - Marker syntax: `<!-- agent:claude -->...<!-- /agent:claude -->` and `<!-- agent:opencode -->...<!-- /agent:opencode -->`
+  - Function filters prompt content based on current agent:
+    - Removes markers but keeps content for current agent
+    - Removes markers AND content for other agents
+  - Uses sed for marker removal, awk for multi-line content removal
+  - Updated ralph.sh to source common.sh and call preprocess_prompt before agent invocation
+  - Added agent-specific markers to Browser Testing section in prompt.md:
+    - Claude sees: "MCP browser tools, Playwright, etc."
+    - OpenCode sees: "Playwright, etc." (no MCP reference)
+- Files changed: agents/common.sh (new function), prompt.md (markers), ralph.sh (preprocessing integration)
+- **Learnings for future iterations:**
+  - Agent-specific marker syntax: `<!-- agent:NAME --> content <!-- /agent:NAME -->`
+  - Content outside markers is included for ALL agents
+  - To add new agent-specific content, wrap it in markers for each relevant agent
+  - preprocess_prompt() is in agents/common.sh - source it before use
+  - The all_agents list in preprocess_prompt() must be updated when adding new agents
+---
+
+## 2026-01-20 - US-014
+- Added failure tracking to ralph.sh for failover logic preparation
+- Implementation details:
+  - Added FAILURE_COUNT and LAST_FAILURE_MSG associative arrays (per-agent tracking)
+  - Created detect_iteration_failure() function that checks:
+    - Non-zero exit code
+    - Empty output
+    - Agent-level error patterns (rate limit, API error, timeout, 502/503/429, overloaded)
+  - Created log_failure_to_progress() function that logs failures with timestamp, agent, story ID, consecutive count, and error message
+  - Capture agent exit code via `wait $AGENT_PID || AGENT_EXIT_CODE=$?`
+  - On failure: increment count, extract error, log to progress.txt, display warning
+  - On success: reset failure count to 0
+- Files changed: ralph.sh (modified)
+- **Learnings for future iterations:**
+  - FAILURE_COUNT[$agent] tracks consecutive failures per agent (bash associative array)
+  - detect_iteration_failure distinguishes code errors from agent errors (rate limits, API issues are agent failures)
+  - US-015 will use FAILURE_COUNT for automatic failover threshold checking
+  - The LAST_FAILURE_MSG[$agent] preserves error context for failover decisions
+---
+
+## 2026-01-20 - US-015
+- Implemented automatic agent failover after consecutive failures
+- Implementation details:
+  - Added FAILOVER_THRESHOLD (default 3) and FAILOVER_ENABLED configuration variables
+  - Created get_alternate_agent() function that toggles between claude and opencode
+  - Created log_failover_to_progress() function that logs failover events with full context
+  - Created both_agents_failed() function to check if all agents have exceeded threshold
+  - When failure count >= threshold:
+    - Check if both agents failed → exit with detailed error info
+    - Otherwise perform failover: update AGENT, AGENT_SOURCE="failover", log event
+  - Failure count is NOT reset on failover - each agent maintains its own count
+- Files changed: ralph.sh (modified)
+- **Learnings for future iterations:**
+  - AGENT_SOURCE="failover" indicates agent was switched due to automatic failover
+  - both_agents_failed() returns 0 (true) when ALL agents have hit the threshold
+  - Failover updates task-level AGENT so subsequent iterations use the new agent
+  - US-016 will add configuration options for the failover threshold
+---
+
+## 2026-01-20 - US-016
+- Added failover configuration options to ralph.sh
+- Implementation details:
+  - Added `--failover-threshold N` CLI flag to argument parsing
+  - Added `RALPH_FAILOVER_THRESHOLD` environment variable support at startup
+  - Added `failoverThreshold` field reading from prd.json
+  - Full precedence: CLI > env var > prd.json > default (3)
+  - FAILOVER_THRESHOLD_SOURCE tracks provenance: "default", "env", "cli", "prd"
+  - Input validation: non-integer values show warning and use default
+  - Updated help text with --failover-threshold option and RALPH_FAILOVER_THRESHOLD env var
+  - Updated usage line in error messages
+  - Updated prd.json.example with failoverThreshold field
+- Files changed: ralph.sh (modified), prd.json.example (modified)
+- **Learnings for future iterations:**
+  - Failover threshold configuration follows same pattern as agent configuration
+  - FAILOVER_THRESHOLD_SOURCE parallels AGENT_SOURCE for tracking configuration source
+  - Configuration is validated at parse time (CLI) and read time (env/prd)
+---
+
+## 2026-01-20 - US-017
+- Updated ralph-i.sh for multi-agent support
+- Implementation details:
+  - Added --agent CLI flag with validation (claude/opencode)
+  - Added RALPH_AGENT environment variable support at startup
+  - Added prd.json agent field reading after PRD validation
+  - Added agent validation and wrapper script validation
+  - Updated startup banner to display "Agent: $AGENT ($AGENT_SOURCE)"
+  - Updated prompt preprocessing to use preprocess_prompt() from common.sh
+  - Updated tmux session to use agent wrapper for non-Claude agents
+  - Updated spinner and status messages to use generic "Agent" instead of "Claude"
+- Files changed: ralph-i.sh (modified)
+- **Learnings for future iterations:**
+  - Agent precedence in ralph-i.sh matches ralph.sh: CLI > env > prd.json > default
+  - Interactive mode for OpenCode uses the wrapper script via tmux
+  - The TUI output parsing patterns (Unicode symbols) may need OpenCode-specific updates later
+  - AGENT_SOURCE values: "default", "env", "cli", "prd" (no "story" or "failover" in interactive mode yet)
+---
+
+## 2026-01-20 - US-018
+- Created base Dockerfile for Ralph containerization
+- Implementation details:
+  - Base image: node:20-bookworm (provides Node.js 20 + npm + apt package manager)
+  - Installed common tools: git, jq, curl, tmux, openssh-client, procps, vim-tiny
+  - Created non-root 'ralph' user with UID/GID 1001 (avoids conflict with node user at 1000)
+  - Directory structure: /app/ralph (scripts), /app/project (target repo), /home/ralph (user home)
+  - Set up npm global prefix at /home/ralph/.npm-global for non-root package installs
+  - Configured git with safe.directory for /app/project
+- Files changed: Dockerfile (new)
+- **Learnings for future iterations:**
+  - node:20-bookworm already has user 'node' at UID 1000 - use different UID for custom user
+  - Use `|| true` with groupadd to handle cases where GID might exist
+  - NPM_CONFIG_PREFIX env var allows non-root users to install global packages
+  - WORKDIR is /app/project where target repos will be cloned
+  - Future stories (US-019, US-020) will add Claude CLI and OpenCode
+---
+
+## 2026-01-20 - US-019
+- Added Claude Code CLI installation to Dockerfile
+- Implementation details:
+  - Package: @anthropic-ai/claude-code (Anthropic's official CLI)
+  - Installed globally for ralph user via `npm install -g @anthropic-ai/claude-code`
+  - Added build-time verification: `RUN claude --version` (v2.1.12)
+  - Documented ANTHROPIC_API_KEY environment variable requirement in comments
+- Files changed: Dockerfile (modified)
+- **Learnings for future iterations:**
+  - The Claude CLI package is `@anthropic-ai/claude-code` (not just 'claude')
+  - Build-time verification (`claude --version`) ensures CLI is properly installed before image is complete
+  - Claude CLI installs 3 npm packages and takes ~22s during build
+  - Runtime verification: `docker run --rm ralph-test claude --version`
+---
+
+## 2026-01-20 - US-020
+- Added OpenCode CLI installation to Dockerfile
+- Implementation details:
+  - Package: opencode-ai (v1.1.27)
+  - Installed globally for ralph user via `npm install -g opencode-ai`
+  - Added build-time verification: `RUN opencode --version`
+  - Documented all supported provider API key environment variables:
+    - ANTHROPIC_API_KEY - Anthropic (Claude) models
+    - OPENAI_API_KEY - OpenAI (GPT) models  
+    - AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY - Amazon Bedrock
+    - GOOGLE_APPLICATION_CREDENTIALS - Google Vertex AI
+- Files changed: Dockerfile (modified)
+- **Learnings for future iterations:**
+  - OpenCode CLI package is `opencode-ai` (not 'opencode')
+  - Build-time verification (`opencode --version`) ensures CLI is properly installed
+  - OpenCode installs 5 npm packages and takes ~12s during build
+  - Runtime verification: `docker run --rm ralph-test opencode --version`
+---
+
+## 2026-01-20 - US-021
+- Added Ralph scripts installation to Dockerfile
+- Implementation details:
+  - Switched to USER root for COPY operations (required for file ownership)
+  - Copied main scripts: ralph.sh, ralph-i.sh, prompt.md, opencode.json to /app/ralph/
+  - Copied agents/ directory to /app/ralph/agents/
+  - Copied skills/ directory to /app/ralph/skills/
+  - Set correct ownership with `chown -R ralph:ralph /app/ralph`
+  - Made scripts executable: ralph.sh, ralph-i.sh, agents/*.sh
+  - Added /app/ralph to PATH environment variable
+  - Switched back to USER ralph after COPY
+  - Added build-time verification: `ralph.sh --help`
+- Files changed: Dockerfile (modified)
+- **Learnings for future iterations:**
+  - Docker COPY commands run as the build user (root) regardless of USER directive
+  - Must switch to USER root before COPY, then fix ownership, then switch back
+  - PATH environment variable persists across USER switches
+  - Build-time verification with `ralph.sh --help > /dev/null 2>&1` confirms scripts are accessible
+  - Runtime verification: `docker run --rm ralph-test ralph.sh --help`
+---
+
+## 2026-01-20 - US-022
+- Created container entrypoint script at docker/entrypoint.sh
+- Implementation details:
+  - Created docker/ directory for Docker-related files
+  - Entrypoint script handles:
+    - SSH key setup for private repos (RALPH_PROJECT_SSH_KEY)
+    - Git clone from RALPH_PROJECT_GIT_URL (if set)
+    - Branch checkout RALPH_PROJECT_BRANCH (default: main)
+    - Running RALPH_SETUP_COMMANDS (e.g., "npm install")
+    - Falls through to exec "$@" for CMD
+  - Updated Dockerfile to COPY and use entrypoint.sh
+  - Added ENTRYPOINT directive: ["/app/ralph/entrypoint.sh"]
+- Files changed: docker/entrypoint.sh (new), Dockerfile (modified)
+- **Learnings for future iterations:**
+  - Entrypoint env vars: RALPH_PROJECT_GIT_URL, RALPH_PROJECT_BRANCH, RALPH_SETUP_COMMANDS, RALPH_PROJECT_SSH_KEY
+  - Entrypoint logs with timestamps: `[entrypoint HH:MM:SS] message`
+  - If RALPH_PROJECT_GIT_URL not set, uses existing /app/project contents (allows volume mounts)
+  - SSH key setup disables StrictHostKeyChecking for automated operations
+  - Uses `exec "$@"` to pass CMD - can override default /bin/bash
+---
+
+## 2026-01-20 - US-023
+- Created docker-compose.yml for easy container orchestration
+- Implementation details:
+  - Ralph service with build context pointing to Dockerfile
+  - Environment variables: API keys (ANTHROPIC, OPENAI, AWS, Google), project config (GIT_URL, BRANCH, SETUP_COMMANDS, SSH_KEY), Ralph config (AGENT, FAILOVER_THRESHOLD, OPENCODE_SERVE/PORT, STATUS_PORT)
+  - Volume mount: ./tasks:/app/project/tasks for task persistence across runs
+  - Exposed ports: 4096 (OpenCode server), 8080 (future status API)
+  - Custom bridge network: ralph-network
+  - Container keeps running with stdin_open/tty for interactive use
+  - Includes commented healthcheck and resource limits for future use
+- Files changed: docker-compose.yml (new)
+- **Learnings for future iterations:**
+  - Use `docker-compose run --rm ralph <command>` to execute commands
+  - Volume mount preserves prd.json, progress.txt, and git history
+  - Ports can be customized via RALPH_OPENCODE_PORT and RALPH_STATUS_PORT env vars
+  - Option to mount entire project instead of just tasks/ (commented alternative in compose file)
+---
+
+## 2026-01-20 - US-024
+- Created docker/.env.example environment variable template
+- Implementation details:
+  - Comprehensive documentation with comments explaining each variable
+  - API Keys section: ANTHROPIC_API_KEY, OPENAI_API_KEY, AWS credentials, Google credentials
+  - Project configuration: RALPH_PROJECT_GIT_URL, RALPH_PROJECT_BRANCH, RALPH_SETUP_COMMANDS, RALPH_PROJECT_SSH_KEY
+  - Ralph configuration: RALPH_AGENT, RALPH_FAILOVER_THRESHOLD
+  - Future features: RALPH_OPENCODE_SERVE, RALPH_OPENCODE_PORT, RALPH_STATUS_PORT
+  - Advanced options: USER_UID, USER_GID for volume permissions
+  - Links to documentation for getting API keys
+- Files changed: docker/.env.example (new)
+- **Learnings for future iterations:**
+  - docker-compose.yml references .env file (cp docker/.env.example .env)
+  - SSH key can be base64 encoded for multi-line safety: `cat ~/.ssh/id_rsa | base64 -w0`
+  - All env vars have sensible defaults in docker-compose.yml, .env.example just documents them
+---
+
+## 2026-01-20 - US-025
+- Added optional SSH server support to Dockerfile for remote Claude session attachment
+- Implementation details:
+  - Added ENABLE_SSH build arg (default: false) to conditionally install openssh-server
+  - SSH security hardening: PasswordAuthentication=no, PubkeyAuthentication=yes, PermitRootLogin=no, AllowUsers=ralph
+  - Added setup_ssh_server() function to entrypoint.sh that:
+    - Creates ~/.ssh with correct permissions for ralph user
+    - Writes RALPH_SSH_AUTHORIZED_KEYS to authorized_keys file
+    - Starts sshd on RALPH_SSH_PORT (default 22)
+  - Entrypoint switches to ralph user after starting sshd (uses `su -s /bin/bash ralph -c`)
+  - Added ENABLE_SSH env var for runtime detection
+  - Updated docker-compose.yml with:
+    - ENABLE_SSH build arg
+    - RALPH_SSH_AUTHORIZED_KEYS and RALPH_SSH_PORT env vars
+    - Port mapping ${RALPH_SSH_PORT:-2222}:22
+  - Updated docker/.env.example with SSH configuration section
+- Files changed: Dockerfile (modified), docker/entrypoint.sh (modified), docker-compose.yml (modified), docker/.env.example (modified)
+- **Learnings for future iterations:**
+  - SSH server requires container to run as root initially; entrypoint switches to ralph after starting sshd
+  - Build with: `docker build --build-arg ENABLE_SSH=true -t ralph-ssh .`
+  - Host port 2222 maps to container port 22 (to avoid conflict with host SSH)
+  - Connect: `ssh -p 2222 ralph@localhost`, then `tmux attach-session -t ralph`
+  - ENABLE_SSH env var is set in Dockerfile to persist build arg for runtime scripts
+---
+
+## 2026-01-20 - US-026
+- Created ralph-attach.sh helper script for finding and attaching to Ralph tmux sessions
+- Implementation details:
+  - Script lists active tmux sessions matching `ralph-*` pattern (ralph-i.sh creates sessions as `ralph-$$-$i`)
+  - Auto-attaches if exactly one Ralph session exists
+  - Displays numbered list with selection prompt when multiple sessions exist
+  - Supports direct attachment by session name or list number as argument
+  - Shows session creation timestamp in the list
+  - Provides helpful messages when no sessions are found
+  - Includes --help flag with usage documentation
+  - Added to Dockerfile: COPY ralph-attach.sh, chmod +x
+  - Available in container PATH via /app/ralph
+- Files changed: ralph-attach.sh (new), Dockerfile (modified)
+- **Learnings for future iterations:**
+  - Ralph tmux sessions follow naming pattern: `ralph-<pid>-<iteration>` (set in ralph-i.sh line 377)
+  - Use `tmux list-sessions -F "#{session_name}"` to get session list
+  - Use `tmux display-message -t "$session" -p "#{session_created}"` for session metadata
+  - Script handles non-interactive mode gracefully (exits with instructions)
+  - `exec tmux attach-session` replaces the shell to properly attach
+---
+
+## 2026-01-20 - US-027
+- Added OpenCode server mode for remote TUI attachment
+- Implementation details:
+  - Added server mode configuration env vars:
+    - RALPH_OPENCODE_SERVE=true to enable server mode
+    - RALPH_OPENCODE_PORT (default: 4096)
+    - RALPH_OPENCODE_HOSTNAME (default: 0.0.0.0 for remote access)
+  - Added server management functions:
+    - is_server_running() - checks PID file and process
+    - start_server() - starts `opencode serve` in background with health check
+    - stop_server() - gracefully stops server and cleans up PID file
+  - Updated main() to use `opencode run --attach` when server mode is enabled
+  - Server starts automatically on first request if not already running
+  - Falls back to direct execution if server fails to start
+- Files changed: agents/opencode.sh (modified)
+- **Learnings for future iterations:**
+  - OpenCode `serve` command starts a headless server for remote attachment
+  - Use `--attach http://host:port` flag with `opencode run` to connect to server
+  - PID file at /tmp/opencode-serve.pid tracks server process
+  - Server log at /tmp/opencode-serve.log for debugging
+  - Remote clients connect via: `opencode attach http://hostname:port`
+  - Server security warning: OPENCODE_SERVER_PASSWORD not set message is normal for local dev
+---
+
+## 2026-01-20 - US-028
+- Added pause command ('p' key) to interactive mode in ralph-i.sh
+- Implementation details:
+  - Added USER_PAUSED flag to track pause state
+  - 'p' key sends checkpoint message to agent: "IMPORTANT: Ralph is being paused..."
+  - Waits up to 30 seconds for agent to process checkpoint (checks for prompt return)
+  - Gracefully kills tmux session after agent saves state
+  - Logs pause event to progress.txt with timestamp, iteration, and current story
+  - Exit message shows resume command
+  - Updated shortcut display: [i: message | f: checkpoint | p: pause | q: quit]
+  - Updated help text with pause description: "p: Pause (save state and stop, resume with 'r')"
+  - Updated startup banner shortcut display
+- Files changed: ralph-i.sh (modified)
+- **Learnings for future iterations:**
+  - Pause differs from quit: pause asks agent to save state first, quit stops immediately
+  - 30-second timeout prevents infinite wait if agent is unresponsive
+  - Agent prompt detection uses regex: grep -qE "^(❯|>|\$)"
+  - Pause state logging format follows existing progress.txt entry pattern
+  - US-029 will implement the 'r' (resume) command referenced in help text
+---
+
+## 2026-01-20 - US-029
+- Added resume command ('r' key) to interactive mode in ralph-i.sh
+- Implementation details:
+  - Modified pause behavior to enter "paused state" instead of exiting immediately
+  - In paused state, shows "[r: resume | q: quit]" prompt and waits for input
+  - 'r' key logs RESUMED event to progress.txt and continues to next iteration
+  - 'q' key exits the script as before
+  - Updated help text to document 'r' as a separate interactive control
+  - For non-TTY mode (no terminal), falls back to exit with resume instructions
+  - Uses `stty` to handle raw keyboard input in paused state
+- Files changed: ralph-i.sh (modified)
+- **Learnings for future iterations:**
+  - Pause/resume is implemented as a state machine within the iteration loop
+  - The `continue` statement after resume breaks out to the next iteration
+  - USER_PAUSED flag controls flow: set to true on 'p', reset to false on 'r'
+  - Progress.txt logs both PAUSED and RESUMED events for audit trail
+---
+
+## 2026-01-20 - US-030
+- Created ralph-status.sh HTTP status API server
+- Implementation details:
+  - Uses embedded Node.js HTTP server (since Node is available in Docker image)
+  - Endpoints: GET / and /status (full status), GET /health (health check)
+  - Returns JSON with: task, description, branch, agent, iteration, stories (complete/total/progress), currentStory, status, lastUpdate
+  - Reads task info from prd.json, iteration count from progress.txt
+  - Status detection: complete (all stories pass), paused (PAUSED in progress), running (progress file exists), idle (no progress)
+  - Progress percentage calculated as: complete * 100 / total (rounded to 1 decimal)
+  - Environment variables: RALPH_STATUS_PORT (default 8080), RALPH_TASK_DIR
+- Files changed: ralph-status.sh (new)
+- **Learnings for future iterations:**
+  - Node.js heredoc in bash: use `node << 'NODESCRIPT'` with single quotes to prevent variable expansion
+  - Export variables before heredoc so Node can access them via process.env
+  - Progress file iteration count: grep pattern `^## YYYY-MM-DD` matches iteration entries
+  - Status API is designed to run as a background service in container
+---
+
+## 2026-01-20 - US-031
+- Integrated status API into container for automatic startup
+- Implementation details:
+  - Added ralph-status.sh to Dockerfile COPY and chmod +x
+  - Added EXPOSE 8080 to Dockerfile for status API port
+  - Created start_status_api() function in entrypoint.sh:
+    - Auto-detects task directory from /app/project/tasks/ if RALPH_TASK_DIR not set
+    - Starts ralph-status.sh in background with nohup
+    - Logs output to /tmp/ralph-status.log, PID to /tmp/ralph-status.pid
+    - Uses RALPH_STATUS_PORT (default 8080) for configuration
+  - Port already exposed in docker-compose.yml at line 131
+  - Updated entrypoint.sh header documentation with Status API section
+- Files changed: Dockerfile (modified), docker/entrypoint.sh (modified)
+- **Learnings for future iterations:**
+  - Use nohup to run background processes that need to outlive the parent shell
+  - Auto-detection pattern: iterate over directories looking for marker file (prd.json)
+  - Background process verification: `kill -0 $pid 2>/dev/null` to check if running
+  - Container testing: `docker run -d -p 8080:8080 -v ./tasks:/app/project/tasks:ro` for quick API tests
+---
+
+## 2026-01-20 - US-032
+- Updated AGENTS.md with comprehensive multi-agent documentation
+- Added new "Multi-Agent Support" section covering:
+  - Agent selection precedence (story > CLI > env > prd.json > default)
+  - Per-story agent override with JSON examples
+  - Per-story model override for OpenCode cost optimization
+  - Automatic failover configuration (threshold, CLI, env, prd.json)
+  - Agent wrapper scripts documentation
+- Files changed: AGENTS.md (modified)
+- **Learnings for future iterations:**
+  - AGENTS.md is the main documentation file for Ralph - keep it updated with new features
+  - Documentation stories are straightforward - just need to extract info from existing code
+  - The prd.json.example file already had good examples of per-story agent/model overrides
+---
+## 2026-01-20 - US-033
+- Created docs/remote-execution.md with comprehensive Docker documentation
+- Documentation sections include:
+  - Quick Start guide with 3-step setup
+  - Docker Build: basic build, SSH build, build arguments
+  - Docker Run: basic run, specific task, git clone mode, OpenCode agent
+  - Docker Compose Workflow: setup, common commands, git clone vs volume mount modes
+  - Environment Variables: API keys, project config, Ralph config, SSH server
+  - SSH Access for Claude Sessions: setup, connect, remote access, ralph-attach.sh usage
+  - OpenCode Attach Workflow: server mode setup, remote client connection
+  - Status API: endpoints, example response, configuration
+  - Troubleshooting: permission issues, SSH issues, OpenCode server, status API, git clone
+- Files changed: docs/remote-execution.md (new)
+- **Learnings for future iterations:**
+  - Documentation should include practical examples (copy-paste ready commands)
+  - Tables work well for environment variable documentation
+  - Troubleshooting section prevents future support questions
+  - Cross-referencing other docs (e.g., opencode-integration.md) helps maintain consistency
+---
+
+## 2026-01-20 - US-034
+- Created docs/opencode-integration.md with comprehensive OpenCode documentation
+- Documentation sections include:
+  - Overview: When to use OpenCode vs Claude
+  - Configuration: opencode.json setup, agent selection methods, permission options
+  - Supported Providers and Models: Anthropic, OpenAI, Amazon Bedrock, Google Vertex AI with model tables and cost indicators
+  - Differences from Claude: Feature comparison table, invocation differences, prompt preprocessing, error handling
+  - Server Mode for Remote Attachment: Enable server mode, attach from remote client
+  - Troubleshooting: API key issues, model not found, permission denied, server mode issues, failover issues, output format differences, performance issues
+- Files changed: docs/opencode-integration.md (new)
+- **Learnings for future iterations:**
+  - OpenCode model format is `provider/model` (e.g., `anthropic/claude-haiku-4`)
+  - Claude Code CLI does NOT support model selection - model is determined by subscription
+  - OpenCode uses `opencode run "prompt"` while Claude uses `echo "prompt" | claude`
+  - opencode.json with `"permission": "allow"` is essential for autonomous operation
+  - Server mode environment: RALPH_OPENCODE_SERVE, RALPH_OPENCODE_PORT, RALPH_OPENCODE_HOSTNAME
+---
+
+## 2026-01-20 - US-035
+- Updated README.md with comprehensive multi-agent and Docker features documentation
+- Changes made:
+  - Updated intro to mention OpenCode and multi-agent support
+  - Added Multi-Agent Support section with:
+    - Available agents table (claude, opencode)
+    - Agent selection precedence (story > CLI > env > prd.json > default)
+    - Per-story override examples for cost optimization
+    - Automatic failover configuration
+    - Link to docs/opencode-integration.md
+  - Added Docker / Remote Execution section with:
+    - Quick start guide
+    - Running with different agents
+    - Remote session attachment (SSH+tmux for Claude, native for OpenCode)
+    - Status API documentation
+    - Link to docs/remote-execution.md
+  - Updated command examples with --agent and --failover-threshold flags
+  - Updated Key Files table with agents/ and Dockerfile
+  - Updated language from "Claude Code instance" to "agent instance" where appropriate
+  - Added OpenCode to references section
+- Files changed: README.md (modified)
+- **Learnings for future iterations:**
+  - README updates are straightforward - extract and summarize from detailed docs
+  - Keep README concise - link to detailed docs for comprehensive information
+  - Use tables for clear comparison (agents, options)
+---

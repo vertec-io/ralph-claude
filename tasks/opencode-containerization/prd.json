@@ -1,0 +1,536 @@
+{
+  "schemaVersion": "2.0",
+  "project": "Ralph",
+  "taskDir": "tasks/opencode-containerization",
+  "branchName": "ralph/opencode-containerization",
+  "type": "feature",
+  "description": "OpenCode Integration & Remote Containerization - Multi-agent support with Docker deployment",
+  "agent": "claude",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Create agents directory structure",
+      "description": "As a developer, I need an organized directory for agent wrapper scripts.",
+      "acceptanceCriteria": [
+        { "description": "Create `agents/` directory in ralph-claude root", "passes": true },
+        { "description": "Create `agents/common.sh` with shared utility functions (error detection, output parsing)", "passes": true },
+        { "description": "Add agents/ to any relevant .gitignore exceptions if needed", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Extract Claude invocation to agent wrapper",
+      "description": "As a developer, I want Claude invocation logic extracted to a reusable wrapper script.",
+      "acceptanceCriteria": [
+        { "description": "Create `agents/claude.sh` that accepts prompt via stdin", "passes": true },
+        { "description": "Script outputs to stdout (maintains current behavior)", "passes": true },
+        { "description": "Script handles --dangerously-skip-permissions flag", "passes": true },
+        { "description": "Script supports --output-format stream-json for status parsing", "passes": true },
+        { "description": "Script is executable (chmod +x)", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Create OpenCode agent wrapper",
+      "description": "As a developer, I want an OpenCode wrapper script with the same interface as Claude.",
+      "acceptanceCriteria": [
+        { "description": "Create `agents/opencode.sh` that accepts prompt via stdin", "passes": true },
+        { "description": "Script uses `opencode run` command for non-interactive execution", "passes": true },
+        { "description": "Script outputs to stdout in compatible format", "passes": true },
+        { "description": "Script supports MODEL environment variable for model selection", "passes": true },
+        { "description": "Script is executable (chmod +x)", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "OpenCode uses `opencode run \"prompt\"` for headless execution. Supports --model provider/model and --format json flags."
+    },
+    {
+      "id": "US-004",
+      "title": "Create OpenCode configuration for autonomous mode",
+      "description": "As a developer, I need OpenCode configured to run autonomously without permission prompts.",
+      "acceptanceCriteria": [
+        { "description": "Create `opencode.json` config file for Ralph projects", "passes": true },
+        { "description": "Set permission to allow all operations: `\"permission\": \"allow\"`", "passes": true },
+        { "description": "Document required environment variables (API keys)", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "OpenCode permissions docs: https://opencode.ai/docs/permissions/"
+    },
+    {
+      "id": "US-005",
+      "title": "Update ralph.sh to use agent abstraction",
+      "description": "As a developer, I want ralph.sh to call agent wrapper scripts instead of Claude directly.",
+      "acceptanceCriteria": [
+        { "description": "Replace direct `claude` invocation with call to agent wrapper script", "passes": true },
+        { "description": "Default to `agents/claude.sh` for backwards compatibility", "passes": true },
+        { "description": "Agent script path is determined by AGENT variable", "passes": true },
+        { "description": "Existing Claude-only workflow still works", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "Agent abstraction already implemented - calls $AGENT_SCRIPT which defaults to agents/claude.sh"
+    },
+    {
+      "id": "US-006",
+      "title": "Add --agent CLI flag to ralph.sh",
+      "description": "As a developer, I want to select the agent via command line flag.",
+      "acceptanceCriteria": [
+        { "description": "Add `--agent <claude|opencode>` flag to ralph.sh argument parsing", "passes": true },
+        { "description": "Flag sets AGENT variable used by agent abstraction", "passes": true },
+        { "description": "Update help text (-h) with --agent option", "passes": true },
+        { "description": "Invalid agent name shows error message", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Implemented --agent flag with VALID_AGENTS validation. Also tracks AGENT_SOURCE for future story US-009 (show agent source in banner)."
+    },
+    {
+      "id": "US-007",
+      "title": "Add RALPH_AGENT environment variable support",
+      "description": "As a developer, I want to select the agent via environment variable.",
+      "acceptanceCriteria": [
+        { "description": "ralph.sh reads RALPH_AGENT environment variable", "passes": true },
+        { "description": "CLI --agent flag takes precedence over env var", "passes": true },
+        { "description": "Document env var in help text", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "RALPH_AGENT env var is read at startup before arg parsing. CLI --agent flag overwrites this value if provided, ensuring CLI > env precedence."
+    },
+    {
+      "id": "US-008",
+      "title": "Add agent field to prd.json schema",
+      "description": "As a developer, I want to specify the default agent in prd.json for task-level configuration.",
+      "acceptanceCriteria": [
+        { "description": "ralph.sh reads `agent` field from prd.json", "passes": true },
+        { "description": "Precedence: CLI > env var > prd.json > default (claude)", "passes": true },
+        { "description": "Update prd.json.example with agent field", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "Agent is read from prd.json after PRD_FILE validation. AGENT_SOURCE tracks provenance: 'default', 'env', 'cli', or 'prd'."
+    },
+    {
+      "id": "US-009",
+      "title": "Display selected agent in Ralph startup banner",
+      "description": "As a developer, I want to see which agent is being used when Ralph starts.",
+      "acceptanceCriteria": [
+        { "description": "Add 'Agent:' line to startup banner showing selected agent", "passes": true },
+        { "description": "Show agent source (cli/env/prd/default) in parentheses", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "Added 'Agent: $AGENT ($AGENT_SOURCE)' line to startup banner at ralph.sh:318"
+    },
+    {
+      "id": "US-010",
+      "title": "Add per-story agent override to prd.json schema",
+      "description": "As a developer, I want to override the agent for specific stories.",
+      "acceptanceCriteria": [
+        { "description": "Add optional `agent` field to userStory schema in prd.json", "passes": true },
+        { "description": "ralph.sh uses story-level agent when present, falls back to task-level", "passes": true },
+        { "description": "Update prd.json.example with per-story agent example", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "Story-level agent detected via jq, ITERATION_AGENT/ITERATION_AGENT_SCRIPT used in main loop. Precedence: story > CLI > env > prd > default."
+    },
+    {
+      "id": "US-011",
+      "title": "Add per-story model override to prd.json schema",
+      "description": "As a developer, I want to specify a different model for specific stories.",
+      "acceptanceCriteria": [
+        { "description": "Add optional `model` field to userStory schema (e.g., 'anthropic/claude-haiku-4-5')", "passes": true },
+        { "description": "Pass model to agent wrapper via MODEL environment variable", "passes": true },
+        { "description": "OpenCode agent uses --model flag when MODEL is set", "passes": true },
+        { "description": "Document Claude model limitation if applicable", "passes": true },
+        { "description": "Update prd.json.example with per-story model example", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "Model override implemented: ralph.sh extracts story model, passes MODEL env var to agent wrapper. OpenCode uses --model flag. Claude CLI limitation documented in agents/claude.sh header."
+    },
+    {
+      "id": "US-012",
+      "title": "Audit prompt.md for agent compatibility",
+      "description": "As a developer, I want to identify Claude-specific assumptions in the Ralph prompt.",
+      "acceptanceCriteria": [
+        { "description": "Review prompt.md for Claude-specific terminology or tool names", "passes": true },
+        { "description": "Document differences in notes field for next story", "passes": true },
+        { "description": "Identify sections that need agent-specific variants", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "AUDIT FINDINGS: prompt.md is MOSTLY AGENT-AGNOSTIC. Only one Claude-specific reference found: 'MCP browser tools' on line 131 (Browser Testing section). This is listed as one option alongside Playwright which is universal. RECOMMENDATION: For US-013, add agent-specific marker around the MCP tools mention OR keep as-is since it's optional. The rest of the prompt uses generic terminology: 'autonomous coding agent', 'browser automation tool', standard git/shell commands. NO major changes needed - the prompt is highly portable between Claude and OpenCode."
+    },
+    {
+      "id": "US-013",
+      "title": "Add agent-specific prompt sections",
+      "description": "As a developer, I want prompt.md to have agent-specific sections where behavior differs.",
+      "acceptanceCriteria": [
+        { "description": "Add conditional markers for agent-specific content (e.g., <!-- agent:claude --> ... <!-- /agent:claude -->)", "passes": true },
+        { "description": "Create prompt preprocessing function in agents/common.sh", "passes": true },
+        { "description": "Function filters prompt based on current agent", "passes": true },
+        { "description": "Both agents receive appropriate instructions", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "Implemented preprocess_prompt() function in agents/common.sh. Added agent-specific markers to Browser Testing section in prompt.md. Claude gets MCP browser tools reference, OpenCode does not."
+    },
+    {
+      "id": "US-014",
+      "title": "Add failure tracking to ralph.sh",
+      "description": "As a developer, I want Ralph to track consecutive agent failures for failover logic.",
+      "acceptanceCriteria": [
+        { "description": "Track consecutive failure count per agent in memory", "passes": true },
+        { "description": "Detect failure by checking exit code and output for error patterns", "passes": true },
+        { "description": "Reset failure count on successful iteration", "passes": true },
+        { "description": "Log failure events to progress.txt", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "Implemented FAILURE_COUNT and LAST_FAILURE_MSG associative arrays. detect_iteration_failure() checks exit code, empty output, and agent-level error patterns (rate limit, API errors, timeouts). log_failure_to_progress() logs failures with agent, story, count, and error. Failure count resets on success."
+    },
+    {
+      "id": "US-015",
+      "title": "Implement automatic agent failover",
+      "description": "As a developer, I want Ralph to switch agents after consecutive failures.",
+      "acceptanceCriteria": [
+        { "description": "After N consecutive failures (default 3), switch to alternate agent", "passes": true },
+        { "description": "Log failover event to progress.txt with reason", "passes": true },
+        { "description": "Continue iteration with new agent", "passes": true },
+        { "description": "If both agents fail, stop with clear error message", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "Implemented FAILOVER_THRESHOLD (default 3), get_alternate_agent(), log_failover_to_progress(), both_agents_failed(). Failover updates AGENT/AGENT_SOURCE='failover' for next iteration. Both-agents-failed shows detailed error info and exits."
+    },
+    {
+      "id": "US-016",
+      "title": "Add failover configuration options",
+      "description": "As a developer, I want to configure the failover threshold.",
+      "acceptanceCriteria": [
+        { "description": "Add `--failover-threshold N` CLI flag", "passes": true },
+        { "description": "Add `RALPH_FAILOVER_THRESHOLD` environment variable", "passes": true },
+        { "description": "Add `failoverThreshold` field to prd.json schema", "passes": true },
+        { "description": "Update help text with failover options", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 16,
+      "passes": true,
+      "notes": "Implemented full failover configuration: CLI --failover-threshold > RALPH_FAILOVER_THRESHOLD env > prd.json failoverThreshold > default (3). FAILOVER_THRESHOLD_SOURCE tracks provenance."
+    },
+    {
+      "id": "US-017",
+      "title": "Update ralph-i.sh for multi-agent support",
+      "description": "As a developer, I want interactive mode to support agent selection.",
+      "acceptanceCriteria": [
+        { "description": "Add --agent flag to ralph-i.sh matching ralph.sh", "passes": true },
+        { "description": "Support RALPH_AGENT environment variable", "passes": true },
+        { "description": "Read agent from prd.json", "passes": true },
+        { "description": "Display agent in interactive mode banner", "passes": true },
+        { "description": "Use agent abstraction for Claude invocation", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 17,
+      "passes": true,
+      "notes": "Added multi-agent support matching ralph.sh. Agent precedence: CLI --agent > RALPH_AGENT env > prd.json agent > default (claude). Uses agent wrapper scripts via tmux. OpenCode support uses the same wrapper script approach."
+    },
+    {
+      "id": "US-018",
+      "title": "Create base Dockerfile",
+      "description": "As a developer, I want a Dockerfile with the base system and common tools.",
+      "acceptanceCriteria": [
+        { "description": "Create `Dockerfile` based on node:20-bookworm (has Node + apt)", "passes": true },
+        { "description": "Install common tools: git, jq, curl, tmux, openssh-client", "passes": true },
+        { "description": "Set up non-root user for security", "passes": true },
+        { "description": "Configure working directory structure", "passes": true },
+        { "description": "Test: Docker build succeeds", "passes": true }
+      ],
+      "priority": 18,
+      "passes": true,
+      "notes": "Used UID 1001 for ralph user to avoid conflict with node user (UID 1000). Directory structure: /app/ralph for scripts, /app/project for target repo. npm global prefix set up for non-root package installs."
+    },
+    {
+      "id": "US-019",
+      "title": "Add Claude Code CLI to Dockerfile",
+      "description": "As a developer, I want Claude Code CLI installed in the container.",
+      "acceptanceCriteria": [
+        { "description": "Install Claude Code CLI via npm", "passes": true },
+        { "description": "Verify `claude --version` works in container", "passes": true },
+        { "description": "Document ANTHROPIC_API_KEY environment variable requirement", "passes": true },
+        { "description": "Test: Claude CLI is accessible", "passes": true }
+      ],
+      "priority": 19,
+      "passes": true,
+      "notes": "Claude Code CLI package: @anthropic-ai/claude-code (v2.1.12). Build-time verification with `claude --version` ensures CLI is properly installed. ANTHROPIC_API_KEY documented in Dockerfile comments."
+    },
+    {
+      "id": "US-020",
+      "title": "Add OpenCode to Dockerfile",
+      "description": "As a developer, I want OpenCode installed in the container.",
+      "acceptanceCriteria": [
+        { "description": "Install OpenCode via npm (opencode-ai package)", "passes": true },
+        { "description": "Verify `opencode --version` works in container", "passes": true },
+        { "description": "Document provider API key environment variables", "passes": true },
+        { "description": "Test: OpenCode CLI is accessible", "passes": true }
+      ],
+      "priority": 20,
+      "passes": true,
+      "notes": "OpenCode CLI package: opencode-ai (v1.1.27). Build-time verification with `opencode --version` ensures CLI is properly installed. Provider API keys documented: ANTHROPIC_API_KEY, OPENAI_API_KEY, AWS credentials, Google credentials."
+    },
+    {
+      "id": "US-021",
+      "title": "Add Ralph scripts to Dockerfile",
+      "description": "As a developer, I want Ralph scripts copied into the container.",
+      "acceptanceCriteria": [
+        { "description": "Copy ralph.sh, ralph-i.sh, prompt.md to /app/ralph/", "passes": true },
+        { "description": "Copy agents/ directory to /app/ralph/agents/", "passes": true },
+        { "description": "Copy skills/ directory if needed", "passes": true },
+        { "description": "Set correct permissions on scripts", "passes": true },
+        { "description": "Add /app/ralph to PATH", "passes": true },
+        { "description": "Test: ralph.sh --help works in container", "passes": true }
+      ],
+      "priority": 21,
+      "passes": true,
+      "notes": "COPY runs as root then ownership fixed. PATH includes /app/ralph. Also copied opencode.json config file for autonomous mode."
+    },
+    {
+      "id": "US-022",
+      "title": "Create container entrypoint script",
+      "description": "As a developer, I want an entrypoint that clones the project and sets up the environment.",
+      "acceptanceCriteria": [
+        { "description": "Create `docker/entrypoint.sh` script", "passes": true },
+        { "description": "Clone project from RALPH_PROJECT_GIT_URL if set", "passes": true },
+        { "description": "Checkout RALPH_PROJECT_BRANCH if set (default: main)", "passes": true },
+        { "description": "Run RALPH_SETUP_COMMANDS if set (e.g., 'npm install')", "passes": true },
+        { "description": "Fall through to CMD or interactive shell", "passes": true },
+        { "description": "Test: Container clones project on startup", "passes": true }
+      ],
+      "priority": 22,
+      "passes": true,
+      "notes": "Entrypoint at docker/entrypoint.sh handles: SSH key setup (RALPH_PROJECT_SSH_KEY), git clone, branch checkout, setup commands. Falls through to exec $@ for CMD."
+    },
+    {
+      "id": "US-023",
+      "title": "Create docker-compose.yml",
+      "description": "As a developer, I want a compose file for easy container orchestration.",
+      "acceptanceCriteria": [
+        { "description": "Create `docker-compose.yml` in project root", "passes": true },
+        { "description": "Define ralph service with build context", "passes": true },
+        { "description": "Support environment variables for project URL, branch, API keys", "passes": true },
+        { "description": "Mount volume for task persistence", "passes": true },
+        { "description": "Expose ports: 4096 (OpenCode), 8080 (status API)", "passes": true },
+        { "description": "Test: docker-compose up builds and runs", "passes": true }
+      ],
+      "priority": 23,
+      "passes": true,
+      "notes": "docker-compose.yml created with ralph service, custom network, env vars from .env, tasks volume mount, ports 4096+8080 exposed. Verified with docker-compose build and run."
+    },
+    {
+      "id": "US-024",
+      "title": "Create .env.example for Docker",
+      "description": "As a developer, I want a template for required environment variables.",
+      "acceptanceCriteria": [
+        { "description": "Create `docker/.env.example` with all supported variables", "passes": true },
+        { "description": "Include RALPH_PROJECT_GIT_URL, RALPH_PROJECT_BRANCH", "passes": true },
+        { "description": "Include ANTHROPIC_API_KEY, OPENAI_API_KEY placeholders", "passes": true },
+        { "description": "Include RALPH_AGENT, RALPH_FAILOVER_THRESHOLD", "passes": true },
+        { "description": "Add comments explaining each variable", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 24,
+      "passes": true,
+      "notes": "Created docker/.env.example with comprehensive documentation. Includes all API keys (Anthropic, OpenAI, AWS, Google), project config (GIT_URL, BRANCH, SETUP_COMMANDS, SSH_KEY), and Ralph config (AGENT, FAILOVER_THRESHOLD, OPENCODE_SERVE/PORT, STATUS_PORT)."
+    },
+    {
+      "id": "US-025",
+      "title": "Add optional SSH server to Dockerfile",
+      "description": "As a developer, I want SSH access to the container for Claude session attachment.",
+      "acceptanceCriteria": [
+        { "description": "Add openssh-server installation (conditional via build arg)", "passes": true },
+        { "description": "Configure SSH to allow key-based auth only", "passes": true },
+        { "description": "Add RALPH_SSH_AUTHORIZED_KEYS env var for key injection", "passes": true },
+        { "description": "Expose port 22 in compose when SSH enabled", "passes": true },
+        { "description": "Test: SSH connection works when enabled", "passes": true }
+      ],
+      "priority": 25,
+      "passes": true,
+      "notes": "SSH server is conditionally installed via ENABLE_SSH build arg. Build with: docker build --build-arg ENABLE_SSH=true -t ralph-ssh . Container must be run as root for sshd to start (entrypoint then switches to ralph for CMD). Port 2222 on host maps to 22 in container."
+    },
+    {
+      "id": "US-026",
+      "title": "Create ralph-attach.sh helper script",
+      "description": "As a developer, I want a script to easily find and attach to running Ralph tmux sessions.",
+      "acceptanceCriteria": [
+        { "description": "Create `ralph-attach.sh` that lists active Ralph tmux sessions", "passes": true },
+        { "description": "If one session, attach automatically", "passes": true },
+        { "description": "If multiple sessions, prompt for selection", "passes": true },
+        { "description": "Include in Docker image", "passes": true },
+        { "description": "Test: Script finds and attaches to sessions", "passes": true }
+      ],
+      "priority": 26,
+      "passes": true,
+      "notes": "ralph-attach.sh finds sessions matching 'ralph-*' pattern. Supports auto-attach (1 session), interactive selection (multiple), or direct attachment by name/number. Added to Dockerfile PATH."
+    },
+    {
+      "id": "US-027",
+      "title": "Add OpenCode server mode for remote attachment",
+      "description": "As a developer, I want OpenCode to run in server mode for remote TUI attachment.",
+      "acceptanceCriteria": [
+        { "description": "Update agents/opencode.sh to optionally start `opencode serve` in background", "passes": true },
+        { "description": "Add RALPH_OPENCODE_SERVE=true env var to enable server mode", "passes": true },
+        { "description": "Configure server port via RALPH_OPENCODE_PORT (default 4096)", "passes": true },
+        { "description": "Use `opencode run --attach` when server is running", "passes": true },
+        { "description": "Test: Local `opencode attach http://localhost:4096` connects", "passes": true }
+      ],
+      "priority": 27,
+      "passes": true,
+      "notes": "Implemented server mode: RALPH_OPENCODE_SERVE=true starts `opencode serve` in background. Uses --attach flag for connections. RALPH_OPENCODE_PORT (default 4096), RALPH_OPENCODE_HOSTNAME (default 0.0.0.0). Remote clients: `opencode attach http://host:port`."
+    },
+    {
+      "id": "US-028",
+      "title": "Add pause command to interactive mode",
+      "description": "As a developer, I want to pause Ralph execution and save state.",
+      "acceptanceCriteria": [
+        { "description": "Add 'p' key binding for pause in ralph-i.sh", "passes": true },
+        { "description": "Pause saves current state to progress.txt", "passes": true },
+        { "description": "Pause gracefully stops current iteration", "passes": true },
+        { "description": "Update interactive mode help text with pause command", "passes": true },
+        { "description": "Test: Pause correctly saves state and stops", "passes": true }
+      ],
+      "priority": 28,
+      "passes": true,
+      "notes": "Pause ('p' key) sends checkpoint message to agent, waits up to 30s for state save, then exits gracefully. State logged to progress.txt with timestamp, iteration, and current story."
+    },
+    {
+      "id": "US-029",
+      "title": "Add resume command to interactive mode",
+      "description": "As a developer, I want to resume Ralph from a paused state.",
+      "acceptanceCriteria": [
+        { "description": "Add 'r' key binding for resume in ralph-i.sh", "passes": true },
+        { "description": "Resume continues from last saved state", "passes": true },
+        { "description": "Resume only available after pause", "passes": true },
+        { "description": "Update interactive mode help text with resume command", "passes": true },
+        { "description": "Test: Resume correctly continues execution", "passes": true }
+      ],
+      "priority": 29,
+      "passes": true,
+      "notes": "Resume ('r' key) enters paused state after saving (instead of exiting), then allows 'r' to continue to next iteration or 'q' to quit. Logs pause/resume events to progress.txt."
+    },
+    {
+      "id": "US-030",
+      "title": "Create status API server script",
+      "description": "As a developer, I want a simple HTTP endpoint to check Ralph status.",
+      "acceptanceCriteria": [
+        { "description": "Create `ralph-status.sh` that serves JSON status on HTTP", "passes": true },
+        { "description": "Use netcat or simple Node script for HTTP server", "passes": true },
+        { "description": "Return JSON: {task, agent, iteration, stories: {complete, total}, status}", "passes": true },
+        { "description": "Read status from prd.json and progress.txt", "passes": true },
+        { "description": "Test: curl localhost:8080 returns valid JSON", "passes": true }
+      ],
+      "priority": 30,
+      "passes": true,
+      "notes": "Implemented using Node.js HTTP server (embedded in bash script). Returns JSON with task, description, branch, agent, iteration counts, story counts/progress, currentStory, status, and lastUpdate. Endpoints: GET / and /status (full status), GET /health (health check)."
+    },
+    {
+      "id": "US-031",
+      "title": "Integrate status API into container",
+      "description": "As a developer, I want the status API to run automatically in the container.",
+      "acceptanceCriteria": [
+        { "description": "Start status API in entrypoint.sh background", "passes": true },
+        { "description": "Configure port via RALPH_STATUS_PORT (default 8080)", "passes": true },
+        { "description": "Expose port in docker-compose.yml", "passes": true },
+        { "description": "Test: Status API accessible from host", "passes": true }
+      ],
+      "priority": 31,
+      "passes": true,
+      "notes": "Status API starts via start_status_api() in entrypoint.sh. Auto-detects task dir from /app/project/tasks/ if RALPH_TASK_DIR not set. Logs to /tmp/ralph-status.log, PID in /tmp/ralph-status.pid."
+    },
+    {
+      "id": "US-032",
+      "title": "Update AGENTS.md with multi-agent documentation",
+      "description": "As a developer, I want AGENTS.md updated with new multi-agent features.",
+      "acceptanceCriteria": [
+        { "description": "Document agent selection methods (CLI, env, prd.json)", "passes": true },
+        { "description": "Document failover behavior and configuration", "passes": true },
+        { "description": "Document per-story agent/model override", "passes": true },
+        { "description": "Add examples for common use cases", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 32,
+      "passes": true,
+      "notes": "Added comprehensive Multi-Agent Support section to AGENTS.md with agent selection, per-story overrides, model overrides, and automatic failover documentation."
+    },
+    {
+      "id": "US-033",
+      "title": "Create docs/remote-execution.md",
+      "description": "As a developer, I want documentation for running Ralph in Docker.",
+      "acceptanceCriteria": [
+        { "description": "Create `docs/remote-execution.md`", "passes": true },
+        { "description": "Document Docker build and run process", "passes": true },
+        { "description": "Document docker-compose workflow", "passes": true },
+        { "description": "Document environment variables", "passes": true },
+        { "description": "Document SSH access for Claude sessions", "passes": true },
+        { "description": "Document OpenCode attach workflow", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 33,
+      "passes": true,
+      "notes": "Comprehensive documentation covering Quick Start, Docker build/run, docker-compose workflow, all environment variables, SSH access with ralph-attach.sh, OpenCode server mode attach workflow, status API, and troubleshooting."
+    },
+    {
+      "id": "US-034",
+      "title": "Create docs/opencode-integration.md",
+      "description": "As a developer, I want documentation specific to OpenCode integration.",
+      "acceptanceCriteria": [
+        { "description": "Create `docs/opencode-integration.md`", "passes": true },
+        { "description": "Document OpenCode configuration for Ralph", "passes": true },
+        { "description": "Document supported providers and models", "passes": true },
+        { "description": "Document differences from Claude behavior", "passes": true },
+        { "description": "Include troubleshooting section", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 34,
+      "passes": true,
+      "notes": "Comprehensive documentation covering: configuration (opencode.json, environment variables, agent selection), supported providers (Anthropic, OpenAI, Bedrock, Vertex AI) with model tables, feature comparison with Claude, server mode for remote attachment, and detailed troubleshooting section."
+    },
+    {
+      "id": "US-035",
+      "title": "Update README.md with new features",
+      "description": "As a developer, I want the README updated with multi-agent and Docker features.",
+      "acceptanceCriteria": [
+        { "description": "Add multi-agent section to README", "passes": true },
+        { "description": "Add Docker/remote execution section", "passes": true },
+        { "description": "Update command examples with --agent flag", "passes": true },
+        { "description": "Link to detailed docs", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
+      ],
+      "priority": 35,
+      "passes": true,
+      "notes": "Added Multi-Agent Support section with agent selection precedence, per-story overrides, and automatic failover. Added Docker/Remote Execution section with quick start, remote attachment (SSH+tmux for Claude, native for OpenCode), and status API. Updated command examples with --agent and --failover-threshold flags. Linked to docs/opencode-integration.md and docs/remote-execution.md."
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+- [ ] unify ralph.sh and ralph-tui. ralph.sh (or just ralph when installed) is what runs the ralph loop. Ralph-tui is just a visualizer for the various ralph loops being run. Ralph-tui shouldn't start loops with the cli--however, inside the ralph-tui tui there should be a way to start ralph loops
+- [ ] ralph-tui and ralph attach should wind up being similar, but with ralph attach only attaching to one loop
+- [ ] change ralph.sh to a python script ralph.py, installable with uv as a uv tool. Ralph-tui will also have to account for this
+- [ ] when a ralph loop starts, we need better management of what branch it is starting from and what happens at the end of the loop
+- [ ] opencode implements claude stop hooks through plugins: https://opencode.ai/docs/plugins/. We can use this to allow opencode to be interacted with inside of the ralph-tui or ralph attach (ie, use opencode --prompt instead of opencode --run), and still let the script detect when opencode is done so the next iteration of the loop can start

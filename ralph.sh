@@ -63,6 +63,141 @@ kill_session() {
 }
 
 # =============================================================================
+# Global Session Registry (SQLite)
+# =============================================================================
+
+RALPH_DB_DIR="$HOME/.local/share/ralph"
+RALPH_DB="$RALPH_DB_DIR/sessions.db"
+
+# Initialize SQLite database if needed
+init_session_db() {
+  if ! command -v sqlite3 &>/dev/null; then
+    # SQLite not available - degrade gracefully
+    return 1
+  fi
+  
+  mkdir -p "$RALPH_DB_DIR"
+  
+  sqlite3 "$RALPH_DB" <<EOF
+CREATE TABLE IF NOT EXISTS sessions (
+  session_name TEXT PRIMARY KEY,
+  task_dir TEXT NOT NULL,
+  pid INTEGER,
+  agent TEXT,
+  started_at TEXT,
+  max_iterations INTEGER,
+  current_iteration INTEGER DEFAULT 0,
+  completed_stories INTEGER DEFAULT 0,
+  total_stories INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'running'
+);
+EOF
+}
+
+# Register a new session in the database
+register_session() {
+  local session_name="$1"
+  local task_dir="$2"
+  local pid="$3"
+  local agent="$4"
+  local max_iter="$5"
+  local total_stories="$6"
+  local completed_stories="$7"
+  
+  command -v sqlite3 &>/dev/null || return 1
+  init_session_db || return 1
+  
+  sqlite3 "$RALPH_DB" <<EOF
+INSERT OR REPLACE INTO sessions 
+  (session_name, task_dir, pid, agent, started_at, max_iterations, total_stories, completed_stories, status)
+VALUES 
+  ('$session_name', '$task_dir', $pid, '$agent', datetime('now'), $max_iter, $total_stories, $completed_stories, 'running');
+EOF
+}
+
+# Update session progress
+update_session_progress() {
+  local session_name="$1"
+  local current_iter="$2"
+  local completed="$3"
+  
+  command -v sqlite3 &>/dev/null || return 1
+  [ -f "$RALPH_DB" ] || return 1
+  
+  sqlite3 "$RALPH_DB" <<EOF
+UPDATE sessions 
+SET current_iteration = $current_iter, completed_stories = $completed
+WHERE session_name = '$session_name';
+EOF
+}
+
+# Mark session as completed or stopped
+finish_session() {
+  local session_name="$1"
+  local status="$2"  # 'completed', 'stopped', 'failed'
+  
+  command -v sqlite3 &>/dev/null || return 1
+  [ -f "$RALPH_DB" ] || return 1
+  
+  sqlite3 "$RALPH_DB" <<EOF
+UPDATE sessions SET status = '$status' WHERE session_name = '$session_name';
+EOF
+}
+
+# Remove session from database
+unregister_session() {
+  local session_name="$1"
+  
+  command -v sqlite3 &>/dev/null || return 1
+  [ -f "$RALPH_DB" ] || return 1
+  
+  sqlite3 "$RALPH_DB" "DELETE FROM sessions WHERE session_name = '$session_name';"
+}
+
+# List all sessions from database (for global visibility)
+list_all_sessions() {
+  command -v sqlite3 &>/dev/null || { list_sessions; return; }
+  [ -f "$RALPH_DB" ] || { list_sessions; return; }
+  
+  # Clean up stale sessions first (tmux session no longer exists)
+  local db_sessions=$(sqlite3 "$RALPH_DB" "SELECT session_name FROM sessions WHERE status = 'running';")
+  for session in $db_sessions; do
+    if ! session_exists "$session"; then
+      sqlite3 "$RALPH_DB" "UPDATE sessions SET status = 'dead' WHERE session_name = '$session';"
+    fi
+  done
+  
+  # Return running sessions
+  sqlite3 "$RALPH_DB" "SELECT session_name FROM sessions WHERE status = 'running';"
+}
+
+# Get session info as JSON (for ralph-tui)
+get_session_info() {
+  local session_name="$1"
+  
+  command -v sqlite3 &>/dev/null || return 1
+  [ -f "$RALPH_DB" ] || return 1
+  
+  sqlite3 -json "$RALPH_DB" "SELECT * FROM sessions WHERE session_name = '$session_name';" 2>/dev/null
+}
+
+# Get all sessions as JSON (for ralph-tui)
+get_all_sessions_json() {
+  command -v sqlite3 &>/dev/null || return 1
+  [ -f "$RALPH_DB" ] || return 1
+  
+  # Clean up stale sessions first
+  local db_sessions=$(sqlite3 "$RALPH_DB" "SELECT session_name FROM sessions WHERE status = 'running';")
+  for session in $db_sessions; do
+    if ! session_exists "$session"; then
+      sqlite3 "$RALPH_DB" "UPDATE sessions SET status = 'dead' WHERE session_name = '$session';"
+    fi
+  done
+  
+  sqlite3 -json "$RALPH_DB" "SELECT * FROM sessions ORDER BY started_at DESC;"
+}
+
+# =============================================================================
 # Checkpoint State Management
 # =============================================================================
 
@@ -103,7 +238,8 @@ find_session() {
   if [ -n "$task_dir" ]; then
     get_session_name "$task_dir"
   else
-    local sessions=($(list_sessions))
+    # Use global session list (falls back to tmux-only if no sqlite)
+    local sessions=($(list_all_sessions))
     [ ${#sessions[@]} -eq 0 ] && echo "" && return
     [ ${#sessions[@]} -eq 1 ] && echo "${sessions[0]}" && return
     echo "MULTIPLE"
@@ -122,25 +258,74 @@ cmd_attach() {
 
 cmd_status() {
   check_tmux
-  local sessions=($(list_sessions))
-  [ ${#sessions[@]} -eq 0 ] && echo "No Ralph sessions running." && exit 0
-  echo "Running Ralph sessions:"
-  for s in "${sessions[@]}"; do
-    local prd="tasks/${s#ralph-}/prd.json"
-    local info=""
-    [ -f "$prd" ] && info="($(jq '[.userStories[] | select(.passes == true)] | length' "$prd")/$(jq '.userStories | length' "$prd") stories)"
-    echo "  $s  $info"
-  done
-  echo -e "\nCommands: ralph attach|checkpoint|stop [task]"
+  
+  # Try to get rich info from SQLite first
+  if command -v sqlite3 &>/dev/null && [ -f "$RALPH_DB" ]; then
+    # Clean up stale sessions
+    local db_sessions=$(sqlite3 "$RALPH_DB" "SELECT session_name FROM sessions WHERE status = 'running';")
+    for session in $db_sessions; do
+      if ! session_exists "$session"; then
+        sqlite3 "$RALPH_DB" "UPDATE sessions SET status = 'dead' WHERE session_name = '$session';"
+      fi
+    done
+    
+    local running=$(sqlite3 "$RALPH_DB" "SELECT COUNT(*) FROM sessions WHERE status = 'running';")
+    if [ "$running" -eq 0 ]; then
+      echo "No Ralph sessions running."
+      
+      # Show recent sessions if any
+      local recent=$(sqlite3 -separator ' | ' "$RALPH_DB" "SELECT session_name, status, task_dir FROM sessions ORDER BY started_at DESC LIMIT 5;" 2>/dev/null)
+      if [ -n "$recent" ]; then
+        echo ""
+        echo "Recent sessions:"
+        echo "$recent" | while read line; do
+          echo "  $line"
+        done
+      fi
+      exit 0
+    fi
+    
+    echo "Running Ralph sessions:"
+    echo ""
+    sqlite3 -separator '' "$RALPH_DB" "
+      SELECT 
+        '  ' || session_name || 
+        '  (' || completed_stories || '/' || total_stories || ' stories)' ||
+        '  [' || agent || ']' ||
+        '  iter ' || current_iteration || '/' || max_iterations ||
+        char(10) || '    ' || task_dir
+      FROM sessions 
+      WHERE status = 'running'
+      ORDER BY started_at DESC;
+    "
+    echo ""
+    echo "Commands: ralph attach|checkpoint|stop [task]"
+    echo "          ralph status --json  (machine-readable)"
+  else
+    # Fallback to tmux-only
+    local sessions=($(list_sessions))
+    [ ${#sessions[@]} -eq 0 ] && echo "No Ralph sessions running." && exit 0
+    echo "Running Ralph sessions:"
+    for s in "${sessions[@]}"; do
+      local prd="tasks/${s#ralph-}/prd.json"
+      local info=""
+      [ -f "$prd" ] && info="($(jq '[.userStories[] | select(.passes == true)] | length' "$prd")/$(jq '.userStories | length' "$prd") stories)"
+      echo "  $s  $info"
+    done
+    echo -e "\nCommands: ralph attach|checkpoint|stop [task]"
+  fi
 }
 
 cmd_stop() {
   check_tmux
   local session=$(find_session "$1")
   [ -z "$session" ] && echo "No Ralph session found." && exit 1
-  [ "$session" = "MULTIPLE" ] && { echo "Multiple sessions. Specify: ralph stop <task>"; exit 1; }
+  [ "$session" = "MULTIPLE" ] && { echo "Multiple sessions. Specify: ralph stop <task>"; list_all_sessions; exit 1; }
   echo "Stopping $session..."
-  kill_session "$session" && echo "Stopped."
+  kill_session "$session" && {
+    finish_session "$session" "stopped"
+    echo "Stopped."
+  }
 }
 
 cmd_checkpoint() {
@@ -161,7 +346,14 @@ cmd_checkpoint() {
 
 case "${1:-}" in
   attach)     shift; cmd_attach "$1"; exit 0 ;;
-  status)     cmd_status; exit 0 ;;
+  status)
+    if [ "${2:-}" = "--json" ]; then
+      get_all_sessions_json
+    else
+      cmd_status
+    fi
+    exit 0
+    ;;
   stop)       shift; cmd_stop "$1"; exit 0 ;;
   checkpoint) shift; cmd_checkpoint "$1"; exit 0 ;;
   --version|-v) echo "ralph version $VERSION"; exit 0 ;;
@@ -461,24 +653,9 @@ if [ ! -f "$PROGRESS_FILE" ]; then
 fi
 
 # Function to rotate progress file if needed
+# Note: Threshold prompting now happens BEFORE tmux spawn, so this just rotates
 rotate_progress_if_needed() {
   local lines=$(wc -l < "$PROGRESS_FILE")
-  local has_prior_rotation=false
-  [ -f "$TASK_DIR/progress-1.txt" ] && has_prior_rotation=true
-
-  # Check if we should prompt about threshold
-  local within_threshold_range=$((ROTATE_THRESHOLD - 50))
-  if [ $lines -gt $within_threshold_range ] || [ "$has_prior_rotation" = true ]; then
-    if [ "$SKIP_PROMPTS" = false ] && [ -z "$ROTATION_CONFIRMED" ]; then
-      echo ""
-      echo "Progress file has $lines lines (rotation threshold: $ROTATE_THRESHOLD)"
-      read -p "Rotation threshold [$ROTATE_THRESHOLD]: " NEW_THRESHOLD
-      if [ -n "$NEW_THRESHOLD" ] && [[ "$NEW_THRESHOLD" =~ ^[0-9]+$ ]]; then
-        ROTATE_THRESHOLD=$NEW_THRESHOLD
-      fi
-      ROTATION_CONFIRMED=true
-    fi
-  fi
 
   # Perform rotation if over threshold
   if [ $lines -gt $ROTATE_THRESHOLD ]; then
@@ -657,6 +834,198 @@ log_failover_to_progress() {
 EOF
 }
 
+# Function to generate a summary document at the end of a Ralph run
+# Creates SUMMARY.md in the task directory with comprehensive run details
+generate_summary() {
+  local exit_reason="$1"  # "complete", "max_iterations", or "all_agents_failed"
+  local summary_file="$FULL_TASK_DIR/SUMMARY.md"
+  local end_time=$(date)
+  local start_time=$(grep "^Started:" "$PROGRESS_FILE" | head -1 | sed 's/Started: //')
+  
+  # Get story details from prd.json
+  local completed=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "0")
+  local total=$(jq '.userStories | length' "$PRD_FILE" 2>/dev/null || echo "0")
+  local prd_type=$(jq -r '.type // "feature"' "$PRD_FILE" 2>/dev/null || echo "feature")
+  local description=$(jq -r '.description // "No description"' "$PRD_FILE" 2>/dev/null || echo "No description")
+  local branch=$(jq -r '.branchName // "unknown"' "$PRD_FILE" 2>/dev/null || echo "unknown")
+  
+  # Count git commits on the branch
+  local commit_count=$(git log --oneline "$branch" 2>/dev/null | wc -l || echo "0")
+  local recent_commits=$(git log --oneline -10 "$branch" 2>/dev/null || echo "No commits found")
+  
+  # Get files changed (if on branch)
+  local files_changed=""
+  if git rev-parse --verify "$branch" >/dev/null 2>&1; then
+    local base_branch=$(git merge-base main "$branch" 2>/dev/null || git merge-base master "$branch" 2>/dev/null || echo "")
+    if [ -n "$base_branch" ]; then
+      files_changed=$(git diff --name-only "$base_branch" "$branch" 2>/dev/null | head -50)
+    fi
+  fi
+  
+  # Extract codebase patterns from progress.txt
+  local patterns=""
+  if grep -q "## Codebase Patterns" "$PROGRESS_FILE"; then
+    patterns=$(sed -n '/## Codebase Patterns/,/^## [^C]/p' "$PROGRESS_FILE" | sed '1d;$d')
+  fi
+  
+  # Count iterations from progress file
+  local iteration_count=$(grep -c "^## [0-9-]* [0-9:]* - " "$PROGRESS_FILE" 2>/dev/null || echo "$CURRENT_ITERATION")
+  
+  # Determine status emoji and text
+  local status_emoji status_text
+  case "$exit_reason" in
+    complete)
+      status_emoji="✅"
+      status_text="COMPLETED SUCCESSFULLY"
+      ;;
+    max_iterations)
+      status_emoji="⏸️"
+      status_text="PAUSED (max iterations reached)"
+      ;;
+    all_agents_failed)
+      status_emoji="❌"
+      status_text="STOPPED (all agents failed)"
+      ;;
+    *)
+      status_emoji="❓"
+      status_text="ENDED"
+      ;;
+  esac
+  
+  # Generate the summary document
+  cat > "$summary_file" << EOF
+# Ralph Run Summary
+
+## $status_emoji Status: $status_text
+
+**Task:** $(basename "$FULL_TASK_DIR")
+**Type:** $prd_type
+**Description:** $description
+
+---
+
+## Run Details
+
+| Metric | Value |
+|--------|-------|
+| Started | $start_time |
+| Ended | $end_time |
+| Branch | \`$branch\` |
+| Stories Completed | $completed / $total |
+| Iterations Run | $iteration_count |
+| Final Agent | $AGENT |
+
+---
+
+## Story Status
+
+EOF
+
+  # Add story details
+  jq -r '.userStories[] | "### " + .id + ": " + .title + "\n- **Status:** " + (if .passes then "✅ Complete" else "❌ Incomplete" end) + "\n- **Priority:** " + (.priority | tostring) + (if .notes != "" then "\n- **Notes:** " + .notes else "" end) + "\n"' "$PRD_FILE" >> "$summary_file" 2>/dev/null
+
+  # Add acceptance criteria details for incomplete stories
+  cat >> "$summary_file" << EOF
+
+---
+
+## Incomplete Work
+
+EOF
+
+  local incomplete=$(jq -r '.userStories[] | select(.passes == false) | .id + ": " + .title' "$PRD_FILE" 2>/dev/null)
+  if [ -z "$incomplete" ]; then
+    echo "All stories completed!" >> "$summary_file"
+  else
+    echo "The following stories remain incomplete:" >> "$summary_file"
+    echo "" >> "$summary_file"
+    jq -r '.userStories[] | select(.passes == false) | "- **" + .id + ":** " + .title' "$PRD_FILE" >> "$summary_file" 2>/dev/null
+    echo "" >> "$summary_file"
+    echo "### Incomplete Acceptance Criteria" >> "$summary_file"
+    echo "" >> "$summary_file"
+    jq -r '.userStories[] | select(.passes == false) | "**" + .id + ":**\n" + ([.acceptanceCriteria[] | select(.passes == false or .passes == null) | "- [ ] " + (if type == "object" then .description else . end)] | join("\n")) + "\n"' "$PRD_FILE" >> "$summary_file" 2>/dev/null
+  fi
+
+  # Add codebase patterns if found
+  if [ -n "$patterns" ]; then
+    cat >> "$summary_file" << EOF
+
+---
+
+## Codebase Patterns Discovered
+
+$patterns
+EOF
+  fi
+
+  # Add files changed
+  if [ -n "$files_changed" ]; then
+    cat >> "$summary_file" << EOF
+
+---
+
+## Files Changed
+
+\`\`\`
+$files_changed
+\`\`\`
+EOF
+  fi
+
+  # Add recent commits
+  cat >> "$summary_file" << EOF
+
+---
+
+## Recent Commits
+
+\`\`\`
+$recent_commits
+\`\`\`
+
+---
+
+## Next Steps
+
+EOF
+
+  case "$exit_reason" in
+    complete)
+      cat >> "$summary_file" << EOF
+1. Review the changes on branch \`$branch\`
+2. Run full test suite: \`npm test\` or equivalent
+3. Create a pull request if satisfied
+4. Archive this task: \`mkdir -p tasks/archived && mv $TASK_DIR tasks/archived/\`
+EOF
+      ;;
+    max_iterations)
+      cat >> "$summary_file" << EOF
+1. Review progress in \`progress.txt\`
+2. Check if stories are stuck (might need PRD adjustment)
+3. Resume with more iterations: \`ralph $TASK_DIR -i 20\`
+4. Or investigate incomplete stories manually
+EOF
+      ;;
+    all_agents_failed)
+      cat >> "$summary_file" << EOF
+1. Check API keys and rate limits
+2. Review error logs in \`progress.txt\`
+3. Wait and retry: \`ralph $TASK_DIR\`
+4. Try a different agent: \`ralph $TASK_DIR --agent opencode\`
+EOF
+      ;;
+  esac
+
+  cat >> "$summary_file" << EOF
+
+---
+
+*Generated by Ralph v$VERSION at $end_time*
+EOF
+
+  echo "$summary_file"
+}
+
 # Function to check if both agents have failed
 # Returns: 0 if both failed, 1 if at least one is still viable
 both_agents_failed() {
@@ -694,6 +1063,23 @@ fi
 if [ -z "$RUNNING_IN_TMUX" ]; then
   check_tmux
   
+  # Check rotation threshold BEFORE spawning tmux (so user sees the prompt)
+  if [ -f "$PROGRESS_FILE" ] && [ "$SKIP_PROMPTS" = false ]; then
+    local_lines=$(wc -l < "$PROGRESS_FILE")
+    local_has_prior_rotation=false
+    [ -f "$FULL_TASK_DIR/progress-1.txt" ] && local_has_prior_rotation=true
+    
+    local_within_threshold=$((ROTATE_THRESHOLD - 50))
+    if [ $local_lines -gt $local_within_threshold ] || [ "$local_has_prior_rotation" = true ]; then
+      echo ""
+      echo "Progress file has $local_lines lines (rotation threshold: $ROTATE_THRESHOLD)"
+      read -p "Rotation threshold [$ROTATE_THRESHOLD]: " NEW_THRESHOLD
+      if [ -n "$NEW_THRESHOLD" ] && [[ "$NEW_THRESHOLD" =~ ^[0-9]+$ ]]; then
+        ROTATE_THRESHOLD=$NEW_THRESHOLD
+      fi
+    fi
+  fi
+  
   echo ""
   echo "======================================================================="
   echo "  Starting Ralph in background"
@@ -714,12 +1100,18 @@ if [ -z "$RUNNING_IN_TMUX" ]; then
   echo ""
   
   # Build tmux command - use absolute path for task dir
-  TMUX_CMD="RALPH_TMUX_SESSION='$SESSION_NAME' '$0' '$FULL_TASK_DIR' -i $MAX_ITERATIONS --agent '$AGENT'"
-  [ "$SKIP_PROMPTS" = true ] && TMUX_CMD+=" -y"
+  # Pass -y to skip prompts inside tmux since we already prompted
+  TMUX_CMD="RALPH_TMUX_SESSION='$SESSION_NAME' '$0' '$FULL_TASK_DIR' -i $MAX_ITERATIONS --agent '$AGENT' -y"
   [ "$YOLO_MODE" = true ] && TMUX_CMD+=" --yolo"
   TMUX_CMD+=" --rotate-at $ROTATE_THRESHOLD --failover-threshold $FAILOVER_THRESHOLD"
   
   tmux new-session -d -s "$SESSION_NAME" -x 200 -y 50 "bash -c '$TMUX_CMD'"
+  
+  # Register session in global database (get PID from tmux)
+  sleep 0.5  # Give tmux a moment to start
+  TMUX_PID=$(tmux list-panes -t "$SESSION_NAME" -F "#{pane_pid}" 2>/dev/null | head -1)
+  register_session "$SESSION_NAME" "$FULL_TASK_DIR" "${TMUX_PID:-0}" "$AGENT" "$MAX_ITERATIONS" "$TOTAL_STORIES" "$COMPLETED_STORIES"
+  
   exit 0
 fi
 
@@ -753,6 +1145,7 @@ for i in $(seq 1 $MAX_ITERATIONS); do
   # Check for checkpoint request
   if [ "$CHECKPOINT_REQUESTED" = true ]; then
     write_checkpoint "user"
+    finish_session "$SESSION_NAME" "stopped"
     exit 0
   fi
   # Check and rotate progress file if needed
@@ -760,6 +1153,9 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 
   # Refresh progress count
   COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
+  
+  # Update global session registry
+  update_session_progress "$SESSION_NAME" "$CURRENT_ITERATION" "$COMPLETED_STORIES"
 
   # Determine agent for this iteration (story-level overrides task-level)
   # Find the next story: highest priority where passes: false
@@ -983,7 +1379,15 @@ $PROCESSED_PROMPT_CONTENT
         echo "    - Invalid API keys or authentication issues"
         echo "    - Network connectivity problems"
         echo ""
+        
+        # Generate summary document
+        SUMMARY_FILE=$(generate_summary "all_agents_failed")
+        echo "  📄 Summary generated: $SUMMARY_FILE"
+        echo ""
         echo "  Check $PROGRESS_FILE for detailed failure logs."
+        
+        # Mark session as failed in global registry
+        finish_session "$SESSION_NAME" "failed"
         exit 1
       fi
       
@@ -1026,19 +1430,29 @@ $PROCESSED_PROMPT_CONTENT
     echo "╚═══════════════════════════════════════════════════════════════╝"
     echo ""
     echo "  Completed at iteration $i of $MAX_ITERATIONS"
-    echo "  Check $PROGRESS_FILE for details."
+    echo ""
+    
+    # Generate summary document
+    SUMMARY_FILE=$(generate_summary "complete")
+    echo "  📄 Summary generated: $SUMMARY_FILE"
+    echo ""
+    echo "  Check $PROGRESS_FILE for iteration details."
     echo ""
 
     # Offer to archive
     echo "  To archive this completed effort:"
     echo "    mkdir -p tasks/archived && mv $TASK_DIR tasks/archived/"
     echo ""
+    
+    # Mark session as completed in global registry
+    finish_session "$SESSION_NAME" "completed"
     exit 0
   fi
 
   # Check for checkpoint after iteration
   if [ "$CHECKPOINT_REQUESTED" = true ]; then
     write_checkpoint "user"
+    finish_session "$SESSION_NAME" "stopped"
     exit 0
   fi
 
@@ -1055,6 +1469,15 @@ echo ""
 COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
 echo "  Completed $COMPLETED_STORIES of $TOTAL_STORIES stories in $MAX_ITERATIONS iterations."
 echo "  Agent: $AGENT"
-echo "  Check $PROGRESS_FILE for status."
+echo ""
+
+# Generate summary document
+SUMMARY_FILE=$(generate_summary "max_iterations")
+echo "  📄 Summary generated: $SUMMARY_FILE"
+echo ""
+echo "  Check $PROGRESS_FILE for iteration details."
 echo "  Run again: ralph $TASK_DIR -i <more_iterations>"
+
+# Mark session as stopped in global registry
+finish_session "$SESSION_NAME" "stopped"
 exit 1

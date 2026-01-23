@@ -1,0 +1,86 @@
+{
+  "schemaVersion": "2.0",
+  "project": "Ralph",
+  "taskDir": "tasks/remote-execution",
+  "branchName": "ralph/remote-execution",
+  "mergeTarget": null,
+  "autoMerge": false,
+  "type": "feature",
+  "description": "Remote Project Execution - Run Ralph on remote servers via SSH for more resources",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Add remote host CLI flag to ralph.sh",
+      "description": "As a user, I want to specify a remote host via CLI so I can quickly run on a remote server.",
+      "acceptanceCriteria": [
+        { "description": "ralph.sh accepts --remote user@host flag", "passes": false },
+        { "description": "Flag is optional; omitting it runs locally (existing behavior)", "passes": false },
+        { "description": "Help text documents the new flag", "passes": false },
+        { "description": "Invalid host format shows clear error message", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Add remote host config file support",
+      "description": "As a user, I want to configure a default remote host so I don't have to type it every time.",
+      "acceptanceCriteria": [
+        { "description": "Read remote_host from ralph.config or task-level config", "passes": false },
+        { "description": "CLI flag overrides config file", "passes": false },
+        { "description": "Document config format in inline comments", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Add interactive remote host prompt",
+      "description": "As a user, I want to be prompted for remote execution option when starting Ralph.",
+      "acceptanceCriteria": [
+        { "description": "If no remote flag and no config, prompt: Run locally or remotely? [L/r]", "passes": false },
+        { "description": "If user selects r, prompt for Remote host (user@host):", "passes": false },
+        { "description": "Can skip prompt with --local flag to force local execution", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Implement SSH execution wrapper",
+      "description": "As a user, I want Ralph to execute on the remote host and stream output back.",
+      "acceptanceCriteria": [
+        { "description": "SSH to remote host using SSH keys (no password) with -o BatchMode=yes", "passes": false },
+        { "description": "Sync project files to remote using rsync -avz --delete --exclude .git", "passes": false },
+        { "description": "Execute ralph.sh on remote with same arguments via SSH -t", "passes": false },
+        { "description": "Stream stdout/stderr back to local terminal in real-time", "passes": false },
+        { "description": "Exit code from remote is propagated to local", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Handle remote execution errors gracefully",
+      "description": "As a user, I want clear error messages when remote execution fails.",
+      "acceptanceCriteria": [
+        { "description": "Connection failure shows Cannot connect to host with troubleshooting hints", "passes": false },
+        { "description": "Missing SSH key shows SSH key authentication failed", "passes": false },
+        { "description": "Missing ralph.sh on remote shows Ralph not found on remote host", "passes": false },
+        { "description": "Network interruption attempts graceful handling", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

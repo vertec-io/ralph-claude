@@ -29,7 +29,6 @@ from typing import Any
 
 from ralph_uv.agents import COMPLETION_SIGNAL
 
-
 # Escape key byte
 ESC_KEY = b"\x1b"
 

@@ -18,7 +18,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-
 # Default paths
 DATA_DIR = Path.home() / ".local" / "share" / "ralph"
 DB_PATH = DATA_DIR / "sessions.db"

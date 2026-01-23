@@ -16,7 +16,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ralph_uv.interactive import InteractiveController, PtyAgent
@@ -822,7 +822,7 @@ def create_agent(agent_name: str) -> Agent:
             return OpencodeAgent()
         case _:
             raise ValueError(
-                f"Unknown agent: '{agent_name}'. Valid agents: {', '.join(VALID_AGENTS)}"
+                f"Unknown agent: '{agent_name}'. Valid agents: {', '.join(VALID_AGENTS)}"  # noqa: E501
             )
 
 
