@@ -12,7 +12,6 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from types import FrameType
 from typing import Any
 
 
@@ -104,8 +103,8 @@ class LoopRunner:
         self.current_iteration = 0
         self.current_agent = config.agent
         self._shutdown_requested = False
-        self._original_sigint: Any = None
-        self._original_sigterm: Any = None
+        self._original_sigint: signal._HANDLER = signal.SIG_DFL
+        self._original_sigterm: signal._HANDLER = signal.SIG_DFL
 
     def run(self) -> int:
         """Run the loop. Returns exit code (0 = complete, 1 = stopped/failed)."""
@@ -207,7 +206,8 @@ class LoopRunner:
         if not incomplete:
             return None
         incomplete.sort(key=lambda s: s.get("priority", 999))
-        return incomplete[0]
+        result: dict[str, Any] = incomplete[0]
+        return result
 
     def _count_completed(self, prd: dict[str, Any]) -> int:
         """Count completed stories."""
@@ -216,7 +216,7 @@ class LoopRunner:
 
     def _get_iteration_agent(self, story: dict[str, Any]) -> str:
         """Determine which agent to use for this iteration."""
-        story_agent: str = story.get("agent", "")
+        story_agent = str(story.get("agent", ""))
         if story_agent and story_agent in VALID_AGENTS:
             return story_agent
         return self.current_agent
@@ -357,9 +357,9 @@ class LoopRunner:
             if '"type":"result"' in line or '"type": "result"' in line:
                 try:
                     data = json.loads(line)
-                    result: str = data.get("result", "")
+                    result = data.get("result", "")
                     if result:
-                        return result
+                        return str(result)
                 except json.JSONDecodeError:
                     continue
 
@@ -572,12 +572,10 @@ class LoopRunner:
 
     def _restore_signal_handlers(self) -> None:
         """Restore original signal handlers."""
-        if self._original_sigint is not None:
-            signal.signal(signal.SIGINT, self._original_sigint)
-        if self._original_sigterm is not None:
-            signal.signal(signal.SIGTERM, self._original_sigterm)
+        signal.signal(signal.SIGINT, self._original_sigint)
+        signal.signal(signal.SIGTERM, self._original_sigterm)
 
-    def _signal_handler(self, signum: int, frame: FrameType | None) -> None:
+    def _signal_handler(self, signum: int, frame: Any) -> None:  # noqa: ANN401
         """Handle shutdown signals gracefully."""
         sig_name = signal.Signals(signum).name
         print(

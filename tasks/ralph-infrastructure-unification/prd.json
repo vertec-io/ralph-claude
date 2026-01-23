@@ -6,23 +6,23 @@
   "mergeTarget": null,
   "autoMerge": false,
   "type": "feature",
-  "description": "Ralph Infrastructure Unification - Rewrite ralph.sh as Python package, unify TUI communication via JSON-RPC, add interactive agent control, opencode stop-hook plugin, and branch management",
+  "description": "Ralph Infrastructure Unification - Rewrite ralph loop as Python package (ralph-uv), unify TUI communication via JSON-RPC, add interactive agent control, opencode stop-hook plugin, and branch management. ralph.sh remains unchanged.",
   "userStories": [
     {
       "id": "US-001",
       "title": "Python Package Scaffold",
-      "description": "As a developer, I want the ralph Python package scaffolded with pyproject.toml and uv tool configuration so that the project can be installed as a CLI tool.",
+      "description": "As a developer, I want the ralph-uv Python package scaffolded with pyproject.toml and uv tool configuration so that the project can be installed as a CLI tool.",
       "acceptanceCriteria": [
-        { "description": "Create pyproject.toml with [project.scripts] entry for ralph CLI", "passes": true },
-        { "description": "Python 3.12+ requirement specified", "passes": true },
-        { "description": "uv tool install . works and provides the ralph command", "passes": true },
-        { "description": "Basic CLI entrypoint prints version and help", "passes": true },
-        { "description": "Project uses src/ralph/ layout", "passes": true },
-        { "description": "Typecheck passes", "passes": true }
+        { "description": "Create pyproject.toml with [project.scripts] entry for ralph-uv CLI", "passes": false },
+        { "description": "Python 3.12+ requirement specified", "passes": false },
+        { "description": "uv run ralph-uv works for development (do NOT install globally)", "passes": false },
+        { "description": "Basic CLI entrypoint prints version and help", "passes": false },
+        { "description": "Project uses src/ralph_uv/ layout", "passes": false },
+        { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "Package scaffolded with uv, hatchling build backend, mypy strict mode. CLI uses argparse with subcommands (run, status, stop, checkpoint, attach)."
+      "passes": false,
+      "notes": "CLI command is ralph-uv (not ralph) to coexist with the existing ralph.sh tool. Use uv run ralph-uv during development. Package layout is src/ralph_uv/."
     },
     {
       "id": "US-002",
@@ -39,12 +39,12 @@
       ],
       "priority": 2,
       "passes": true,
-      "notes": "Core loop implemented in src/ralph/loop.py. LoopRunner class handles iteration, agent subprocess spawning via shell agent scripts, stream-json output parsing, failure detection with error pattern matching, per-agent failover tracking, progress.txt rotation, and SIGINT/SIGTERM graceful shutdown."
+      "notes": "Loop module at src/ralph/loop.py with LoopConfig, LoopRunner, FailureTracker, and IterationResult classes. CLI _cmd_run function wires it up."
     },
     {
       "id": "US-003",
       "title": "Agent Abstraction Layer",
-      "description": "As a developer, I want a pluggable agent interface so ralph can run different coding agents (claude code, opencode) with agent-specific completion detection.",
+      "description": "As a developer, I want a pluggable agent interface so ralph-uv can run different coding agents (claude code, opencode) with agent-specific completion detection.",
       "acceptanceCriteria": [
         { "description": "Abstract Agent base class with start(), is_done(), get_output() methods", "passes": false },
         { "description": "ClaudeAgent implementation using claude --print --output-format stream-json", "passes": false },
@@ -60,14 +60,14 @@
     {
       "id": "US-004",
       "title": "Branch Management",
-      "description": "As a user, I want to specify what branch ralph starts from and what happens at the end of the loop so I have control over git workflow.",
+      "description": "As a user, I want to specify what branch ralph-uv starts from and what happens at the end of the loop so I have control over git workflow.",
       "acceptanceCriteria": [
-        { "description": "ralph run --base-branch <branch> flag to specify starting branch", "passes": false },
+        { "description": "ralph-uv run --base-branch <branch> flag to specify starting branch", "passes": false },
         { "description": "If no base-branch specified, use current branch", "passes": false },
-        { "description": "Ralph creates/checks out the task branch (from prd.json branchName) based off the specified base", "passes": false },
+        { "description": "ralph-uv creates/checks out the task branch (from prd.json branchName) based off the specified base", "passes": false },
         { "description": "At loop completion: behavior controlled by prd.json mergeTarget and autoMerge fields", "passes": false },
-        { "description": "If autoMerge true and mergeTarget set, ralph creates PR and merges automatically", "passes": false },
-        { "description": "If autoMerge false and mergeTarget set, ralph creates PR but does not merge", "passes": false },
+        { "description": "If autoMerge true and mergeTarget set, ralph-uv creates PR and merges automatically", "passes": false },
+        { "description": "If autoMerge false and mergeTarget set, ralph-uv creates PR but does not merge", "passes": false },
         { "description": "If no mergeTarget, loop just stops (branch left as-is)", "passes": false },
         { "description": "Branch state validated before starting (clean working tree required)", "passes": false },
         { "description": "Typecheck passes", "passes": false }
@@ -79,13 +79,13 @@
     {
       "id": "US-005",
       "title": "Session Management (tmux + SQLite)",
-      "description": "As a user, I want ralph sessions to run in tmux with SQLite tracking so I can manage multiple concurrent loops.",
+      "description": "As a user, I want ralph-uv sessions to run in tmux with SQLite tracking so I can manage multiple concurrent loops.",
       "acceptanceCriteria": [
-        { "description": "Ralph runs agent in a tmux session (one per task)", "passes": false },
+        { "description": "ralph-uv runs agent in a tmux session (one per task)", "passes": false },
         { "description": "SQLite registry at ~/.local/share/ralph/sessions.db tracks running sessions", "passes": false },
-        { "description": "ralph status lists all running sessions (with --json flag for machine-readable output)", "passes": false },
-        { "description": "ralph stop <task> sends graceful shutdown signal", "passes": false },
-        { "description": "ralph checkpoint <task> saves state and pauses", "passes": false },
+        { "description": "ralph-uv status lists all running sessions (with --json flag for machine-readable output)", "passes": false },
+        { "description": "ralph-uv stop <task> sends graceful shutdown signal", "passes": false },
+        { "description": "ralph-uv checkpoint <task> saves state and pauses", "passes": false },
         { "description": "Session cleanup on normal completion or crash", "passes": false },
         { "description": "Typecheck passes", "passes": false }
       ],
@@ -112,9 +112,9 @@
     {
       "id": "US-007",
       "title": "TUI Communication Protocol (JSON-RPC over Unix Socket)",
-      "description": "As a developer, I want a JSON-RPC communication protocol between ralph (Python) and ralph-tui (Rust) so the TUI can observe and control running loops.",
+      "description": "As a developer, I want a JSON-RPC communication protocol between ralph-uv (Python) and ralph-tui (Rust) so the TUI can observe and control running loops.",
       "acceptanceCriteria": [
-        { "description": "Ralph exposes a JSON-RPC server on a Unix domain socket per session (~/.local/share/ralph/sockets/<task>.sock)", "passes": false },
+        { "description": "ralph-uv exposes a JSON-RPC server on a Unix domain socket per session (~/.local/share/ralph/sockets/<task>.sock)", "passes": false },
         { "description": "State queries: get_status returns current iteration, story, agent, interactive_mode flag, recent output", "passes": false },
         { "description": "Control commands: start, stop, checkpoint, inject_prompt, set_interactive_mode", "passes": false },
         { "description": "Event subscription: TUI can subscribe to real-time output stream and state changes", "passes": false },
@@ -129,15 +129,15 @@
     {
       "id": "US-008",
       "title": "Opencode Stop-Hook Plugin",
-      "description": "As a developer, I want an opencode plugin that signals when opencode completes an iteration so ralph can detect completion without polling.",
+      "description": "As a developer, I want an opencode plugin that signals when opencode completes an iteration so ralph-uv can detect completion without polling.",
       "acceptanceCriteria": [
         { "description": "Opencode plugin written in TypeScript per opencode plugin API", "passes": false },
         { "description": "Plugin listens for session.idle event (fires when opencode finishes processing)", "passes": false },
         { "description": "Plugin reads RALPH_SIGNAL_FILE env var to discover where to write the signal", "passes": false },
         { "description": "Signal is a JSON file write: {event: idle, timestamp: iso, session_id: id}", "passes": false },
-        { "description": "Ralph OpencodeAgent watches the signal file (inotify on Linux) for changes", "passes": false },
+        { "description": "ralph-uv OpencodeAgent watches the signal file (inotify on Linux) for changes", "passes": false },
         { "description": "Completion only honored when interactive_mode is false", "passes": false },
-        { "description": "Plugin loaded via .opencode/plugins/ directory (ralph copies it into task working directory before spawning opencode)", "passes": false },
+        { "description": "Plugin loaded via .opencode/plugins/ directory (ralph-uv copies it into task working directory before spawning opencode)", "passes": false },
         { "description": "Fallback: plugin can also be installed globally at ~/.config/opencode/plugins/", "passes": false },
         { "description": "Document plugin mechanism in README", "passes": false },
         { "description": "Typecheck passes", "passes": false }
@@ -159,7 +159,7 @@
         { "description": "Opencode: pause via Esc, user types input, agent processes and continues", "passes": false },
         { "description": "Signal file writes during interactive mode are queued/ignored until mode exits", "passes": false },
         { "description": "Output parsing for <promise>COMPLETE</promise> suppressed during interactive mode", "passes": false },
-        { "description": "Both ralph-tui and ralph attach support this toggle with the same hotkey (i)", "passes": false },
+        { "description": "Both ralph-tui and ralph-uv attach support this toggle with the same hotkey (i)", "passes": false },
         { "description": "Visual indicator in UI shows current mode (autonomous vs interactive)", "passes": false },
         { "description": "Typecheck passes", "passes": false }
       ],
@@ -178,7 +178,7 @@
         { "description": "Step 3: Set max iterations (default: 50, editable)", "passes": false },
         { "description": "Step 4: Select agent (claude/opencode, default from prd.json or claude)", "passes": false },
         { "description": "Step 5: Confirm and launch", "passes": false },
-        { "description": "Wizard sends start command to ralph via JSON-RPC protocol", "passes": false },
+        { "description": "Wizard sends start command to ralph-uv via JSON-RPC protocol", "passes": false },
         { "description": "New loop appears in TUI session list immediately", "passes": false },
         { "description": "Typecheck passes", "passes": false }
       ],
@@ -189,37 +189,20 @@
     {
       "id": "US-010",
       "title": "Ralph Attach (Single-Loop View)",
-      "description": "As a user, I want ralph attach <task> to show a single-loop view similar to ralph-tui but focused on one session, with full agent interaction support.",
+      "description": "As a user, I want ralph-uv attach <task> to show a single-loop view similar to ralph-tui but focused on one session, with full agent interaction support.",
       "acceptanceCriteria": [
-        { "description": "ralph attach <task> opens a terminal UI showing one running loop", "passes": false },
+        { "description": "ralph-uv attach <task> opens a terminal UI showing one running loop", "passes": false },
         { "description": "Shows: current iteration, story progress, live agent output", "passes": false },
         { "description": "Supports interactive mode toggle (hotkey i) for direct agent interaction", "passes": false },
         { "description": "In interactive mode: PTY input forwarded to agent, completion detection suppressed", "passes": false },
         { "description": "Exiting interactive mode (hotkey i again or Esc) re-enables autonomous monitoring", "passes": false },
         { "description": "Supports stop/checkpoint commands", "passes": false },
         { "description": "Exits cleanly when loop completes or user presses quit key", "passes": false },
-        { "description": "Communicates with ralph loop via JSON-RPC protocol", "passes": false },
+        { "description": "Communicates with ralph-uv loop via JSON-RPC protocol", "passes": false },
         { "description": "Part of the Python package (not a separate binary)", "passes": false },
         { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
-    },
-    {
-      "id": "US-011",
-      "title": "Migrate ralph.sh Functionality & Deprecation",
-      "description": "As a developer, I want all ralph.sh functionality migrated to the Python version with the old script deprecated.",
-      "acceptanceCriteria": [
-        { "description": "All ralph.sh subcommands work in the Python version (run, attach, stop, checkpoint, status)", "passes": false },
-        { "description": "ralph.sh renamed to ralph-legacy.sh with deprecation notice", "passes": false },
-        { "description": "Existing task directories work without modification", "passes": false },
-        { "description": "prd.json schema unchanged (both v1.0 and v2.0 supported)", "passes": false },
-        { "description": "progress.txt format unchanged", "passes": false },
-        { "description": "AGENTS.md update documenting migration", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
-      ],
-      "priority": 12,
       "passes": false,
       "notes": ""
     }

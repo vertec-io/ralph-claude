@@ -11,6 +11,9 @@ Started: 2026-01-23
 - mypy runs in strict mode: `uv run mypy src/ralph/`
 - py.typed marker file present for PEP 561 compliance
 - .gitignore uses /prd.json and /progress.txt (root-only) so task dir files are tracked
+- Loop module (src/ralph/loop.py) is the core: LoopConfig, LoopRunner, FailureTracker, IterationResult
+- Agent wrapper scripts in agents/ accept prompts via stdin, output to stdout
+- Use `signal._HANDLER` type (not `signal.Handlers`) for signal handler storage
 ---
 
 ## 2026-01-23 - US-001: Python Package Scaffold
@@ -26,4 +29,24 @@ Started: 2026-01-23
   - hatchling needs `packages = ["src/ralph"]` in [tool.hatch.build.targets.wheel] for src layout
   - Python 3.12+ enables match/case statements (used in CLI)
   - The project had Python 3.14 installed via mise - pyproject.toml requires >=3.12 so it's compatible
+---
+
+## 2026-01-23 - US-002: Core Loop Logic in Python
+- Fixed mypy type errors in loop.py (signal handler types, Any returns)
+- Added _cmd_run() function to cli.py to wire up LoopRunner
+- Core loop module at src/ralph/loop.py already existed with:
+  - LoopConfig dataclass (task_dir, max_iterations=50, agent, rotate_threshold=300, failover_threshold=3)
+  - LoopRunner class with _run_loop(), _run_agent(), _rotate_progress_if_needed()
+  - FailureTracker class for per-agent consecutive failure tracking + failover
+  - IterationResult dataclass for structured agent output
+  - SIGINT/SIGTERM handling with checkpoint writing
+  - <promise>COMPLETE</promise> detection in agent output
+  - Progress.txt rotation when exceeding threshold
+- Files changed: src/ralph/cli.py, src/ralph/loop.py, tasks/ralph-infrastructure-unification/prd.json
+- **Learnings for future iterations:**
+  - signal.getsignal() returns `signal._HANDLER` type, not `signal.Handlers` - use `signal._HANDLER` for type annotations
+  - For `dict[str, Any]` returns from json.loads(), use explicit type annotation on the receiving variable to avoid no-any-return
+  - Use `str()` wrapper on `.get()` results to satisfy strict mypy return type checks
+  - The agents/ directory contains bash wrapper scripts (claude.sh, opencode.sh) that accept prompts via stdin
+  - ruff is configured in pyproject.toml but not installed as dev dependency (only mypy is)
 ---

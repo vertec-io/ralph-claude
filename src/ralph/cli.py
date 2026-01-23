@@ -67,29 +67,12 @@ def create_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    """Execute the run command."""
+    """Execute the 'run' subcommand."""
     task_dir = Path(args.task_dir).resolve()
-
-    # Determine agent (CLI flag > prd.json > default)
-    agent = args.agent or "claude"
-    if args.agent is None:
-        # Try to read from prd.json
-        prd_file = task_dir / "prd.json"
-        if prd_file.is_file():
-            import json
-
-            try:
-                prd = json.loads(prd_file.read_text())
-                prd_agent = prd.get("agent", "")
-                if prd_agent:
-                    agent = prd_agent
-            except (json.JSONDecodeError, OSError):
-                pass
-
     config = LoopConfig(
         task_dir=task_dir,
         max_iterations=args.max_iterations,
-        agent=agent,
+        agent=args.agent or "claude",
     )
     runner = LoopRunner(config)
     return runner.run()
