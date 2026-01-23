@@ -24,3 +24,5 @@ __pycache__/
 node_modules/
 plugins/opencode-ralph-hook/dist/
 .opencode/
+
+opencode/

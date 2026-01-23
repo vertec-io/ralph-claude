@@ -5,6 +5,10 @@ description = "Autonomous AI agent loop runner"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
+dependencies = [
+    "click>=8.1",
+    "libtmux>=0.37",
+]
 
 [project.scripts]
 ralph-uv = "ralph_uv.cli:cli"

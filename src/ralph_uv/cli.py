@@ -1,13 +1,17 @@
-"""Ralph CLI entrypoint."""
+"""Ralph CLI entrypoint using Click."""
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
+import shlex
 import shutil
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+
+import click
 
 from ralph_uv import __version__
 from ralph_uv.agents import VALID_AGENTS
@@ -21,11 +25,16 @@ from ralph_uv.session import (
     stop_session,
     task_name_from_dir,
     tmux_create_session,
+    tmux_kill_session,
+    tmux_session_alive,
     tmux_session_exists,
     tmux_session_name,
 )
 
 DEFAULT_ITERATIONS = 10
+
+
+# --- Helpers ---
 
 
 def _find_active_tasks() -> list[Path]:
@@ -36,7 +45,6 @@ def _find_active_tasks() -> list[Path]:
 
     results: list[Path] = []
     for prd_file in sorted(tasks_dir.rglob("prd.json")):
-        # Skip archived tasks
         if "archived" in prd_file.parts:
             continue
         results.append(prd_file.parent)
@@ -67,86 +75,48 @@ def _display_task_info(task_dir: Path) -> str:
 
 def _detect_installed_agents() -> list[str]:
     """Detect which supported agents are installed."""
-    installed: list[str] = []
-    for agent in VALID_AGENTS:
-        if shutil.which(agent) is not None:
-            installed.append(agent)
-    return installed
+    return [agent for agent in VALID_AGENTS if shutil.which(agent) is not None]
 
 
 def _prompt_task_selection() -> Path | None:
-    """Interactively prompt the user to select a task directory.
-
-    Returns the selected Path, or None if no tasks found / invalid selection.
-    """
+    """Interactively prompt the user to select a task directory."""
     tasks = _find_active_tasks()
 
     if not tasks:
         if not Path("tasks").is_dir():
-            print("No tasks/ directory found in current project.")
+            click.echo("No tasks/ directory found in current project.")
         else:
-            print("No active tasks found in tasks/.")
-        print()
-        print("To create a new task:")
-        print("  1. Use /prd in Claude Code to create a PRD")
-        print("  2. Use /ralph to convert it to prd.json")
-        print("  3. Run: ralph-uv run tasks/{effort-name}")
+            click.echo("No active tasks found in tasks/.")
+        click.echo()
+        click.echo("To create a new task:")
+        click.echo("  1. Use /prd in Claude Code to create a PRD")
+        click.echo("  2. Use /ralph to convert it to prd.json")
+        click.echo("  3. Run: ralph-uv run tasks/{effort-name}")
         return None
 
     if len(tasks) == 1:
-        print(f"Found one active task: {tasks[0]}")
+        click.echo(f"Found one active task: {tasks[0]}")
         return tasks[0]
 
     # Multiple tasks — prompt
-    print()
-    print("=" * 67)
-    print("  Ralph - Select a Task")
-    print("=" * 67)
-    print()
-    print("Active tasks:")
-    print()
+    click.echo()
+    click.echo("=" * 67)
+    click.echo("  Ralph - Select a Task")
+    click.echo("=" * 67)
+    click.echo()
 
     for i, task in enumerate(tasks, 1):
-        print(f"  {i}) {_display_task_info(task)}")
+        click.echo(f"  {i}) {_display_task_info(task)}")
 
-    print()
-    try:
-        selection = input(f"Select task [1-{len(tasks)}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return None
+    click.echo()
+    selection = click.prompt(f"Select task [1-{len(tasks)}]", type=int, default=1)
 
-    try:
-        idx = int(selection) - 1
-        if 0 <= idx < len(tasks):
-            return tasks[idx]
-    except ValueError:
-        pass
+    idx = selection - 1
+    if 0 <= idx < len(tasks):
+        return tasks[idx]
 
-    print("Invalid selection.")
+    click.echo("Invalid selection.")
     return None
-
-
-def _prompt_iterations() -> int:
-    """Interactively prompt for max iterations. Returns the chosen number."""
-    try:
-        raw = input(f"Max iterations [{DEFAULT_ITERATIONS}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return DEFAULT_ITERATIONS
-
-    if not raw:
-        return DEFAULT_ITERATIONS
-
-    try:
-        n = int(raw)
-        if n > 0:
-            return n
-    except ValueError:
-        pass
-
-    print(f"Invalid number. Using default of {DEFAULT_ITERATIONS}.")
-    return DEFAULT_ITERATIONS
 
 
 def _resolve_agent(
@@ -156,25 +126,12 @@ def _resolve_agent(
 ) -> str:
     """Resolve which agent to use.
 
-    Priority:
-    1. CLI --agent flag
-    2. Agent saved in prd.json
-    3. Interactive prompt (if multiple installed)
-    4. Only installed agent
-    5. Default: claude
-
-    Args:
-        cli_agent: Agent name from CLI flag, or None.
-        task_dir: The task directory (to check prd.json).
-        skip_prompts: If True, skip interactive prompts.
-
-    Returns:
-        The resolved agent name.
+    Priority: CLI flag > prd.json saved > interactive prompt > only installed > default.
     """
     # 1. CLI override
     if cli_agent:
         if shutil.which(cli_agent) is None:
-            print(f"Warning: Agent '{cli_agent}' not found in PATH.")
+            click.echo(f"Warning: Agent '{cli_agent}' not found in PATH.", err=True)
         return cli_agent
 
     # 2. Check prd.json for saved agent
@@ -185,12 +142,12 @@ def _resolve_agent(
             saved_agent = str(prd.get("agent", ""))
             if saved_agent and saved_agent in VALID_AGENTS:
                 if shutil.which(saved_agent) is not None:
-                    print(f"Using saved agent: {saved_agent}")
+                    click.echo(f"Using saved agent: {saved_agent}")
                     return saved_agent
                 else:
-                    print(
-                        f"Warning: Saved agent '{saved_agent}' not installed. "
-                        "Selecting another."
+                    click.echo(
+                        f"Warning: Saved agent '{saved_agent}' not installed.",
+                        err=True,
                     )
         except (json.JSONDecodeError, OSError):
             pass
@@ -199,52 +156,36 @@ def _resolve_agent(
     installed = _detect_installed_agents()
 
     if not installed:
-        print("Error: No supported AI coding agents found.")
-        print()
-        print("Please install one of the following:")
-        print("  - Claude Code: npm install -g @anthropic-ai/claude-code")
-        print("  - OpenCode: curl -fsSL https://opencode.ai/install | bash")
-        sys.exit(1)
+        click.echo("Error: No supported AI coding agents found.", err=True)
+        click.echo()
+        click.echo("Please install one of the following:")
+        click.echo("  - Claude Code: npm install -g @anthropic-ai/claude-code")
+        click.echo("  - OpenCode: curl -fsSL https://opencode.ai/install | bash")
+        raise SystemExit(1)
 
     if len(installed) == 1:
-        print(f"Using only installed agent: {installed[0]}")
+        click.echo(f"Using only installed agent: {installed[0]}")
         return installed[0]
 
     # Multiple agents available
     if skip_prompts:
-        # Default to first in priority order
         return installed[0]
 
     # Interactive prompt
-    print()
-    print("=" * 67)
-    print("  Select AI Coding Agent")
-    print("=" * 67)
-    print()
-    print("Available agents:")
-    print()
-
+    click.echo()
+    click.echo("Available agents:")
     for i, agent in enumerate(installed, 1):
-        print(f"  {i}) {agent}")
+        click.echo(f"  {i}) {agent}")
+    click.echo()
 
-    print()
-    try:
-        raw = input(f"Select agent [1-{len(installed)}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print()
-        return installed[0]
+    selection = click.prompt(f"Select agent [1-{len(installed)}]", type=int, default=1)
+    idx = selection - 1
+    if 0 <= idx < len(installed):
+        chosen = installed[idx]
+        _save_agent_to_prd(prd_file, chosen)
+        return chosen
 
-    try:
-        idx = int(raw) - 1
-        if 0 <= idx < len(installed):
-            chosen = installed[idx]
-            # Save to prd.json
-            _save_agent_to_prd(prd_file, chosen)
-            return chosen
-    except ValueError:
-        pass
-
-    print(f"Invalid selection. Using {installed[0]}.")
+    click.echo(f"Invalid selection. Using {installed[0]}.")
     return installed[0]
 
 
@@ -256,159 +197,9 @@ def _save_agent_to_prd(prd_file: Path, agent: str) -> None:
         prd = json.loads(prd_file.read_text())
         prd["agent"] = agent
         prd_file.write_text(json.dumps(prd, indent=2) + "\n")
-        print(f"Agent preference saved to prd.json")
+        click.echo("Agent preference saved to prd.json")
     except (json.JSONDecodeError, OSError):
         pass
-
-
-def create_parser() -> argparse.ArgumentParser:
-    """Create the argument parser for the ralph CLI."""
-    parser = argparse.ArgumentParser(
-        prog="ralph-uv",
-        description="Ralph - Autonomous AI agent loop runner",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"ralph-uv {__version__}",
-    )
-
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
-
-    # run command
-    run_parser = subparsers.add_parser("run", help="Run the agent loop for a task")
-    run_parser.add_argument(
-        "task_dir",
-        nargs="?",
-        default=None,
-        help="Path to the task directory containing prd.json (interactive if omitted)",
-    )
-    run_parser.add_argument(
-        "-i",
-        "--max-iterations",
-        type=int,
-        default=None,
-        help=f"Maximum number of iterations (prompts if omitted, default: {DEFAULT_ITERATIONS})",
-    )
-    run_parser.add_argument(
-        "-a",
-        "--agent",
-        choices=list(VALID_AGENTS),
-        default=None,
-        help="Agent to use (prompts if omitted)",
-    )
-    run_parser.add_argument(
-        "--base-branch",
-        default=None,
-        help="Base branch to start from (default: current branch)",
-    )
-    run_parser.add_argument(
-        "-y",
-        "--yes",
-        action="store_true",
-        dest="skip_prompts",
-        help="Skip interactive prompts, use defaults",
-    )
-    run_parser.add_argument(
-        "--yolo",
-        action="store_true",
-        help="Skip agent permission checks (dangerously-skip-permissions)",
-    )
-    run_parser.add_argument(
-        "--verbose",
-        action="store_true",
-        help="Enable verbose agent output",
-    )
-
-    # status command
-    status_parser = subparsers.add_parser(
-        "status", help="Show status of running sessions"
-    )
-    status_parser.add_argument(
-        "--json",
-        action="store_true",
-        dest="json_output",
-        help="Output status as JSON for machine-readable output",
-    )
-
-    # stop command
-    stop_parser = subparsers.add_parser("stop", help="Stop a running session")
-    stop_parser.add_argument("task", help="Task name to stop")
-
-    # checkpoint command
-    checkpoint_parser = subparsers.add_parser(
-        "checkpoint", help="Checkpoint a running session"
-    )
-    checkpoint_parser.add_argument("task", help="Task name to checkpoint")
-
-    # attach command
-    attach_parser = subparsers.add_parser("attach", help="Attach to a running session")
-    attach_parser.add_argument("task", help="Task name to attach to")
-
-    return parser
-
-
-def _cmd_run(args: argparse.Namespace) -> int:
-    """Execute the 'run' subcommand."""
-    skip_prompts = args.skip_prompts
-
-    # --- Resolve task directory ---
-    if args.task_dir:
-        task_dir = Path(args.task_dir).resolve()
-    elif skip_prompts:
-        print("Error: task_dir is required with --yes flag.")
-        return 1
-    else:
-        selected = _prompt_task_selection()
-        if selected is None:
-            return 1
-        task_dir = selected.resolve()
-
-    # Validate task dir
-    if not task_dir.is_dir():
-        print(f"Error: Task directory not found: {task_dir}", file=sys.stderr)
-        return 1
-    if not (task_dir / "prd.json").is_file():
-        print(f"Error: prd.json not found in {task_dir}", file=sys.stderr)
-        return 1
-
-    # --- Resolve iterations ---
-    if args.max_iterations is not None:
-        max_iterations = args.max_iterations
-    elif skip_prompts:
-        max_iterations = DEFAULT_ITERATIONS
-    else:
-        max_iterations = _prompt_iterations()
-
-    # --- Resolve agent ---
-    agent = _resolve_agent(args.agent, task_dir, skip_prompts)
-
-    # --- Check if we're inside tmux already ---
-    running_in_tmux = os.environ.get("RALPH_TMUX_SESSION", "")
-
-    if running_in_tmux:
-        # We're inside tmux — run the loop directly
-        config = LoopConfig(
-            task_dir=task_dir,
-            max_iterations=max_iterations,
-            agent=agent,
-            agent_override=args.agent,
-            base_branch=args.base_branch,
-            yolo_mode=args.yolo,
-            verbose=args.verbose,
-        )
-        runner = LoopRunner(config)
-        return runner.run()
-    else:
-        # Not in tmux — spawn ourselves in a tmux session
-        return _spawn_in_tmux(
-            task_dir=task_dir,
-            max_iterations=max_iterations,
-            agent=agent,
-            base_branch=args.base_branch,
-            yolo=args.yolo,
-            verbose=args.verbose,
-        )
 
 
 def _spawn_in_tmux(
@@ -425,29 +216,28 @@ def _spawn_in_tmux(
     plus RALPH_TMUX_SESSION set. Registers the session in SQLite.
     Returns 0 on success.
     """
-    from datetime import datetime
-
     task_name = task_name_from_dir(task_dir)
     session_name = tmux_session_name(task_name)
 
     # Check for existing session
+    db = SessionDB()
+    existing = db.get(task_name)
     if tmux_session_exists(session_name):
-        db = SessionDB()
-        existing = db.get(task_name)
         if existing and existing.status == "running":
-            print(
+            click.echo(
                 f"Error: Session already running for '{task_name}'. "
                 f"Use 'ralph-uv stop {task_name}' first.",
-                file=sys.stderr,
+                err=True,
             )
             return 1
-        # Stale session — kill it
-        from ralph_uv.session import tmux_kill_session
-
+        # Stale tmux session — kill it
         tmux_kill_session(session_name)
+    elif existing and existing.status == "running":
+        # DB says running but tmux is gone — stale entry, clean it up
+        db.update_status(task_name, "failed")
 
     # Build command to run inside tmux
-    cmd: list[str] = [
+    cmd_parts: list[str] = [
         sys.executable,
         "-m",
         "ralph_uv.cli",
@@ -460,47 +250,40 @@ def _spawn_in_tmux(
         "-y",  # Skip prompts inside tmux
     ]
     if base_branch:
-        cmd.extend(["--base-branch", base_branch])
+        cmd_parts.extend(["--base-branch", base_branch])
     if yolo:
-        cmd.append("--yolo")
+        cmd_parts.append("--yolo")
     if verbose:
-        cmd.append("--verbose")
+        cmd_parts.append("--verbose")
 
-    # Set RALPH_TMUX_SESSION so the inner invocation knows it's in tmux
-    env_prefix = f"RALPH_TMUX_SESSION='{session_name}'"
-    cmd_str = f"{env_prefix} {' '.join(_shell_quote(c) for c in cmd)}"
-
-    # Create tmux session
-    import subprocess
-
+    # Create tmux session via libtmux
+    cmd_str = shlex.join(cmd_parts)
     project_root = str(task_dir.parent.parent)
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-x",
-            "200",
-            "-y",
-            "50",
-            "-c",
-            project_root,
-            f"bash -c '{cmd_str}'",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+    pid = tmux_create_session(
+        session_name,
+        cmd_str,
+        project_root,
+        environment={"RALPH_TMUX_SESSION": session_name},
     )
 
-    # Register in SQLite
-    import time
+    # Give the inner process a moment to start, then verify it survived
+    time.sleep(1.0)
 
-    time.sleep(0.5)  # Give tmux a moment to start
-    pid = _get_tmux_pane_pid(session_name)
+    if not tmux_session_alive(session_name):
+        # Capture any crash output from the pane before killing
+        if tmux_session_exists(session_name):
+            tmux_kill_session(session_name)
+        click.echo(
+            f"Error: tmux session '{session_name}' died immediately after starting.",
+            err=True,
+        )
+        click.echo(
+            "  The inner process likely crashed. Try running directly:",
+            err=True,
+        )
+        click.echo(f"  RALPH_TMUX_SESSION={session_name} {cmd_str}", err=True)
+        return 1
 
-    db = SessionDB()
     now = datetime.now().isoformat()
     session = SessionInfo(
         task_name=task_name,
@@ -517,80 +300,153 @@ def _spawn_in_tmux(
     )
     db.register(session)
 
-    print(f"  Started tmux session: {session_name}")
-    print(f"  Attach with: tmux attach -t {session_name}")
+    click.echo(f"  Started tmux session: {session_name}")
+    click.echo(f"  Attach with: tmux attach -t {session_name}")
     return 0
 
 
-def _get_tmux_pane_pid(session_name: str) -> int:
-    """Get the PID of the process in the tmux session pane."""
-    import subprocess
-
-    result = subprocess.run(
-        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        return int(result.stdout.strip().splitlines()[0])
-    return os.getpid()
+# --- Click CLI ---
 
 
-def _shell_quote(s: str) -> str:
-    """Simple shell quoting for tmux command arguments."""
-    if not s:
-        return "''"
-    if all(c.isalnum() or c in "-_./=:@" for c in s):
-        return s
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def _cmd_status(args: argparse.Namespace) -> int:
-    """Execute the 'status' subcommand."""
-    output = get_status(as_json=args.json_output)
-    print(output)
-    return 0
-
-
-def _cmd_stop(args: argparse.Namespace) -> int:
-    """Execute the 'stop' subcommand."""
-    success = stop_session(args.task)
-    return 0 if success else 1
-
-
-def _cmd_checkpoint(args: argparse.Namespace) -> int:
-    """Execute the 'checkpoint' subcommand."""
-    success = checkpoint_session(args.task)
-    return 0 if success else 1
-
-
-def main() -> int:
-    """Main entry point for the ralph CLI."""
-    parser = create_parser()
-    args = parser.parse_args()
-
-    if args.command is None:
-        parser.print_help()
-        return 0
-
-    match args.command:
-        case "run":
-            return _cmd_run(args)
-        case "status":
-            return _cmd_status(args)
-        case "stop":
-            return _cmd_stop(args)
-        case "checkpoint":
-            return _cmd_checkpoint(args)
-        case "attach":
-            return attach(args.task)
-
-    return 0
-
-
+@click.group()
+@click.version_option(version=__version__, prog_name="ralph-uv")
 def cli() -> None:
-    """CLI wrapper that calls main() and exits with its return code."""
-    sys.exit(main())
+    """Ralph - Autonomous AI agent loop runner."""
+    pass
+
+
+@cli.command()
+@click.argument("task_dir", required=False, type=click.Path(exists=False))
+@click.option(
+    "-i",
+    "--max-iterations",
+    type=int,
+    default=None,
+    help=f"Maximum iterations (default: {DEFAULT_ITERATIONS}).",
+)
+@click.option(
+    "-a",
+    "--agent",
+    type=click.Choice(list(VALID_AGENTS)),
+    default=None,
+    help="Agent to use.",
+)
+@click.option("--base-branch", default=None, help="Base branch to start from.")
+@click.option(
+    "-y",
+    "--yes",
+    "skip_prompts",
+    is_flag=True,
+    help="Skip interactive prompts, use defaults.",
+)
+@click.option("--yolo", is_flag=True, help="Skip agent permission checks.")
+@click.option("--verbose", is_flag=True, help="Enable verbose agent output.")
+def run(
+    task_dir: str | None,
+    max_iterations: int | None,
+    agent: str | None,
+    base_branch: str | None,
+    skip_prompts: bool,
+    yolo: bool,
+    verbose: bool,
+) -> None:
+    """Run the agent loop for a task."""
+    # --- Resolve task directory ---
+    if task_dir:
+        resolved_dir = Path(task_dir).resolve()
+    elif skip_prompts:
+        click.echo("Error: task_dir is required with --yes flag.", err=True)
+        raise SystemExit(1)
+    else:
+        selected = _prompt_task_selection()
+        if selected is None:
+            raise SystemExit(1)
+        resolved_dir = selected.resolve()
+
+    # Validate task dir
+    if not resolved_dir.is_dir():
+        click.echo(f"Error: Task directory not found: {resolved_dir}", err=True)
+        raise SystemExit(1)
+    if not (resolved_dir / "prd.json").is_file():
+        click.echo(f"Error: prd.json not found in {resolved_dir}", err=True)
+        raise SystemExit(1)
+
+    # --- Resolve iterations ---
+    if max_iterations is None:
+        if skip_prompts:
+            max_iterations = DEFAULT_ITERATIONS
+        else:
+            max_iterations = click.prompt(
+                f"Max iterations", type=int, default=DEFAULT_ITERATIONS
+            )
+
+    assert max_iterations is not None  # Guaranteed by prompt/default above
+
+    # --- Resolve agent ---
+    resolved_agent = _resolve_agent(agent, resolved_dir, skip_prompts)
+
+    # --- Check if we're inside tmux already ---
+    running_in_tmux = os.environ.get("RALPH_TMUX_SESSION", "")
+
+    if running_in_tmux:
+        # We're inside tmux — run the loop directly
+        config = LoopConfig(
+            task_dir=resolved_dir,
+            max_iterations=max_iterations,
+            agent=resolved_agent,
+            agent_override=agent,
+            base_branch=base_branch,
+            yolo_mode=yolo,
+            verbose=verbose,
+        )
+        runner = LoopRunner(config)
+        raise SystemExit(runner.run())
+    else:
+        # Not in tmux — spawn ourselves in a tmux session
+        rc = _spawn_in_tmux(
+            task_dir=resolved_dir,
+            max_iterations=max_iterations,
+            agent=resolved_agent,
+            base_branch=base_branch,
+            yolo=yolo,
+            verbose=verbose,
+        )
+        raise SystemExit(rc)
+
+
+@cli.command()
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON.")
+def status(json_output: bool) -> None:
+    """Show status of running sessions."""
+    output = get_status(as_json=json_output)
+    click.echo(output)
+
+
+@cli.command()
+@click.argument("task")
+def stop(task: str) -> None:
+    """Stop a running session."""
+    success = stop_session(task)
+    if not success:
+        raise SystemExit(1)
+
+
+@cli.command()
+@click.argument("task")
+def checkpoint(task: str) -> None:
+    """Checkpoint a running session (pause after current iteration)."""
+    success = checkpoint_session(task)
+    if not success:
+        raise SystemExit(1)
+
+
+@cli.command(name="attach")
+@click.argument("task")
+def attach_cmd(task: str) -> None:
+    """Attach to a running session's tmux pane."""
+    rc = attach(task)
+    if rc != 0:
+        raise SystemExit(rc)
 
 
 if __name__ == "__main__":

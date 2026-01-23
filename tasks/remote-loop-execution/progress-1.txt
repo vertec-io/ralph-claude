@@ -1,0 +1,305 @@
+# Ralph Progress Log
+Effort: remote-loop-execution
+Type: Bug Investigation (Feasibility Study)
+Started: 2026-01-23
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 1)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 1
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 2)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 2
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 3)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 3
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 3
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 4)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 4
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 4
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 5)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 5
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 5
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 6)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 6
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 6
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 7)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 7
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 7
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 8)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 8
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 8
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILURE (Iteration 9)
+- **Agent:** claude
+- **Story:** US-001
+- **Consecutive failures:** 9
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:16 - FAILOVER
+- **From agent:** claude
+- **To agent:** opencode
+- **Story:** US-001
+- **Consecutive failures before failover:** 9
+- **Reason:** Exit code 1
+---
+
+---
+CHECKPOINT at 2026-01-23 12:16
+Iteration: 9/50 | Stories: 0/7 | Agent: opencode
+Reason: shutdown signal
+---
+
+## 2026-01-23 12:56 - FAILURE (Iteration 1)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 1
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:56 - FAILURE (Iteration 2)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 2
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILURE (Iteration 3)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 3
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILOVER
+- **From agent:** opencode
+- **To agent:** claude
+- **Story:** US-001
+- **Consecutive failures before failover:** 3
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILURE (Iteration 4)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 4
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILOVER
+- **From agent:** opencode
+- **To agent:** claude
+- **Story:** US-001
+- **Consecutive failures before failover:** 4
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILURE (Iteration 5)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 5
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILOVER
+- **From agent:** opencode
+- **To agent:** claude
+- **Story:** US-001
+- **Consecutive failures before failover:** 5
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILURE (Iteration 6)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 6
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILOVER
+- **From agent:** opencode
+- **To agent:** claude
+- **Story:** US-001
+- **Consecutive failures before failover:** 6
+- **Reason:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILURE (Iteration 7)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 7
+- **Error:** Exit code 1
+---
+
+## 2026-01-23 12:57 - FAILOVER
+- **From agent:** opencode
+- **To agent:** claude
+- **Story:** US-001
+- **Consecutive failures before failover:** 7
+- **Reason:** Exit code 1
+---
+
+---
+CHECKPOINT at 2026-01-23 12:57
+Iteration: 8/50 | Stories: 0/7 | Agent: claude
+Reason: shutdown signal
+---
+
+## Codebase Patterns
+- RPC server uses asyncio in a background thread, communicates with main loop via callbacks and `call_soon_threadsafe`
+- Transport is NDJSON (newline-delimited JSON) over Unix domain sockets at `~/.local/share/ralph/sockets/{task}.sock`
+- Session state tracked in SQLite at `~/.local/share/ralph/sessions.db`
+- PTY-based execution enables interactive mode toggle without restarting agent
+- OpenCode completion detection uses a signal file written by a TypeScript plugin deployed to `.opencode/plugins/`
+- Loop runners are child processes, each with their own PTY, managed by the main LoopRunner
+- Progress file rotation preserves Codebase Patterns section across rotations
+- AF_UNIX hardcoded at rpc.py:150 (server) and attach.py:88 (client) - only 2 swap points for remote transport
+- Proxy architecture is preferred: daemon relays Ziti↔Unix socket, keeping loop runner code unchanged
+- OpenZiti Python SDK (v1.5.0): no native asyncio, but Ziti fds are epoll-compatible on Linux - usable with add_reader() or threads
+- SDK supports multiple service binds per process from one ZitiContext - ideal for per-loop services
+- Identity loaded via openziti.load(path) returning ZitiContext; one context can host N services
+
+## 2026-01-23 13:08 - US-001
+- What was implemented: Complete architecture document for remote loop execution over OpenZiti
+- Files changed:
+  - `tasks/remote-loop-execution/architecture.md` (new, 629 lines)
+  - `tasks/remote-loop-execution/prd.json` (updated all 13 acceptance criteria to passes: true)
+- **Learnings for future iterations:**
+  - The existing RPC protocol (NDJSON JSON-RPC 2.0) works over any stream transport - no protocol changes needed
+  - Proxy architecture (daemon proxies Ziti to Unix socket) keeps loop runner code unchanged
+  - Per-loop Ziti services (not multiplexed) matches the existing per-socket architecture
+  - Git worktrees provide isolation for concurrent loops on same remote
+  - Client pushes to origin, daemon fetches - avoids implementing git-over-Ziti
+  - Task 0 (dep install) handled by agent prompt, not special daemon logic
+  - Stale state reconciled via active polling on status query + on-attach checks
+  - Previous iterations failed with exit code 1 - likely agent CLI issues, not code problems
+---
+
+## 2026-01-23 13:10 - US-002
+- What was implemented: Full audit of current RPC transport layer with detailed findings in prd.json notes
+- Files changed:
+  - `tasks/remote-loop-execution/prd.json` (US-002 notes updated with comprehensive audit findings, all 7 criteria marked passes: true)
+- **Learnings for future iterations:**
+  - AF_UNIX is hardcoded in exactly 2 places: rpc.py:150 (asyncio.start_unix_server) and attach.py:88 (socket.AF_UNIX)
+  - The NDJSON wire protocol is fully transport-agnostic - works over any reliable stream
+  - No backpressure handling in event broadcasting - may need attention for slow network clients
+  - RpcClient.call() has 5s hardcoded timeout that may be too tight for network RTT
+  - No heartbeat/keepalive mechanism - stale connections detected only on next write failure
+  - Interactive mode keystroke forwarding sends each keystroke as separate JSON-RPC message - may need batching over network
+  - Proxy approach (daemon relays Ziti↔Unix socket) requires ZERO changes to rpc.py or loop runner
+  - attach.py checks socket_path.exists() before connecting - must be replaced with Ziti service check for remote
+---
+
+## 2026-01-23 - US-003
+- What was implemented: Full evaluation of OpenZiti Python SDK (v1.5.0) capabilities for server/client use
+- Files changed:
+  - `tasks/remote-loop-execution/prd.json` (US-003 notes updated with comprehensive SDK evaluation, all 8 criteria marked passes: true)
+- **Learnings for future iterations:**
+  - SDK is a ctypes wrapper around C libziti - returns real fds that work with select/poll/epoll on Linux
+  - No native asyncio support, but the proxy pattern (Ziti threads → Unix socket → asyncio) avoids this entirely
+  - `ZitiContext.bind(service)` can be called multiple times from one context for multiple services
+  - Identity files are JSON (certs+keys+controller URL); loaded once via `openziti.load(path)`
+  - SDK classified as Alpha on PyPI but actively maintained (v1.5.0 Nov 2025, 27 releases, NetFoundry-backed)
+  - Windows asyncio is broken (issue #92) - but we only target Linux for remote daemon
+  - Monkey-patch approach (zitify decorator) is NOT suitable for our use case - we need selective Ziti vs local sockets
+  - Client-side: `ztx.connect(service_name)` returns a standard socket - drop-in for attach.py's current socket
+  - One potential risk: thread safety of ZitiContext methods is undocumented
+  - No reconnection support: if controller connection drops, must recreate context
+---
+
+---
+CHECKPOINT at 2026-01-23 13:47
+Iteration: 1/1 | Stories: 3/7 | Agent: opencode
+Reason: shutdown signal
+---
+
+---
+CHECKPOINT at 2026-01-23 13:50
+Iteration: 1/20 | Stories: 3/7 | Agent: opencode
+Reason: shutdown signal
+---
+
+---
+CHECKPOINT at 2026-01-23 13:52
+Iteration: 1/1 | Stories: 3/7 | Agent: opencode
+Reason: shutdown signal
+---

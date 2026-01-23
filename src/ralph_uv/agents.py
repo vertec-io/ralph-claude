@@ -633,10 +633,6 @@ class OpencodeAgent(Agent):
                 time.sleep(0.5)
 
             exit_code = process.returncode or 0
-            # Signal file detection = completion
-            signal_detected = (
-                self._signal_file is not None and self._signal_file.exists()
-            ) or exit_code <= 0
 
             failed = self._detect_failure(exit_code, "", "")
             error_message = ""
@@ -647,7 +643,7 @@ class OpencodeAgent(Agent):
                 output="",  # TUI output goes to terminal, not captured
                 exit_code=exit_code,
                 duration_seconds=time.time() - start_time,
-                completed=signal_detected,
+                completed=False,  # Let the loop check PRD for story completion
                 failed=failed,
                 error_message=error_message,
             )

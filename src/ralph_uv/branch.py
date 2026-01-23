@@ -83,21 +83,23 @@ def setup_branch(config: BranchConfig) -> None:
     """Set up the task branch based on configuration.
 
     Logic:
-    1. Validate working tree is clean
-    2. Determine base branch (--base-branch or current branch)
+    1. If already on the task branch, proceed (allow dirty tree)
+    2. If switching branches, require clean working tree
     3. If task branch exists, check it out
     4. If task branch doesn't exist, create it from base
     """
-    validate_branch_state()
-
     current = get_current_branch()
-    base = config.base_branch if config.base_branch else current
     task_branch = config.branch_name
 
-    # Already on the task branch
+    # Already on the task branch — no checkout needed, allow dirty tree
     if current == task_branch:
         print(f"  Already on branch: {task_branch}")
         return
+
+    # Switching branches requires a clean working tree
+    validate_branch_state()
+
+    base = config.base_branch if config.base_branch else current
 
     if branch_exists(task_branch):
         # Task branch exists, check it out

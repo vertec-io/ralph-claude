@@ -6,7 +6,7 @@
   "mergeTarget": null,
   "autoMerge": false,
   "type": "bug-investigation",
-  "description": "Remote Loop Execution Feasibility - Investigate running ralph loops on remote machines and monitoring them via ralph-tui/attach over OpenZiti",
+  "description": "Remote Loop Execution - Dual-mode agent management (tmux for claude, opencode serve for opencode) with remote execution over OpenZiti",
   "userStories": [
     {
       "id": "US-001",
@@ -68,7 +68,7 @@
       ],
       "priority": 1,
       "passes": true,
-      "notes": "Architecture document saved to tasks/remote-loop-execution/architecture.md. Key decisions: (1) Proxy architecture - daemon proxies Ziti connections to loop runner Unix sockets. (2) Per-loop Ziti services for isolation. (3) Git worktrees for concurrent loop isolation. (4) Client pushes to origin, daemon fetches - avoids git-over-Ziti. (5) Task 0 handled by agent prompt, not special daemon logic. (6) Stale state resolved via active polling on status query + on-attach reconciliation."
+      "notes": "Architecture document saved to tasks/remote-loop-execution/architecture.md. Key decisions: (1) Proxy architecture - daemon proxies Ziti connections to loop runner Unix sockets. (2) Per-loop Ziti services for isolation. (3) Git worktrees for concurrent loop isolation. (4) Client pushes to origin, daemon fetches - avoids git-over-Ziti. (5) Task 0 handled by agent prompt, not special daemon logic. (6) Stale state resolved via active polling on status query + on-attach reconciliation. NOTE: Architecture has since shifted from RPC/PTY to tmux-based session management. Daemon now spawns loops in tmux sessions instead of managing PTY-based loop runners with RPC."
     },
     {
       "id": "US-002",
@@ -106,7 +106,7 @@
       ],
       "priority": 2,
       "passes": true,
-      "notes": "## RPC Transport Audit Findings\n\n### Socket Creation/Binding (rpc.py)\n- SOCKET_DIR = ~/.local/share/ralph/sockets/ (line 27)\n- RpcServer.get_socket_path(): returns SOCKET_DIR/<task>.sock (line 137-140)\n- RpcServer.start(): calls asyncio.start_unix_server() with path=str(socket_path) (line 150-153)\n- Socket permissions set to 0o600 via os.chmod (line 157)\n- Stale socket cleanup: unlinks existing file before bind (line 147-148)\n- Module-level get_socket_path() helper for clients (line 509-512)\n- cleanup_socket() removes stale socket files (line 515-519)\n\n### Client Connection (attach.py)\n- RpcClient.__init__(): stores socket_path, no connection yet (line 80-84)\n- RpcClient.connect(): creates socket.socket(AF_UNIX, SOCK_STREAM), calls connect(), sets non-blocking (line 86-93)\n- RpcClient.close(): simple socket.close() (line 95-102)\n- RpcClient.send_request(): serializes JSON, sendall() (line 109-127)\n- RpcClient.call(): temporarily sets blocking, sendall(), _read_response() with 5s timeout (line 129-159)\n- RpcClient.read_events(): select.select() with timeout, recv(8192), NDJSON parse (line 165-200)\n- AttachViewer.run(): gets initial status, subscribes, enters main loop (line 252-282)\n- Terminal set to cbreak mode via tty.setcbreak() for hotkey capture (line 274-275)\n\n### AF_UNIX Hardcoding Locations\n1. rpc.py:150 - asyncio.start_unix_server() - HARDCODED, no abstraction\n2. attach.py:88 - socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) - HARDCODED\n3. rpc.py:27 - SOCKET_DIR path assumes local filesystem - HARDCODED\n4. attach.py:55 - socket_path.exists() check assumes local file - HARDCODED\n5. session.py - No socket references, purely DB-based\n\n### Full RPC Lifecycle\n1. SERVER START: LoopRunner calls rpc_server.start() -> asyncio.start_unix_server() creates listening socket\n2. CLIENT CONNECT: RpcClient.connect() -> socket(AF_UNIX) -> connect(path) -> setblocking(False)\n3. SERVER ACCEPTS: _handle_client() creates EventSubscriber(writer), adds to _subscribers list\n4. CLIENT SUBSCRIBES: client.subscribe(['output','state_change']) -> server adds to subscriber.subscriptions set\n5. EVENTS FLOW: Loop thread calls emit_event() -> call_soon_threadsafe -> _broadcast_event() -> NDJSON to all subscribers\n6. CLIENT READS: select.select([sock]) -> recv(8192) -> parse NDJSON lines -> handle events\n7. INTERACTIVE: client sends set_interactive_mode -> server calls _on_set_interactive callback -> controller.set_mode()\n8. KEYSTROKE FWD: client sends write_pty -> server calls _on_write_pty -> pty_agent.write_input()\n9. DISCONNECT: client closes socket OR server catches ConnectionResetError/OSError -> removes subscriber\n10. SERVER STOP: rpc_server.stop() -> server.close() -> close all subscribers -> unlink socket file\n\n### Network-Breaking Assumptions\n1. INSTANT DELIVERY: emit_event() uses writer.write()+drain() assuming negligible latency. No backpressure handling if client is slow.\n2. NO RECONNECTION: If connection drops, client.connected becomes False and attach exits. No retry logic.\n3. BLOCKING CALL TIMEOUT: RpcClient.call() has 5s hardcoded timeout. Over network with latency, this may be too tight.\n4. NO HEARTBEAT: No keepalive mechanism. A stale connection won't be detected until next write fails.\n5. RECV BUFFER SIZE: 8192 bytes per recv(). Over network, messages may fragment differently. The NDJSON parser handles this correctly (buffers until \\n) but large bursts may need larger buffers.\n6. STATE RECOVERY: On reconnect, client calls get_status() for current state but missed events are lost. Only recent_output (last 200 lines) bridges the gap.\n7. ORDERING: NDJSON over TCP guarantees order, so this works over network. No reordering risk.\n8. SOCKET FILE CHECK: attach.py checks socket_path.exists() before connecting. For remote, this check must be replaced with Ziti service discovery.\n9. TERMINAL ASSUMPTIONS: tty.setcbreak() and termios are local-only. These stay on the client side regardless of transport.\n10. KEYSTROKE LATENCY: write_pty sends individual keystrokes as separate JSON-RPC messages. At 50-100ms network RTT, typing would feel laggy. May need batching or raw binary channel for interactive mode.\n\n### Extension Points for Remote Transport\n- RpcServer.start() is the single point to swap transport (Unix socket -> Ziti bind)\n- RpcClient.connect() is the single point for client transport (Unix socket -> Ziti dial)\n- The NDJSON wire protocol works identically over any stream transport\n- Event subscription/broadcast logic is transport-agnostic\n- Proxy approach (daemon relays Ziti<->Unix socket) requires ZERO changes to rpc.py"
+      "notes": "## RPC Transport Audit (SUPERSEDED by tmux architecture)\n\n**The RPC/PTY architecture documented here has been replaced with tmux-based session management.**\n\n### Current Architecture (tmux-based)\n- NO rpc.py, Unix sockets, or NDJSON event streaming\n- NO interactive.py or PTY management\n- Sessions run in detached tmux sessions via libtmux (session.py)\n- Attach is `tmux attach-session -t <name>` (attach.py) \u2014 direct terminal takeover\n- Stop/checkpoint uses signal files at ~/.local/share/ralph/signals/\n- Session state tracked in SQLite at ~/.local/share/ralph/sessions.db\n- tmux sessions use remain-on-exit so crash output is preserved\n- tmux_session_alive() checks pane_dead_status to distinguish alive vs dead-but-preserved\n\n### Remote Extension Points\n- The tmux server socket could be proxied over Ziti for remote attach\n- Signal files are local-only \u2014 remote stop/checkpoint needs a Ziti RPC call to daemon\n- SQLite is local-only \u2014 remote status needs daemon queries over Ziti\n- libtmux calls are local \u2014 daemon handles tmux lifecycle on the remote machine\n\n### Original Audit Summary (for reference, no longer applies)\n- AF_UNIX was hardcoded at rpc.py:150 (server) and attach.py:88 (client) \u2014 only 2 swap points\n- NDJSON framing was transport-agnostic (would have worked over any stream socket)\n- Interactive mode used PTY keystroke forwarding via write_pty()\n- RPC lifecycle was: server start \u2192 client connect \u2192 subscribe \u2192 events \u2192 disconnect"
     },
     {
       "id": "US-003",
@@ -148,35 +148,43 @@
       ],
       "priority": 3,
       "passes": true,
-      "notes": "## OpenZiti Python SDK Evaluation Findings (v1.5.0)\n\n### 1. Server-Side Socket Binding (Hosting a Ziti Service)\n\nThe SDK provides `ZitiContext.bind(service, terminator=None, sock=None)` for server-side hosting:\n\n```python\nimport openziti\n\n# Load identity and get context\nztx, err = openziti.load('/path/to/server-identity.json')\n\n# Bind to a Ziti service - returns a socket-like object\nserver = ztx.bind(service='ralph-loop-taskname-uuid')\nserver.listen(backlog=5)\n\n# Accept connections (blocking)\nconn, peer = server.accept()\ndata = conn.recv(8192)\nconn.sendall(response_data)\n```\n\n**Key mechanism**: The SDK wraps the C SDK (`libziti.so`) via ctypes. `Ziti_bind()` registers the socket with the Ziti network as a host for the named service. The returned socket uses a Ziti-managed file descriptor that supports standard socket ops (recv, send, accept).\n\n**Terminator support**: Multiple bindings to the same service with different terminators enables load balancing or routing to specific instances.\n\n### 2. Client-Side Connection\n\nTwo approaches:\n\n**Direct (ZitiContext.connect)**:\n```python\nztx, err = openziti.load('/path/to/client-identity.json')\nsock = ztx.connect('ralph-loop-taskname-uuid')  # by service name\n# sock is a standard socket.socket with Ziti-managed fd\nsock.sendall(request_data)\nresponse = sock.recv(8192)\n```\n\n**Via ZitiSocket (lower-level)**:\n```python\nimport openziti\nfrom socket import SOCK_STREAM\nsock = openziti.socket(type=SOCK_STREAM)\nsock.connect(('service-intercept-host', port))\n```\n\n**Monkey-patch approach** (for existing code, NOT suitable for our use case since we need selective Ziti vs local sockets).\n\n### 3. Asyncio Support\n\n**CRITICAL FINDING: No native asyncio support.** The SDK operates at the fd level using the C SDK's internal event loop.\n\n**On Linux**: The Ziti fds returned by `Ziti_socket()` ARE real file descriptors backed by the C SDK's internal socketpair mechanism. On Linux, they work with `select()`, `poll()`, and by extension, asyncio's `add_reader()`/`add_writer()` since the Linux asyncio event loop uses `selectors.EpollSelector` which monitors fds.\n\n**Evidence**: The SDK's own code uses `select.select()` in `RpcClient.read_events()` (attach.py:165-200) with socket fds. The `ZitiSocket` extends `socket.socket` passing the Ziti fd as `fileno`.\n\n**Implications for our architecture**:\n- The PROXY approach is strongly preferred: daemon accepts Ziti connections in a dedicated thread, bridges to Unix sockets that asyncio already handles\n- Alternatively, asyncio can monitor Ziti fds directly via `loop.add_reader(fd, callback)` on Linux (where Ziti fds are epoll-compatible)\n- Windows asyncio (ProactorEventLoop) is NOT compatible (confirmed by issue #92)\n- We only target Linux for the remote daemon, so this is acceptable\n\n**Recommended integration pattern**:\n```python\n# Daemon thread: accept Ziti connections, proxy to Unix sockets\ndef ziti_proxy_thread(ztx, service_name, unix_socket_path):\n    server = ztx.bind(service=service_name)\n    server.listen(5)\n    while True:\n        ziti_conn, peer = server.accept()  # blocking in this thread\n        # For each connection, spawn a proxy coroutine\n        asyncio.run_coroutine_threadsafe(\n            proxy_connection(ziti_conn, unix_socket_path),\n            main_loop\n        )\n```\n\n### 4. Identity File Loading\n\n**Loading**: `openziti.load(path, timeout=0)` -> returns `(ZitiContext, error_code)`\n- `path`: string path to a `.json` identity file (or directory containing identity)\n- `timeout`: milliseconds to wait for enrollment/auth (0 = default)\n- Identity files are JSON containing certs, keys, and controller URL\n- The file is read once; the C SDK maintains the connection to the Ziti controller\n\n**Enrollment**: For new identities, use `openziti.enroll(jwt_path)` with a `.jwt` token file. Returns JSON identity string to save to disk.\n\n**Environment variable**: `ZITI_IDENTITIES` env var (semicolon-separated paths) auto-loads identities at import time.\n\n**One context per identity**: Each `openziti.load()` call creates a separate `ZitiContext`. Multiple contexts can coexist in one process.\n\n**External auth (MFA/OIDC)**: v1.0+ supports `get_external_signers()`, `login_external()`, `login_totp()`, and `wait_for_auth()` for interactive auth flows.\n\n### 5. Multiple Services Per Process\n\n**YES - confirmed feasible.** The SDK supports hosting multiple services from one process:\n\n1. **Single identity, multiple binds**: One `ZitiContext` can call `.bind()` multiple times with different service names. Each returns an independent server socket.\n2. **Multiple identities**: Multiple `openziti.load()` calls create independent contexts, each capable of binding its own services.\n3. **Terminator-based routing**: Same service name with different terminators allows routing to specific loop runners.\n\n**For our architecture**:\n- Daemon loads ONE server identity\n- Calls `ztx.bind(service=f'ralph-loop-{task}-{uuid}')` for each active loop\n- Each bind returns an independent socket that can accept connections in its own thread\n- Control service (`ralph-control-{hostname}`) is a separate bind on same context\n\n**Isolation model**: Each bound service gets its own accept loop. Connections to service A cannot reach service B. This matches our per-loop Ziti service design.\n\n### 6. SDK Maturity and Maintenance Status\n\n**Status: Alpha (classified), but actively maintained**\n- PyPI classifier: `Development Status :: 3 - Alpha`\n- Latest release: v1.5.0 (Nov 18, 2025) - 2 months old, actively updated\n- Release cadence: ~monthly (27 releases since Apr 2022)\n- GitHub: 86 stars, 7 forks, 13 open issues\n- Maintainers: NetFoundry Inc (commercial backing via CloudZiti)\n- License: Apache 2.0\n- Architecture: Python ctypes wrapper around C SDK (`libziti` v1.9.16)\n- Platforms: Linux (primary), macOS, Windows (limited asyncio support)\n- Python version: 3.4+ (classifiers), practically 3.8+ for type hints used\n\n**Limitations identified**:\n1. **No native asyncio**: Blocking socket API only. Must use threads for server accept loops.\n2. **Windows asyncio broken**: Issue #92 open, ProactorEventLoop incompatible.\n3. **No backpressure**: send/recv are blocking; no built-in flow control.\n4. **No reconnection**: If controller connection drops, context must be recreated.\n5. **Source-only distribution**: No pre-built wheels; requires `libziti.so` bundled in package.\n6. **Thread safety unclear**: C SDK is thread-safe, but Python wrapper doesn't document thread safety of ZitiContext methods.\n7. **No async accept/connect**: All I/O is blocking; requires threading or manual fd monitoring.\n\n**Strengths**:\n1. Real fd-based sockets - compatible with select/poll/epoll on Linux\n2. Minimal API surface - very few functions to understand\n3. Transparent socket subclass - works with existing socket-expecting code\n4. Commercial backing ensures continued development\n5. Proven in production (FastAPI/uvicorn use cases documented)\n\n### 7. Implications for Ralph Architecture\n\n**Recommended approach (proxy pattern)**:\n- Daemon runs Ziti accept loops in dedicated threads (one per bound service)\n- Each accepted Ziti connection spawns a proxy that bridges to the loop runner's existing Unix socket\n- Loop runner code remains UNCHANGED (still uses asyncio.start_unix_server)\n- Client (attach.py) can use Ziti directly for connect() since it's synchronous already\n\n**Alternative approach (fd-based asyncio integration, higher risk)**:\n- Register Ziti server fd with asyncio via `loop.add_reader()`\n- Would avoid threads but requires careful handling of Ziti's internal event loop interactions\n- Not recommended due to undocumented fd behavior edge cases\n\n**Installation on remote**: `pip install openziti` (37KB source, pulls in libziti native lib). No additional system dependencies beyond Python 3.8+."
+      "notes": "## OpenZiti Python SDK Evaluation Findings (v1.5.0)\n\n### 1. Server-Side Socket Binding (Hosting a Ziti Service)\n\nThe SDK provides `ZitiContext.bind(service, terminator=None, sock=None)` for server-side hosting:\n\n```python\nimport openziti\n\n# Load identity and get context\nztx, err = openziti.load('/path/to/server-identity.json')\n\n# Bind to a Ziti service - returns a socket-like object\nserver = ztx.bind(service='ralph-loop-taskname-uuid')\nserver.listen(backlog=5)\n\n# Accept connections (blocking)\nconn, peer = server.accept()\ndata = conn.recv(8192)\nconn.sendall(response_data)\n```\n\n**Key mechanism**: The SDK wraps the C SDK (`libziti.so`) via ctypes. `Ziti_bind()` registers the socket with the Ziti network as a host for the named service. The returned socket uses a Ziti-managed file descriptor that supports standard socket ops (recv, send, accept).\n\n**Terminator support**: Multiple bindings to the same service with different terminators enables load balancing or routing to specific instances.\n\n### 2. Client-Side Connection\n\nTwo approaches:\n\n**Direct (ZitiContext.connect)**:\n```python\nztx, err = openziti.load('/path/to/client-identity.json')\nsock = ztx.connect('ralph-loop-taskname-uuid')  # by service name\n# sock is a standard socket.socket with Ziti-managed fd\nsock.sendall(request_data)\nresponse = sock.recv(8192)\n```\n\n**Via ZitiSocket (lower-level)**:\n```python\nimport openziti\nfrom socket import SOCK_STREAM\nsock = openziti.socket(type=SOCK_STREAM)\nsock.connect(('service-intercept-host', port))\n```\n\n**Monkey-patch approach** (for existing code, NOT suitable for our use case since we need selective Ziti vs local sockets).\n\n### 3. Asyncio Support\n\n**CRITICAL FINDING: No native asyncio support.** The SDK operates at the fd level using the C SDK's internal event loop.\n\n**On Linux**: The Ziti fds returned by `Ziti_socket()` ARE real file descriptors backed by the C SDK's internal socketpair mechanism. On Linux, they work with `select()`, `poll()`, and by extension, asyncio's `add_reader()`/`add_writer()` since the Linux asyncio event loop uses `selectors.EpollSelector` which monitors fds.\n\n**Evidence**: The SDK's own code uses `select.select()` in `RpcClient.read_events()` (attach.py:165-200) with socket fds. The `ZitiSocket` extends `socket.socket` passing the Ziti fd as `fileno`.\n\n**Implications for our architecture**:\n- The PROXY approach is strongly preferred: daemon accepts Ziti connections in a dedicated thread, bridges to Unix sockets that asyncio already handles\n- Alternatively, asyncio can monitor Ziti fds directly via `loop.add_reader(fd, callback)` on Linux (where Ziti fds are epoll-compatible)\n- Windows asyncio (ProactorEventLoop) is NOT compatible (confirmed by issue #92)\n- We only target Linux for the remote daemon, so this is acceptable\n\n**Recommended integration pattern**:\n```python\n# Daemon thread: accept Ziti connections, proxy to Unix sockets\ndef ziti_proxy_thread(ztx, service_name, unix_socket_path):\n    server = ztx.bind(service=service_name)\n    server.listen(5)\n    while True:\n        ziti_conn, peer = server.accept()  # blocking in this thread\n        # For each connection, spawn a proxy coroutine\n        asyncio.run_coroutine_threadsafe(\n            proxy_connection(ziti_conn, unix_socket_path),\n            main_loop\n        )\n```\n\n### 4. Identity File Loading\n\n**Loading**: `openziti.load(path, timeout=0)` -> returns `(ZitiContext, error_code)`\n- `path`: string path to a `.json` identity file (or directory containing identity)\n- `timeout`: milliseconds to wait for enrollment/auth (0 = default)\n- Identity files are JSON containing certs, keys, and controller URL\n- The file is read once; the C SDK maintains the connection to the Ziti controller\n\n**Enrollment**: For new identities, use `openziti.enroll(jwt_path)` with a `.jwt` token file. Returns JSON identity string to save to disk.\n\n**Environment variable**: `ZITI_IDENTITIES` env var (semicolon-separated paths) auto-loads identities at import time.\n\n**One context per identity**: Each `openziti.load()` call creates a separate `ZitiContext`. Multiple contexts can coexist in one process.\n\n**External auth (MFA/OIDC)**: v1.0+ supports `get_external_signers()`, `login_external()`, `login_totp()`, and `wait_for_auth()` for interactive auth flows.\n\n### 5. Multiple Services Per Process\n\n**YES - confirmed feasible.** The SDK supports hosting multiple services from one process:\n\n1. **Single identity, multiple binds**: One `ZitiContext` can call `.bind()` multiple times with different service names. Each returns an independent server socket.\n2. **Multiple identities**: Multiple `openziti.load()` calls create independent contexts, each capable of binding its own services.\n3. **Terminator-based routing**: Same service name with different terminators allows routing to specific loop runners.\n\n**For our architecture**:\n- Daemon loads ONE server identity\n- Calls `ztx.bind(service=f'ralph-loop-{task}-{uuid}')` for each active loop\n- Each bind returns an independent socket that can accept connections in its own thread\n- Control service (`ralph-control-{hostname}`) is a separate bind on same context\n\n**Isolation model**: Each bound service gets its own accept loop. Connections to service A cannot reach service B. This matches our per-loop Ziti service design.\n\n### 6. SDK Maturity and Maintenance Status\n\n**Status: Alpha (classified), but actively maintained**\n- PyPI classifier: `Development Status :: 3 - Alpha`\n- Latest release: v1.5.0 (Nov 18, 2025) - 2 months old, actively updated\n- Release cadence: ~monthly (27 releases since Apr 2022)\n- GitHub: 86 stars, 7 forks, 13 open issues\n- Maintainers: NetFoundry Inc (commercial backing via CloudZiti)\n- License: Apache 2.0\n- Architecture: Python ctypes wrapper around C SDK (`libziti` v1.9.16)\n- Platforms: Linux (primary), macOS, Windows (limited asyncio support)\n- Python version: 3.4+ (classifiers), practically 3.8+ for type hints used\n\n**Limitations identified**:\n1. **No native asyncio**: Blocking socket API only. Must use threads for server accept loops.\n2. **Windows asyncio broken**: Issue #92 open, ProactorEventLoop incompatible.\n3. **No backpressure**: send/recv are blocking; no built-in flow control.\n4. **No reconnection**: If controller connection drops, context must be recreated.\n5. **Source-only distribution**: No pre-built wheels; requires `libziti.so` bundled in package.\n6. **Thread safety unclear**: C SDK is thread-safe, but Python wrapper doesn't document thread safety of ZitiContext methods.\n7. **No async accept/connect**: All I/O is blocking; requires threading or manual fd monitoring.\n\n**Strengths**:\n1. Real fd-based sockets - compatible with select/poll/epoll on Linux\n2. Minimal API surface - very few functions to understand\n3. Transparent socket subclass - works with existing socket-expecting code\n4. Commercial backing ensures continued development\n5. Proven in production (FastAPI/uvicorn use cases documented)\n\n### 7. Implications for Ralph Architecture\n\n**Recommended approach (proxy pattern)**:\n- Daemon runs Ziti accept loops in dedicated threads (one per bound service)\n- Each accepted Ziti connection spawns a proxy that bridges to the loop runner's existing Unix socket\n- Loop runner code remains UNCHANGED (still uses asyncio.start_unix_server)\n- Client (attach.py) can use Ziti directly for connect() since it's synchronous already\n\n**Alternative approach (fd-based asyncio integration, higher risk)**:\n- Register Ziti server fd with asyncio via `loop.add_reader()`\n- Would avoid threads but requires careful handling of Ziti's internal event loop interactions\n- Not recommended due to undocumented fd behavior edge cases\n\n**Installation on remote**: `pip install openziti` (37KB source, pulls in libziti native lib). No additional system dependencies beyond Python 3.8+.\n\n### Impact of tmux migration\nThe asyncio limitation is LESS critical now. The previous architecture needed asyncio for the RPC event loop. Current architecture uses tmux sessions + signal files, so the daemon only needs Ziti for: (1) accepting start-loop requests, (2) proxying tmux sessions for remote attach, (3) responding to status queries. These can use blocking Ziti sockets in dedicated threads without asyncio integration."
     },
     {
       "id": "US-004",
-      "title": "Assess interactive mode over network",
-      "description": "As a developer, I need to determine if real-time keystroke forwarding is feasible over OpenZiti with acceptable latency.",
+      "title": "Implement opencode server mode for local loops",
+      "description": "As a developer, I need ralph-uv to use opencode serve instead of tmux when the agent is opencode, so that attach uses the native opencode TUI.",
       "acceptanceCriteria": [
         {
-          "description": "Analyze current interactive mode flow (Esc sending, keystroke forwarding via write_pty)",
+          "description": "When agent=opencode, ralph-uv run starts opencode serve --port <auto> instead of tmux session",
           "passes": false
         },
         {
-          "description": "Identify latency requirements for interactive mode to feel responsive",
+          "description": "Ralph-uv tracks the opencode server PID and port in SQLite session entry",
           "passes": false
         },
         {
-          "description": "Determine if JSON-RPC overhead per keystroke is acceptable or if batching/raw mode is needed",
+          "description": "Loop runner sends prompts via HTTP API (POST /session/:id/message) instead of shell injection",
           "passes": false
         },
         {
-          "description": "Test or estimate round-trip times for keystroke \u2192 agent response over OpenZiti",
+          "description": "Loop runner monitors completion via SSE events (GET /event) \u2014 waits for session.idle event",
           "passes": false
         },
         {
-          "description": "Document any protocol changes needed for responsive interactive mode",
+          "description": "ralph-uv attach <task> launches opencode attach http://localhost:<port> for opencode loops",
           "passes": false
         },
         {
-          "description": "Update notes in prd.json with findings",
+          "description": "ralph-uv stop <task> calls POST /session/:id/abort for opencode loops",
+          "passes": false
+        },
+        {
+          "description": "Health check on startup: verify GET /global/health returns before sending prompts",
+          "passes": false
+        },
+        {
+          "description": "Opencode server process managed with proper lifecycle (start, health check, kill on completion)",
           "passes": false
         },
         {
@@ -186,31 +194,31 @@
       ],
       "priority": 4,
       "passes": false,
-      "notes": ""
+      "notes": "Key opencode server APIs: POST /session (create), POST /session/:id/message (sync prompt), POST /session/:id/prompt_async (async prompt), GET /event (SSE), POST /session/:id/abort (stop), GET /global/health (liveness). Default port 4096, auto-increments if busy. Server stores sessions in ~/.opencode/data/storage/. OPENCODE_SERVER_PASSWORD for auth."
     },
     {
       "id": "US-005",
-      "title": "Design unified session DB schema for remote loops",
-      "description": "As a developer, I need to extend the SQLite session schema so remote loops appear alongside local loops, with enough info for clients to connect via OpenZiti.",
+      "title": "Assess remote attach/monitoring over network",
+      "description": "As a developer, I need to determine if remote session attach is feasible over OpenZiti for both agent types.",
       "acceptanceCriteria": [
         {
-          "description": "Design schema changes: add fields for remote vs local, Ziti service name, identity file path, remote host label",
+          "description": "Document remote opencode attach flow: Ziti proxies HTTP port -> opencode attach http://<ziti>:<port>",
           "passes": false
         },
         {
-          "description": "Define how a remote loop gets registered in local SQLite (on 'start remote loop' command? on first attach?)",
+          "description": "Analyze remote claude attach options (tmux socket proxy vs SSH-over-Ziti)",
           "passes": false
         },
         {
-          "description": "Ensure ralph-uv status and ralph-tui can list remote loops without changes to their query logic",
+          "description": "Assess latency requirements for remote terminal/TUI session to feel responsive",
           "passes": false
         },
         {
-          "description": "Define how stale remote entries are cleaned up (daemon unreachable, loop finished)",
+          "description": "Test or estimate: SSE event latency over Ziti for opencode real-time updates",
           "passes": false
         },
         {
-          "description": "Document how ralph-tui connects to remote loops (Python SDK bridge? Ziti tunneler? embedded?)",
+          "description": "Document architecture for both agent types remote attach",
           "passes": false
         },
         {
@@ -224,51 +232,35 @@
       ],
       "priority": 5,
       "passes": false,
-      "notes": ""
+      "notes": "For opencode: remote attach is trivial \u2014 just proxy HTTP port over Ziti, then opencode attach <url>. For claude: tmux socket proxying is harder \u2014 may need SSH-over-Ziti. Key insight: opencode server mode makes remote much simpler than tmux proxying."
     },
     {
       "id": "US-006",
-      "title": "Design remote environment bootstrapping flow",
-      "description": "As a developer, I need to understand how the remote machine gets the code, agent CLI, and project deps when a job is sent to it for the first time.",
+      "title": "Design unified session DB schema for dual-mode + remote",
+      "description": "As a developer, I need to extend the SQLite session schema to support both agent types (tmux vs opencode-server) and remote loops.",
       "acceptanceCriteria": [
         {
-          "description": "Design the code sync flow: local creates branch \u2192 pushes to origin \u2192 pushes to remote bare repo \u2192 daemon checks out working dir",
+          "description": "Design schema changes: add session_type (tmux|opencode-server), server_port, server_url, remote flag, Ziti service name",
           "passes": false
         },
         {
-          "description": "Define how the remote bare repo is set up (one-time manual? auto-created by daemon on first push?)",
+          "description": "Define how opencode-server sessions are registered (port, PID, health URL)",
           "passes": false
         },
         {
-          "description": "Design agent CLI auto-install: daemon checks for claude/opencode binary, installs if missing on first use",
+          "description": "Define how remote loops are registered in local SQLite (on start-remote command)",
           "passes": false
         },
         {
-          "description": "Document what 'install claude CLI' and 'install opencode CLI' look like programmatically",
+          "description": "Ensure ralph-uv status can list all loops (local tmux, local opencode, remote tmux, remote opencode)",
           "passes": false
         },
         {
-          "description": "Design 'task 0' pattern: first iteration installs project deps (npm install, pip install, etc.) before real work begins",
+          "description": "Define how stale entries are cleaned up per type (tmux: pane_dead_status, opencode: health check failure)",
           "passes": false
         },
         {
-          "description": "Address lockfile discovery: how does task 0 find lockfiles that may not be in repo root?",
-          "passes": false
-        },
-        {
-          "description": "Define what manual one-time setup the user must do on the remote (git, jq, python, API keys/claude auth)",
-          "passes": false
-        },
-        {
-          "description": "Address: how does the remote get prompt.md, agents/ scripts, and AGENTS.md?",
-          "passes": false
-        },
-        {
-          "description": "Design how subsequent jobs to the same remote reuse the existing checkout vs. create new ones",
-          "passes": false
-        },
-        {
-          "description": "Document the full sequence: user runs 'ralph-uv start-remote' \u2192 what happens step by step until loop iteration 1 begins",
+          "description": "Define how ralph-tui dispatches attach per type (tmux pipe-pane vs opencode attach)",
           "passes": false
         },
         {
@@ -282,39 +274,85 @@
       ],
       "priority": 6,
       "passes": false,
-      "notes": "Key decisions: (1) Code arrives via git push to remote bare repo, daemon checks out. (2) Agent CLI auto-installed by daemon on first use. (3) API keys/claude auth pre-configured manually on remote. (4) Project deps installed by agent as 'task 0' (first iteration). (5) Lockfiles may not be in root, agent must discover them."
+      "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Prototype feasibility test",
-      "description": "As a developer, I need to validate the architecture with a minimal proof-of-concept over OpenZiti.",
+      "title": "Design remote environment bootstrapping flow",
+      "description": "As a developer, I need to understand how the remote machine gets the code, agent CLI, and project deps when a job is sent to it.",
+      "acceptanceCriteria": [
+        {
+          "description": "Design code sync flow: local creates branch -> pushes to origin -> remote daemon fetches and checks out",
+          "passes": false
+        },
+        {
+          "description": "Design agent CLI auto-install: daemon checks for claude/opencode binary, installs if missing",
+          "passes": false
+        },
+        {
+          "description": "Document what install opencode CLI looks like (curl installer, bun dependency)",
+          "passes": false
+        },
+        {
+          "description": "Design task 0 pattern: first iteration installs project deps before real work",
+          "passes": false
+        },
+        {
+          "description": "Define manual one-time setup per remote (git, python, bun/node for opencode, API keys)",
+          "passes": false
+        },
+        {
+          "description": "Document full start-remote sequence from user command to loop iteration 1",
+          "passes": false
+        },
+        {
+          "description": "Update notes in prd.json with findings",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes",
+          "passes": false
+        }
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Key decisions from earlier: (1) Code arrives via git push/fetch. (2) Agent CLI auto-installed by daemon. (3) API keys pre-configured manually. (4) Project deps installed by agent as task 0. (5) For opencode: need bun/node on remote. (6) Remote daemon spawns opencode serve for opencode loops, tmux for claude loops."
+    },
+    {
+      "id": "US-008",
+      "title": "Prototype opencode remote loop over Ziti",
+      "description": "As a developer, I need to validate the architecture with a proof-of-concept: start opencode serve on remote, proxy via Ziti, attach locally.",
       "acceptanceCriteria": [
         {
           "description": "Set up OpenZiti network (controller + edge router, or CloudZiti)",
           "passes": false
         },
         {
-          "description": "Enroll a ralph-uv server identity and a client identity",
+          "description": "Enroll a ralph-uv daemon server identity and a client identity",
           "passes": false
         },
         {
-          "description": "Create a Ziti service for ralph RPC",
+          "description": "Create a Ziti service that proxies to the remote opencode HTTP port",
           "passes": false
         },
         {
-          "description": "Connect ralph-uv attach to a loop via OpenZiti (not Unix socket)",
+          "description": "Start opencode serve on remote, verify opencode attach works via Ziti proxy locally",
           "passes": false
         },
         {
-          "description": "Verify event streaming works over Ziti (output events, state changes)",
+          "description": "Send a prompt via Ziti-proxied HTTP API and verify response",
           "passes": false
         },
         {
-          "description": "Test interactive mode keystroke forwarding over Ziti",
+          "description": "Verify SSE event streaming works over Ziti (real-time progress updates)",
           "passes": false
         },
         {
-          "description": "Measure latency overhead vs Unix socket baseline",
+          "description": "Measure latency: local opencode attach vs Ziti-proxied opencode attach",
+          "passes": false
+        },
+        {
+          "description": "Test abort/stop via Ziti-proxied API",
           "passes": false
         },
         {
@@ -330,7 +368,7 @@
           "passes": false
         }
       ],
-      "priority": 7,
+      "priority": 8,
       "passes": false,
       "notes": ""
     }

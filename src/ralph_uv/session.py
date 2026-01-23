@@ -18,6 +18,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import libtmux
+from libtmux.exc import LibTmuxException
+
 # Default paths
 DATA_DIR = Path.home() / ".local" / "share" / "ralph"
 DB_PATH = DATA_DIR / "sessions.db"
@@ -191,88 +194,131 @@ class SessionDB:
         )
 
 
-# --- Tmux Operations ---
+# --- Tmux Operations (via libtmux) ---
+
+
+def _get_server() -> libtmux.Server:
+    """Get a libtmux Server instance."""
+    return libtmux.Server()
 
 
 def tmux_session_exists(session_name: str) -> bool:
     """Check if a tmux session exists."""
-    result = subprocess.run(
-        ["tmux", "has-session", "-t", session_name],
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0
+    try:
+        server = _get_server()
+        matches = server.sessions.filter(session_name=session_name)
+        return len(matches) > 0
+    except LibTmuxException:
+        return False
 
 
-def tmux_create_session(session_name: str, command: list[str], cwd: str) -> int:
-    """Create a new tmux session running the given command.
+def tmux_session_alive(session_name: str) -> bool:
+    """Check if a tmux session exists AND its pane process is still running.
 
-    Returns the PID of the tmux server process for this session.
+    With remain-on-exit, the session stays around after the process dies.
+    This checks pane_dead_status: None means alive, a value means exited.
     """
-    # Build the command string for tmux
-    cmd_str = " ".join(_shell_quote(c) for c in command)
+    try:
+        server = _get_server()
+        matches = server.sessions.filter(session_name=session_name)
+        if not matches:
+            return False
+        session = matches[0]
+        pane = session.active_window.active_pane
+        if pane is None:
+            return False
+        # pane_dead_status is None when alive, exit code (int) when dead
+        return pane.pane_dead_status is None
+    except (LibTmuxException, AttributeError):
+        return False
 
-    subprocess.run(
-        [
-            "tmux",
-            "new-session",
-            "-d",  # Detached
-            "-s",
-            session_name,
-            "-c",
-            cwd,
-            cmd_str,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+
+def tmux_create_session(
+    session_name: str,
+    command: str,
+    cwd: str,
+    *,
+    environment: dict[str, str] | None = None,
+    width: int = 200,
+    height: int = 50,
+) -> int:
+    """Create a new detached tmux session running the given command.
+
+    Args:
+        session_name: Name for the tmux session.
+        command: Shell command string to run in the session.
+        cwd: Working directory for the session.
+        environment: Environment variables to set in the session.
+        width: Terminal width (default 200).
+        height: Terminal height (default 50).
+
+    Returns:
+        The PID of the process running in the tmux pane.
+    """
+    import shlex
+
+    server = _get_server()
+
+    # Build the shell command with env vars as inline prefix.
+    # tmux's window_command is run through the default shell, so
+    # `KEY=value command args` works natively.
+    if environment:
+        exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in environment.items())
+        shell_cmd = f"{exports} {command}"
+    else:
+        shell_cmd = command
+
+    session = server.new_session(
+        session_name=session_name,
+        start_directory=cwd,
+        window_command=shell_cmd,
+        attach=False,
+        x=width,
+        y=height,
     )
 
-    # Get the PID of the process running in the session
-    result = subprocess.run(
-        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    pid_str = result.stdout.strip()
-    return int(pid_str) if pid_str else os.getpid()
+    # Keep the pane open if the process exits, so crash output is visible
+    session.set_option("remain-on-exit", "on")
+
+    pane = session.active_window.active_pane
+    if pane is not None:
+        pid_str = pane.pane_pid
+        if pid_str:
+            return int(pid_str)
+    return os.getpid()
 
 
 def tmux_kill_session(session_name: str) -> None:
     """Kill a tmux session."""
-    subprocess.run(
-        ["tmux", "kill-session", "-t", session_name],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        server = _get_server()
+        matches = server.sessions.filter(session_name=session_name)
+        if matches:
+            matches[0].kill()
+    except LibTmuxException:
+        pass
 
 
 def tmux_list_sessions() -> list[str]:
     """List all tmux sessions with the ralph prefix."""
-    result = subprocess.run(
-        ["tmux", "list-sessions", "-F", "#{session_name}"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
+    try:
+        server = _get_server()
+        return [
+            s.session_name
+            for s in server.sessions
+            if s.session_name and s.session_name.startswith(TMUX_PREFIX)
+        ]
+    except LibTmuxException:
         return []
-    return [
-        name.strip()
-        for name in result.stdout.splitlines()
-        if name.strip().startswith(TMUX_PREFIX)
-    ]
 
 
-def _shell_quote(s: str) -> str:
-    """Simple shell quoting for command arguments."""
-    if not s:
-        return "''"
-    # If it contains no special chars, return as-is
-    if all(c.isalnum() or c in "-_./=:@" for c in s):
-        return s
-    # Otherwise single-quote it, escaping any single quotes
-    return "'" + s.replace("'", "'\"'\"'") + "'"
+def tmux_attach_session(session_name: str) -> int:
+    """Attach to a tmux session (takes over terminal).
+
+    Returns the exit code from tmux attach.
+    """
+    result = subprocess.run(["tmux", "attach-session", "-t", session_name])
+    return result.returncode
 
 
 # --- Signal File Operations ---
@@ -366,7 +412,9 @@ def start_session(
         tmux_kill_session(session_name)
 
     # Build the ralph-uv run command for inside tmux
-    cmd: list[str] = [
+    import shlex
+
+    cmd_parts: list[str] = [
         sys.executable,
         "-m",
         "ralph_uv.cli",
@@ -376,13 +424,20 @@ def start_session(
         str(max_iterations),
     ]
     if agent:
-        cmd.extend(["--agent", agent])
+        cmd_parts.extend(["--agent", agent])
     if base_branch:
-        cmd.extend(["--base-branch", base_branch])
+        cmd_parts.extend(["--base-branch", base_branch])
+
+    cmd_str = shlex.join(cmd_parts)
 
     # Create tmux session
     cwd = str(task_dir.parent.parent)  # Project root
-    pid = tmux_create_session(session_name, cmd, cwd)
+    pid = tmux_create_session(
+        session_name,
+        cmd_str,
+        cwd,
+        environment={"RALPH_TMUX_SESSION": session_name},
+    )
 
     # Register in database
     now = datetime.now().isoformat()
