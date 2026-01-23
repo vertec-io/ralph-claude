@@ -14,14 +14,9 @@ import subprocess
 import tempfile
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from ralph_uv.interactive import InteractiveController, PtyAgent
+from typing import Any
 
 
 COMPLETION_SIGNAL = "<promise>COMPLETE</promise>"
@@ -138,109 +133,21 @@ class Agent(ABC):
                 error_message=f"Failed to start agent: {e}",
             )
 
-    def build_pty_command(self, config: AgentConfig) -> list[str]:
-        """Build the command for PTY-based execution.
+    def run_in_terminal(self, config: AgentConfig) -> AgentResult:
+        """Run the agent inheriting the terminal (for tmux execution).
 
-        Subclasses should override this if their PTY command differs
-        from the pipe-based command.
-
-        Args:
-            config: Agent execution configuration.
-
-        Returns:
-            The command list for PTY execution.
-        """
-        # Default: same as pipe-based command
-        return self._build_command_list(config)
-
-    def build_pty_env(self, config: AgentConfig) -> dict[str, str]:
-        """Build the environment for PTY-based execution.
+        The agent process inherits stdin/stdout/stderr directly, allowing
+        interactive TUI agents (like opencode) to take over the terminal.
+        Subclasses should override this for agent-specific behavior.
 
         Args:
             config: Agent execution configuration.
-
-        Returns:
-            Environment variables dict.
-        """
-        return os.environ.copy()
-
-    def _build_command_list(self, config: AgentConfig) -> list[str]:
-        """Build the base command list. Subclasses should override."""
-        return []
-
-    def run_with_pty(
-        self,
-        config: AgentConfig,
-        pty_agent: PtyAgent,
-        interactive_controller: InteractiveController,
-    ) -> AgentResult:
-        """Run the agent with PTY support for interactive control.
-
-        This alternative to run() uses a PTY instead of pipes, enabling
-        interactive mode toggling. The InteractiveController manages the
-        lifecycle of interactive sessions.
-
-        Args:
-            config: Agent execution configuration.
-            pty_agent: The PTY agent manager.
-            interactive_controller: Controller for interactive mode.
 
         Returns:
             Structured result from the agent run.
         """
-        start_time = time.time()
-        try:
-            cmd = self.build_pty_command(config)
-            env = self.build_pty_env(config)
-            pty_agent.start(cmd, env, config.working_dir)
-
-            # Write prompt to the PTY
-            pty_agent.write_prompt(config.prompt)
-
-            # Main loop: read output, check completion
-            while not pty_agent.is_done():
-                output_bytes = interactive_controller.check_output(timeout=0.2)
-
-                if output_bytes and not interactive_controller.is_interactive:
-                    # In autonomous mode, check for completion
-                    text = output_bytes.decode("utf-8", errors="replace")
-                    if interactive_controller.should_detect_completion(text):
-                        pty_agent.terminate()
-                        break
-
-                # Small sleep to prevent busy-waiting
-                if not output_bytes:
-                    time.sleep(0.05)
-
-            output = pty_agent.output
-            exit_code = pty_agent.exit_code
-            completed = (
-                COMPLETION_SIGNAL in output
-                and not interactive_controller.suppress_completion
-            )
-            failed = self._detect_failure(exit_code, output, "")
-            error_message = ""
-            if failed:
-                error_message = self._extract_error(exit_code, output, "")
-
-            return AgentResult(
-                output=output,
-                exit_code=exit_code,
-                duration_seconds=time.time() - start_time,
-                completed=completed,
-                failed=failed,
-                error_message=error_message,
-            )
-        except OSError as e:
-            return AgentResult(
-                output="",
-                exit_code=1,
-                duration_seconds=time.time() - start_time,
-                failed=True,
-                error_message=f"Failed to start agent with PTY: {e}",
-            )
-        finally:
-            pty_agent.cleanup()
+        # Default implementation: same as pipe-based run
+        return self.run(config)
 
     def _detect_failure(self, exit_code: int, output: str, stderr: str) -> bool:
         """Common failure detection logic shared by all agents."""
@@ -351,90 +258,40 @@ class ClaudeAgent(Agent):
 
         return cmd
 
-    def _build_command_list(self, config: AgentConfig) -> list[str]:
-        """Build command list (used by PTY execution)."""
-        return self._build_command(config)
+    def run_in_terminal(self, config: AgentConfig) -> AgentResult:
+        """Run Claude in the terminal (for tmux execution).
 
-    def build_pty_command(self, config: AgentConfig) -> list[str]:
-        """Build PTY command for Claude.
-
-        In PTY mode, we use --print which accepts prompt from stdin.
-        The prompt is delivered via a pipe (stdin_file), not the PTY.
-        """
-        return self._build_command(config)
-
-    @contextmanager
-    def _prompt_as_fd(self, prompt: str) -> Generator[int, None, None]:
-        """Write prompt to a temp file and yield a readable fd for it.
-
-        This allows passing the prompt to claude --print via stdin as a pipe,
-        which is required because claude --print won't read from a TTY stdin.
-
-        Args:
-            prompt: The prompt text.
-
-        Yields:
-            A file descriptor open for reading with the prompt content.
-        """
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w", prefix="ralph-prompt-", suffix=".txt", delete=False
-        )
-        try:
-            tmp.write(prompt)
-            tmp.close()
-            fd = os.open(tmp.name, os.O_RDONLY)
-            try:
-                yield fd
-            finally:
-                os.close(fd)
-        finally:
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-
-    def run_with_pty(
-        self,
-        config: AgentConfig,
-        pty_agent: PtyAgent,
-        interactive_controller: InteractiveController,
-    ) -> AgentResult:
-        """Run Claude with PTY for output capture but pipe-based prompt delivery.
-
-        Claude --print requires a piped stdin (not a TTY) to read the prompt.
-        We write the prompt to a temp file, open it as a file descriptor, and
-        pass it as stdin_file to the PTY agent. The PTY is only used for
-        stdout/stderr, enabling interactive mode toggling.
+        Claude --print reads the prompt from piped stdin and writes
+        stream-json to stdout. We pipe stdin for the prompt but let
+        stdout/stderr go to the terminal so the user can see progress
+        in the tmux pane.
         """
         start_time = time.time()
         try:
-            cmd = self.build_pty_command(config)
-            env = self.build_pty_env(config)
+            cmd = self._build_command(config)
+            env = self._build_env(config)
 
-            with self._prompt_as_fd(config.prompt) as prompt_fd:
-                pty_agent.start(cmd, env, config.working_dir, stdin_file=prompt_fd)
-
-                # Main loop: read output, check completion
-                while not pty_agent.is_done():
-                    output_bytes = interactive_controller.check_output(timeout=0.2)
-
-                    if output_bytes and not interactive_controller.is_interactive:
-                        # In autonomous mode, check for completion
-                        text = output_bytes.decode("utf-8", errors="replace")
-                        if interactive_controller.should_detect_completion(text):
-                            pty_agent.terminate()
-                            break
-
-                    # Small sleep to prevent busy-waiting
-                    if not output_bytes:
-                        time.sleep(0.05)
-
-            output = pty_agent.output
-            exit_code = pty_agent.exit_code
-            completed = (
-                COMPLETION_SIGNAL in output
-                and not interactive_controller.suppress_completion
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,  # Inherit stderr → visible in tmux
+                text=True,
+                env=env,
+                cwd=str(config.working_dir),
             )
+
+            # Write prompt to stdin and close
+            if process.stdin is not None:
+                process.stdin.write(config.prompt)
+                process.stdin.close()
+
+            # Wait for completion, reading stdout
+            stdout, _ = process.communicate()
+            exit_code = process.returncode
+
+            output = self._parse_stream_json(stdout)
+            completed = COMPLETION_SIGNAL in output
             failed = self._detect_failure(exit_code, output, "")
             error_message = ""
             if failed:
@@ -454,10 +311,8 @@ class ClaudeAgent(Agent):
                 exit_code=1,
                 duration_seconds=time.time() - start_time,
                 failed=True,
-                error_message=f"Failed to start Claude with PTY: {e}",
+                error_message=f"Failed to start Claude: {e}",
             )
-        finally:
-            pty_agent.cleanup()
 
     def _build_env(self, config: AgentConfig) -> dict[str, str]:
         """Build the environment for Claude subprocess."""
@@ -466,10 +321,6 @@ class ClaudeAgent(Agent):
             # Claude CLI doesn't support model selection, but log awareness
             env["RALPH_MODEL_OVERRIDE"] = config.model
         return env
-
-    def build_pty_env(self, config: AgentConfig) -> dict[str, str]:
-        """Build PTY environment for Claude."""
-        return self._build_env(config)
 
     def _parse_stream_json(self, raw_output: str) -> str:
         """Parse stream-json output to extract the result text."""
@@ -701,12 +552,12 @@ class OpencodeAgent(Agent):
 
         return cmd
 
-    def _build_pty_command(self, config: AgentConfig) -> list[str]:
-        """Build the opencode CLI command for PTY (interactive) mode.
+    def _build_terminal_command(self, config: AgentConfig) -> list[str]:
+        """Build the opencode CLI command for terminal (TUI) mode.
 
         Uses `opencode --prompt "prompt"` which starts the TUI with
-        the prompt pre-filled. The TUI needs a terminal (provided by PTY)
-        and supports interactive attach/detach via ralph-uv attach.
+        the prompt pre-filled. The TUI inherits the terminal directly
+        (from the tmux pane).
         """
         cmd = ["opencode", "--prompt", config.prompt]
 
@@ -717,14 +568,6 @@ class OpencodeAgent(Agent):
             cmd.extend(["--print-logs", "--log-level", "DEBUG"])
 
         return cmd
-
-    def _build_command_list(self, config: AgentConfig) -> list[str]:
-        """Build command list (used by PTY execution)."""
-        return self._build_pty_command(config)
-
-    def build_pty_command(self, config: AgentConfig) -> list[str]:
-        """Build PTY command for OpenCode."""
-        return self._build_pty_command(config)
 
     def _build_env(self, config: AgentConfig) -> dict[str, str]:
         """Build the environment for OpenCode subprocess.
@@ -749,86 +592,62 @@ class OpencodeAgent(Agent):
 
         return env
 
-    def build_pty_env(self, config: AgentConfig) -> dict[str, str]:
-        """Build PTY environment for OpenCode.
+    def run_in_terminal(self, config: AgentConfig) -> AgentResult:
+        """Run OpenCode directly in the terminal (for tmux execution).
 
-        Requires _setup_signal_file() to have been called first.
+        The opencode TUI inherits the terminal (stdin/stdout/stderr) directly,
+        so the user sees the TUI when they attach to the tmux session.
+        Completion is detected via the signal file (session.idle plugin event).
+        When the signal fires, we terminate the process.
         """
-        return self._build_env(config)
-
-    def run_with_pty(
-        self,
-        config: AgentConfig,
-        pty_agent: PtyAgent,
-        interactive_controller: InteractiveController,
-    ) -> AgentResult:
-        """Run OpenCode with PTY and signal-file awareness.
-
-        Overrides base to add signal file handling:
-        - Deploys plugin before starting
-        - Checks signal file for completion (primary detection)
-        - Discards signal file writes during interactive mode
-        - Cleans up signal infrastructure on exit
-        """
-        # Deploy plugin to working dir
+        # Deploy plugin and set up signal file
         self._deploy_plugin(config.working_dir)
         self._setup_signal_file()
 
         start_time = time.time()
         try:
-            cmd = self.build_pty_command(config)
-            env = self.build_pty_env(config)
-            pty_agent.start(cmd, env, config.working_dir)
+            cmd = self._build_terminal_command(config)  # Uses --prompt for TUI mode
+            env = self._build_env(config)
 
-            # No need to write prompt - it's passed as --prompt flag to the TUI.
-            # The TUI starts with the prompt pre-filled and begins processing.
-
-            # Main loop: read output, check signal file and completion
-            while not pty_agent.is_done():
-                output_bytes = interactive_controller.check_output(timeout=0.2)
-
-                if not interactive_controller.is_interactive:
-                    # Check signal file (primary completion for opencode)
-                    if self._check_signal_file():
-                        pty_agent.terminate()
-                        break
-
-                    # Also check output for COMPLETE signal
-                    if output_bytes:
-                        text = output_bytes.decode("utf-8", errors="replace")
-                        if interactive_controller.should_detect_completion(text):
-                            pty_agent.terminate()
-                            break
-                else:
-                    # Interactive mode: discard signal file writes
-                    self._discard_signal_file()
-
-                if not output_bytes:
-                    time.sleep(0.05)
-
-            output = pty_agent.output
-            exit_code = pty_agent.exit_code
-            # For opencode TUI mode, completion is primarily detected via
-            # the signal file (session.idle event). The COMPLETION_SIGNAL
-            # may also appear in the TUI output if the agent emitted it.
-            signal_detected = self._signal_file is not None and (
-                self._signal_file.exists()
-                or exit_code <= 0  # We terminated it after signal
+            # Run opencode inheriting the terminal directly
+            process = subprocess.Popen(
+                cmd,
+                stdin=None,  # Inherit terminal stdin
+                stdout=None,  # Inherit terminal stdout
+                stderr=None,  # Inherit terminal stderr
+                env=env,
+                cwd=str(config.working_dir),
             )
-            completed = signal_detected or (
-                COMPLETION_SIGNAL in output
-                and not interactive_controller.suppress_completion
-            )
-            failed = self._detect_failure(exit_code, output, "")
+
+            # Poll for signal file (completion) or process exit
+            while process.poll() is None:
+                if self._check_signal_file():
+                    # Agent went idle — iteration complete
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    break
+                time.sleep(0.5)
+
+            exit_code = process.returncode or 0
+            # Signal file detection = completion
+            signal_detected = (
+                self._signal_file is not None and self._signal_file.exists()
+            ) or exit_code <= 0
+
+            failed = self._detect_failure(exit_code, "", "")
             error_message = ""
             if failed:
-                error_message = self._extract_error(exit_code, output, "")
+                error_message = self._extract_error(exit_code, "", "")
 
             return AgentResult(
-                output=output,
+                output="",  # TUI output goes to terminal, not captured
                 exit_code=exit_code,
                 duration_seconds=time.time() - start_time,
-                completed=completed,
+                completed=signal_detected,
                 failed=failed,
                 error_message=error_message,
             )
@@ -838,10 +657,9 @@ class OpencodeAgent(Agent):
                 exit_code=1,
                 duration_seconds=time.time() - start_time,
                 failed=True,
-                error_message=f"Failed to start opencode with PTY: {e}",
+                error_message=f"Failed to start opencode: {e}",
             )
         finally:
-            pty_agent.cleanup()
             self._cleanup_signal()
 
     def _detect_failure(self, exit_code: int, output: str, stderr: str) -> bool:

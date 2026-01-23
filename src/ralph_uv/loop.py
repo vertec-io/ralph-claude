@@ -30,10 +30,7 @@ from ralph_uv.branch import (
     handle_completion,
     setup_branch,
 )
-from ralph_uv.interactive import (
-    InteractiveController,
-    PtyAgent,
-)
+
 from ralph_uv.prompt import (
     PromptContext,
     build_prompt,
@@ -100,8 +97,6 @@ class LoopRunner:
         self._rpc_server: RpcServer | None = None
         self._rpc_thread: threading.Thread | None = None
         self._rpc_loop: asyncio.AbstractEventLoop | None = None
-        self._interactive_controller: InteractiveController | None = None
-        self._pty_agent: PtyAgent | None = None
 
     def run(self) -> int:
         """Run the loop. Returns exit code (0 = complete, 1 = stopped/failed)."""
@@ -212,23 +207,18 @@ class LoopRunner:
     def _rpc_on_set_interactive(self, enabled: bool) -> None:
         """Callback from RPC server when TUI toggles interactive mode.
 
-        Forwards the toggle to the interactive controller which handles
-        sending Esc to the agent and suppressing completion detection.
+        With tmux-based execution, interactive mode is handled by
+        tmux attach/detach — no PTY forwarding needed here.
         """
-        if self._interactive_controller is not None:
-            self._interactive_controller.set_mode(enabled)
+        pass
 
     def _rpc_on_write_pty(self, data: str) -> None:
         """Callback from RPC server when attach client sends PTY input.
 
-        Forwards keystroke data to the agent PTY via the interactive controller.
-        Only effective when interactive mode is enabled.
+        With tmux-based execution, the user interacts directly via
+        tmux attach — no PTY forwarding needed here.
         """
-        if (
-            self._interactive_controller is not None
-            and self._interactive_controller.is_interactive
-        ):
-            self._interactive_controller.forward_input(data.encode("utf-8"))
+        pass
 
     # --- Loop Logic ---
 
@@ -437,11 +427,11 @@ class LoopRunner:
         return resolve_agent(prd, story, self.config.agent_override)
 
     def _run_agent(self, agent_name: str, story: dict[str, Any]) -> AgentResult:
-        """Run the agent using the abstraction layer with PTY support.
+        """Run the agent directly in the terminal (tmux pane).
 
-        Uses PTY-based execution to support interactive mode toggling.
-        The InteractiveController manages completion suppression and
-        keystroke forwarding when interactive mode is enabled via RPC.
+        The agent inherits the terminal from the tmux session.
+        For opencode: TUI takes over the terminal, user can interact via tmux attach.
+        For claude: pipes stdin for prompt, stdout visible in tmux pane.
         """
         agent = create_agent(agent_name)
         prompt = self._build_prompt(agent_name)
@@ -459,20 +449,7 @@ class LoopRunner:
             verbose=self.config.verbose,
         )
 
-        # Set up PTY agent and interactive controller for this iteration
-        self._pty_agent = PtyAgent()
-        self._interactive_controller = InteractiveController(self._pty_agent)
-
-        try:
-            result = agent.run_with_pty(
-                agent_config, self._pty_agent, self._interactive_controller
-            )
-        finally:
-            self._pty_agent = None
-            self._interactive_controller = None
-            # Reset interactive mode in RPC state
-            if self._rpc_server is not None:
-                self._rpc_server.update_state(interactive_mode=False)
+        result = agent.run_in_terminal(agent_config)
 
         # Append output to RPC buffer for TUI visibility
         if result.output:

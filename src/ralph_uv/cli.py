@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -13,9 +14,15 @@ from ralph_uv.agents import VALID_AGENTS
 from ralph_uv.attach import attach
 from ralph_uv.loop import LoopConfig, LoopRunner
 from ralph_uv.session import (
+    SessionDB,
+    SessionInfo,
     checkpoint_session,
     get_status,
     stop_session,
+    task_name_from_dir,
+    tmux_create_session,
+    tmux_session_exists,
+    tmux_session_name,
 )
 
 DEFAULT_ITERATIONS = 10
@@ -376,17 +383,166 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # --- Resolve agent ---
     agent = _resolve_agent(args.agent, task_dir, skip_prompts)
 
-    config = LoopConfig(
-        task_dir=task_dir,
-        max_iterations=max_iterations,
-        agent=agent,
-        agent_override=args.agent,
-        base_branch=args.base_branch,
-        yolo_mode=args.yolo,
-        verbose=args.verbose,
+    # --- Check if we're inside tmux already ---
+    running_in_tmux = os.environ.get("RALPH_TMUX_SESSION", "")
+
+    if running_in_tmux:
+        # We're inside tmux — run the loop directly
+        config = LoopConfig(
+            task_dir=task_dir,
+            max_iterations=max_iterations,
+            agent=agent,
+            agent_override=args.agent,
+            base_branch=args.base_branch,
+            yolo_mode=args.yolo,
+            verbose=args.verbose,
+        )
+        runner = LoopRunner(config)
+        return runner.run()
+    else:
+        # Not in tmux — spawn ourselves in a tmux session
+        return _spawn_in_tmux(
+            task_dir=task_dir,
+            max_iterations=max_iterations,
+            agent=agent,
+            base_branch=args.base_branch,
+            yolo=args.yolo,
+            verbose=args.verbose,
+        )
+
+
+def _spawn_in_tmux(
+    task_dir: Path,
+    max_iterations: int,
+    agent: str,
+    base_branch: str | None,
+    yolo: bool,
+    verbose: bool,
+) -> int:
+    """Spawn ralph-uv inside a tmux session.
+
+    Creates a detached tmux session running ralph-uv with the same arguments
+    plus RALPH_TMUX_SESSION set. Registers the session in SQLite.
+    Returns 0 on success.
+    """
+    from datetime import datetime
+
+    task_name = task_name_from_dir(task_dir)
+    session_name = tmux_session_name(task_name)
+
+    # Check for existing session
+    if tmux_session_exists(session_name):
+        db = SessionDB()
+        existing = db.get(task_name)
+        if existing and existing.status == "running":
+            print(
+                f"Error: Session already running for '{task_name}'. "
+                f"Use 'ralph-uv stop {task_name}' first.",
+                file=sys.stderr,
+            )
+            return 1
+        # Stale session — kill it
+        from ralph_uv.session import tmux_kill_session
+
+        tmux_kill_session(session_name)
+
+    # Build command to run inside tmux
+    cmd: list[str] = [
+        sys.executable,
+        "-m",
+        "ralph_uv.cli",
+        "run",
+        str(task_dir),
+        "-i",
+        str(max_iterations),
+        "-a",
+        agent,
+        "-y",  # Skip prompts inside tmux
+    ]
+    if base_branch:
+        cmd.extend(["--base-branch", base_branch])
+    if yolo:
+        cmd.append("--yolo")
+    if verbose:
+        cmd.append("--verbose")
+
+    # Set RALPH_TMUX_SESSION so the inner invocation knows it's in tmux
+    env_prefix = f"RALPH_TMUX_SESSION='{session_name}'"
+    cmd_str = f"{env_prefix} {' '.join(_shell_quote(c) for c in cmd)}"
+
+    # Create tmux session
+    import subprocess
+
+    project_root = str(task_dir.parent.parent)
+    subprocess.run(
+        [
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-x",
+            "200",
+            "-y",
+            "50",
+            "-c",
+            project_root,
+            f"bash -c '{cmd_str}'",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
-    runner = LoopRunner(config)
-    return runner.run()
+
+    # Register in SQLite
+    import time
+
+    time.sleep(0.5)  # Give tmux a moment to start
+    pid = _get_tmux_pane_pid(session_name)
+
+    db = SessionDB()
+    now = datetime.now().isoformat()
+    session = SessionInfo(
+        task_name=task_name,
+        task_dir=str(task_dir),
+        pid=pid,
+        tmux_session=session_name,
+        agent=agent,
+        status="running",
+        started_at=now,
+        updated_at=now,
+        iteration=0,
+        current_story="",
+        max_iterations=max_iterations,
+    )
+    db.register(session)
+
+    print(f"  Started tmux session: {session_name}")
+    print(f"  Attach with: tmux attach -t {session_name}")
+    return 0
+
+
+def _get_tmux_pane_pid(session_name: str) -> int:
+    """Get the PID of the process in the tmux session pane."""
+    import subprocess
+
+    result = subprocess.run(
+        ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return int(result.stdout.strip().splitlines()[0])
+    return os.getpid()
+
+
+def _shell_quote(s: str) -> str:
+    """Simple shell quoting for tmux command arguments."""
+    if not s:
+        return "''"
+    if all(c.isalnum() or c in "-_./=:@" for c in s):
+        return s
+    return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
