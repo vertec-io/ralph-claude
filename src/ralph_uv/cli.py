@@ -6,6 +6,11 @@ from pathlib import Path
 
 from ralph_uv import __version__
 from ralph_uv.loop import LoopConfig, LoopRunner
+from ralph_uv.session import (
+    checkpoint_session,
+    get_status,
+    stop_session,
+)
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -47,7 +52,15 @@ def create_parser() -> argparse.ArgumentParser:
     )
 
     # status command
-    subparsers.add_parser("status", help="Show status of running sessions")
+    status_parser = subparsers.add_parser(
+        "status", help="Show status of running sessions"
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Output status as JSON for machine-readable output",
+    )
 
     # stop command
     stop_parser = subparsers.add_parser("stop", help="Stop a running session")
@@ -79,6 +92,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return runner.run()
 
 
+def _cmd_status(args: argparse.Namespace) -> int:
+    """Execute the 'status' subcommand."""
+    output = get_status(as_json=args.json_output)
+    print(output)
+    return 0
+
+
+def _cmd_stop(args: argparse.Namespace) -> int:
+    """Execute the 'stop' subcommand."""
+    success = stop_session(args.task)
+    return 0 if success else 1
+
+
+def _cmd_checkpoint(args: argparse.Namespace) -> int:
+    """Execute the 'checkpoint' subcommand."""
+    success = checkpoint_session(args.task)
+    return 0 if success else 1
+
+
 def main() -> int:
     """Main entry point for the ralph CLI."""
     parser = create_parser()
@@ -92,11 +124,11 @@ def main() -> int:
         case "run":
             return _cmd_run(args)
         case "status":
-            print("No running sessions.")
+            return _cmd_status(args)
         case "stop":
-            print(f"Would stop task: {args.task}")
+            return _cmd_stop(args)
         case "checkpoint":
-            print(f"Would checkpoint task: {args.task}")
+            return _cmd_checkpoint(args)
         case "attach":
             print(f"Would attach to task: {args.task}")
 

@@ -15,12 +15,16 @@ Started: 2026-01-23
 - Loop module (src/ralph_uv/loop.py) is the core: LoopConfig, LoopRunner
 - Agent module (src/ralph_uv/agents.py): Agent ABC, ClaudeAgent, OpencodeAgent, FailureTracker, create_agent(), resolve_agent()
 - Branch module (src/ralph_uv/branch.py): BranchConfig, setup_branch(), handle_completion(), create_branch_config()
+- Session module (src/ralph_uv/session.py): SessionDB (SQLite), SessionInfo, tmux ops, signal files, start/stop/checkpoint
 - Agent resolution priority: CLI --agent > story.agent > prd.agent > "claude" default
 - LoopConfig.agent_override holds the CLI override; resolve_agent() does the priority logic
 - Agents invoke CLIs directly (claude, opencode) - no shell script intermediaries
 - Use `signal._HANDLER` type (not `signal.Handlers`) for signal handler storage
 - Git operations use subprocess.run with BranchError exception for error handling
 - PR creation/merge uses `gh` CLI with graceful fallback if not installed
+- Session data at ~/.local/share/ralph/ (sessions.db, signals/, sockets/)
+- Tmux sessions prefixed with "ralph-" to avoid collisions with user sessions
+- Signal files are one-shot: consumed on read to prevent duplicate processing
 ---
 
 ## 2026-01-23 - US-001: Python Package Scaffold
@@ -110,4 +114,28 @@ Started: 2026-01-23
   - BranchConfig is created from prd.json data via create_branch_config() factory
   - setup_branch() is idempotent: if already on task branch, it's a no-op
   - handle_completion() is safe: no mergeTarget means no action taken
+---
+
+## 2026-01-23 - US-005: Session Management (tmux + SQLite)
+- Created src/ralph_uv/session.py with SessionDB, SessionInfo, tmux operations, signal file ops
+- SessionDB: SQLite at ~/.local/share/ralph/sessions.db with register/update/list/remove
+- Tmux: create_session (detached, gets pane PID), kill_session, session_exists, list_sessions
+- Signal files: ~/.local/share/ralph/signals/<task>.signal for stop/checkpoint communication
+- start_session(): creates tmux session running ralph-uv, registers in DB
+- stop_session(): writes "stop" signal + sends SIGINT to process
+- checkpoint_session(): writes "checkpoint" signal (loop pauses after current iteration)
+- cleanup_session(): kills tmux, updates DB status, clears signals
+- get_status(): formats session list as table or JSON (--json flag)
+- Integrated into LoopRunner: register at start, update progress each iteration, check signals, set final status
+- Added _checkpoint_requested flag alongside _shutdown_requested for distinguishing stop vs checkpoint
+- CLI commands wired: status (--json), stop <task>, checkpoint <task>
+- Files changed: src/ralph_uv/session.py (new), src/ralph_uv/loop.py, src/ralph_uv/cli.py, prd.json
+- **Learnings for future iterations:**
+  - SessionDB validates running sessions against actual tmux state (list_running stale detection)
+  - Signal files are consumed on read (one-shot) to prevent duplicate processing
+  - tmux session names prefixed with "ralph-" to avoid collisions
+  - task_name_from_dir() uses the directory name (e.g., "my-feature" from tasks/my-feature/)
+  - LoopRunner checks signals at start of each iteration AND after agent run returns
+  - _shell_quote() handles command args for tmux new-session; uses single-quoting strategy
+  - sqlite3.Row factory enables dict-like access to query results
 ---

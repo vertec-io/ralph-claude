@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import signal
 import sys
@@ -26,6 +27,14 @@ from ralph_uv.branch import (
     create_branch_config,
     handle_completion,
     setup_branch,
+)
+from ralph_uv.session import (
+    SessionDB,
+    SessionInfo,
+    cleanup_session,
+    read_signal,
+    task_name_from_dir,
+    tmux_session_name,
 )
 
 
@@ -70,14 +79,27 @@ class LoopRunner:
         self.current_iteration = 0
         self.current_agent = config.agent
         self._shutdown_requested = False
+        self._checkpoint_requested = False
         self._original_sigint: signal._HANDLER = signal.SIG_DFL
         self._original_sigterm: signal._HANDLER = signal.SIG_DFL
+        self._session_db: SessionDB | None = None
+        self._task_name = task_name_from_dir(config.task_dir)
 
     def run(self) -> int:
         """Run the loop. Returns exit code (0 = complete, 1 = stopped/failed)."""
         self._install_signal_handlers()
+        self._register_session()
         try:
-            return self._run_loop()
+            result = self._run_loop()
+            # Update session status based on result
+            status = "completed" if result == 0 else "stopped"
+            if self._checkpoint_requested:
+                status = "checkpointed"
+            self._update_session_status(status)
+            return result
+        except Exception:
+            self._update_session_status("failed")
+            raise
         finally:
             self._restore_signal_handlers()
 
@@ -92,6 +114,9 @@ class LoopRunner:
 
         for i in range(1, self.config.max_iterations + 1):
             self.current_iteration = i
+
+            # Check for external signals (stop/checkpoint)
+            self._check_signals()
 
             if self._shutdown_requested:
                 self._handle_shutdown()
@@ -110,6 +135,10 @@ class LoopRunner:
 
             completed_count = self._count_completed(prd)
             total_count = len(prd.get("userStories", []))
+
+            # Update session progress
+            story_id = str(next_story.get("id", ""))
+            self._update_session_progress(i, story_id)
 
             self._print_iteration_header(i, completed_count, total_count, next_story)
 
@@ -131,6 +160,9 @@ class LoopRunner:
                 self._handle_branch_completion(branch_config)
                 return 0
 
+            # Check for external signals after iteration
+            self._check_signals()
+
             # Check for shutdown after iteration
             if self._shutdown_requested:
                 self._handle_shutdown()
@@ -143,6 +175,53 @@ class LoopRunner:
         # Max iterations reached
         self._print_max_iterations()
         return 1
+
+    def _register_session(self) -> None:
+        """Register this loop in the session database."""
+        self._session_db = SessionDB()
+        now = datetime.now().isoformat()
+        session = SessionInfo(
+            task_name=self._task_name,
+            task_dir=str(self.config.task_dir),
+            pid=os.getpid(),
+            tmux_session=tmux_session_name(self._task_name),
+            agent=self.current_agent,
+            status="running",
+            started_at=now,
+            updated_at=now,
+            iteration=0,
+            current_story="",
+            max_iterations=self.config.max_iterations,
+        )
+        self._session_db.register(session)
+
+    def _update_session_status(self, status: str) -> None:
+        """Update session status in the database."""
+        if self._session_db is not None:
+            self._session_db.update_status(self._task_name, status)
+
+    def _update_session_progress(self, iteration: int, story_id: str) -> None:
+        """Update session progress in the database."""
+        if self._session_db is not None:
+            self._session_db.update_progress(self._task_name, iteration, story_id)
+
+    def _check_signals(self) -> None:
+        """Check for stop/checkpoint signals from external commands."""
+        signal_data = read_signal(self._task_name)
+        if signal_data is None:
+            return
+        signal_type = signal_data.get("type", "")
+        if signal_type == "stop":
+            print(
+                "\n>>> Stop signal received. Shutting down after current operation..."
+            )
+            self._shutdown_requested = True
+        elif signal_type == "checkpoint":
+            print(
+                "\n>>> Checkpoint signal received. Pausing after current operation..."
+            )
+            self._checkpoint_requested = True
+            self._shutdown_requested = True
 
     def _validate_config(self) -> None:
         """Validate configuration before starting."""

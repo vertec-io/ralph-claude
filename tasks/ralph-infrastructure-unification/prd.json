@@ -81,17 +81,17 @@
       "title": "Session Management (tmux + SQLite)",
       "description": "As a user, I want ralph-uv sessions to run in tmux with SQLite tracking so I can manage multiple concurrent loops.",
       "acceptanceCriteria": [
-        { "description": "ralph-uv runs agent in a tmux session (one per task)", "passes": false },
-        { "description": "SQLite registry at ~/.local/share/ralph/sessions.db tracks running sessions", "passes": false },
-        { "description": "ralph-uv status lists all running sessions (with --json flag for machine-readable output)", "passes": false },
-        { "description": "ralph-uv stop <task> sends graceful shutdown signal", "passes": false },
-        { "description": "ralph-uv checkpoint <task> saves state and pauses", "passes": false },
-        { "description": "Session cleanup on normal completion or crash", "passes": false },
-        { "description": "Typecheck passes", "passes": false }
+        { "description": "ralph-uv runs agent in a tmux session (one per task)", "passes": true },
+        { "description": "SQLite registry at ~/.local/share/ralph/sessions.db tracks running sessions", "passes": true },
+        { "description": "ralph-uv status lists all running sessions (with --json flag for machine-readable output)", "passes": true },
+        { "description": "ralph-uv stop <task> sends graceful shutdown signal", "passes": true },
+        { "description": "ralph-uv checkpoint <task> saves state and pauses", "passes": true },
+        { "description": "Session cleanup on normal completion or crash", "passes": true },
+        { "description": "Typecheck passes", "passes": true }
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Session module at src/ralph_uv/session.py. SessionDB uses SQLite at ~/.local/share/ralph/sessions.db. Tmux sessions prefixed with 'ralph-'. Signal files at ~/.local/share/ralph/signals/<task>.signal for stop/checkpoint. LoopRunner registers session at start, updates progress each iteration, checks signals between iterations, and sets final status on exit."
     },
     {
       "id": "US-006",
