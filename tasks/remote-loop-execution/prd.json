@@ -283,40 +283,40 @@
       "acceptanceCriteria": [
         {
           "description": "Design code sync flow: local creates branch -> pushes to origin -> remote daemon fetches and checks out",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Design agent CLI auto-install: daemon checks for claude/opencode binary, installs if missing",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Document what install opencode CLI looks like (curl installer, bun dependency)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Design task 0 pattern: first iteration installs project deps before real work",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Define manual one-time setup per remote (git, python, bun/node for opencode, API keys)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Document full start-remote sequence from user command to loop iteration 1",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Update notes in prd.json with findings",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "Key decisions from earlier: (1) Code arrives via git push/fetch. (2) Agent CLI auto-installed by daemon. (3) API keys pre-configured manually. (4) Project deps installed by agent as task 0. (5) For opencode: need bun/node on remote. (6) Remote daemon spawns opencode serve for opencode loops, tmux for claude loops."
+      "passes": true,
+      "notes": "## Remote Bootstrapping Design\n\nFull design document saved to tasks/remote-loop-execution/remote-bootstrapping.md.\n\n### Key Design Decisions:\n\n1. **Code sync: Push-to-origin, fetch-on-remote**\n   - Client: git push origin <branch> --force-with-lease\n   - Daemon: git clone --bare (first time), then git fetch origin <branch>\n   - Worktree: git worktree add checkouts/<task>-<uuid> <branch>\n   - Avoids git-over-Ziti complexity; leverages existing git auth on remote\n\n2. **Agent auto-install**\n   - Daemon checks `which <agent>` before starting loop\n   - Claude: `npm install -g @anthropic-ai/claude-code` (requires Node.js 18+)\n   - OpenCode: `curl -fsSL https://opencode.ai/install | bash` (standalone Go binary, NO bun/node needed)\n   - If auto-install fails: structured error returned to client with install instructions\n\n3. **OpenCode CLI install (corrected)**\n   - OpenCode is a standalone Go binary — no bun or Node.js dependency for core operation\n   - Install: curl script downloads platform-appropriate binary to ~/.local/bin/\n   - opencode serve is fully self-contained (no runtime deps)\n   - Bun is only needed for opencode development, not runtime\n\n4. **Task 0: Agent-driven dep install**\n   - NOT daemon-driven (avoids hardcoding package manager detection)\n   - Prompt includes 'First-Run Setup' section for remote execution\n   - Agent detects missing deps (node_modules/, .venv/) and installs\n   - If deps take too long, next iteration picks up (deps now installed)\n   - Works for any project type: npm/yarn/pnpm, pip/uv, go mod, cargo, bundle\n\n5. **Manual one-time setup**\n   - Required: git, python3, tmux, ralph-uv, Ziti identity, API keys, git auth\n   - Optional: Node.js (for claude auto-install), uv, systemd service\n   - `ralphd check` validates the setup and reports missing items\n   - Daemon reads ~/.config/ralph/env for API keys (survives shell restarts)\n\n6. **Full start-remote sequence** (T+0 to T+16s typical):\n   - LOCAL: validate prd.json, push branch, dial daemon via Ziti\n   - REMOTE: fetch branch, create worktree, check agent, register Ziti service, start loop\n   - LOCAL: register in sessions.db, print attach instructions\n   - REMOTE: iteration 1 starts (with First-Run Setup for deps)\n\n7. **Git push-back**: Daemon pushes after every iteration by default (configurable)\n   - Ensures progress visible to client and work not lost on crash"
     },
     {
       "id": "US-008",

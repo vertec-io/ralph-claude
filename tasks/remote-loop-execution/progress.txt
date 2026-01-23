@@ -43,6 +43,15 @@ Rotation: 1 (rotated at 2026-01-23 13:54)
 - reconcile_remote() resolves stale state by querying remote daemon for actual status
 - Attach dispatch: 2×2 matrix of (transport: local|ziti) × (session_type: tmux|opencode-server)
 - server_url field stores full attach URL for both local and remote opencode sessions
+- Remote code sync: client pushes to origin (--force-with-lease), daemon fetches from origin (no git-over-Ziti)
+- Remote workspace: ~/ralph-workspaces/<project>/bare.git + checkouts/<task>-<uuid> (worktrees)
+- Project name derived from origin URL last path component (strip .git suffix)
+- OpenCode CLI is standalone Go binary — NO bun/node dependency for runtime (only for dev)
+- Claude CLI requires Node.js 18+ (npm install -g @anthropic-ai/claude-code)
+- Task 0 (dep install) is agent-driven via prompt section, not daemon-driven
+- Daemon pushes to origin after every iteration by default (configurable push_after_iterations)
+- Daemon config at ~/.config/ralph/daemon.toml, env at ~/.config/ralph/env
+- `ralphd check` validates system readiness (agents, git auth, Ziti identity, API keys)
 
 
 ## Prior Progress
@@ -159,5 +168,34 @@ Reason: shutdown signal
   - server_url stores the full attach URL to avoid reconstruction at attach time
   - Remote session validation is expensive → trust DB, validate on-demand (attach/reconcile)
   - SQLite ALTER TABLE ADD COLUMN is safe for migrations — no table rebuild needed
-  - SSH ProxyCommand for Ziti uses ziti-edge-tunnel proxy subcommand
+   - SSH ProxyCommand for Ziti uses ziti-edge-tunnel proxy subcommand
+---
+
+## 2026-01-23 18:15 - US-007
+- Designed remote environment bootstrapping flow
+- Created: `tasks/remote-loop-execution/remote-bootstrapping.md` (comprehensive design)
+- Updated: `tasks/remote-loop-execution/prd.json` (notes with design summary)
+- Key design decisions:
+  - Code sync: push-to-origin (--force-with-lease), daemon fetches and creates worktree
+  - Workspace structure: bare.git per project, worktrees per loop (checkouts/<task>-<uuid>)
+  - Agent auto-install: daemon checks `which <agent>`, attempts install, returns error if fails
+  - OpenCode is standalone Go binary — NO bun/node runtime dependency (corrected from earlier notes)
+  - Claude requires Node.js 18+ for npm install
+  - Task 0 is agent-driven: prompt includes "First-Run Setup" section, agent detects missing deps
+  - Manual setup: git, python3, tmux, ralph-uv, Ziti identity, API keys, git auth
+  - Daemon config: ~/.config/ralph/daemon.toml, env: ~/.config/ralph/env
+  - `ralphd check` validates system readiness
+  - Git push-back: daemon pushes after every iteration by default
+  - Full start-remote sequence documented from T+0 to T+16s
+- Files changed:
+  - tasks/remote-loop-execution/remote-bootstrapping.md (new)
+  - tasks/remote-loop-execution/prd.json (criteria + notes)
+  - tasks/remote-loop-execution/progress.txt (patterns + entry)
+- **Learnings for future iterations:**
+  - OpenCode CLI has NO runtime dependencies (corrected: earlier notes said "bun dependency" which is wrong)
+  - Agent-driven dep install is simpler than daemon-driven (no package manager detection code)
+  - --force-with-lease is safe for ralph agent branches (they're owned by the agent)
+  - Daemon should push after each iteration to prevent work loss on crash
+  - `ralphd check` provides easy validation of remote setup completeness
+  - Bare repos + worktrees is the correct pattern for multi-loop isolation (shared objects, separate working trees)
 ---
