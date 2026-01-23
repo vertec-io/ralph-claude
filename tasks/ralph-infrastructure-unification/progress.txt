@@ -12,8 +12,11 @@ Started: 2026-01-23
 - mypy runs in strict mode: `uv run mypy src/ralph_uv/`
 - py.typed marker file present for PEP 561 compliance
 - .gitignore uses /prd.json and /progress.txt (root-only) so task dir files are tracked
-- Loop module (src/ralph_uv/loop.py) is the core: LoopConfig, LoopRunner, FailureTracker, IterationResult
-- Agent wrapper scripts in agents/ accept prompts via stdin, output to stdout
+- Loop module (src/ralph_uv/loop.py) is the core: LoopConfig, LoopRunner
+- Agent module (src/ralph_uv/agents.py): Agent ABC, ClaudeAgent, OpencodeAgent, FailureTracker, create_agent(), resolve_agent()
+- Agent resolution priority: CLI --agent > story.agent > prd.agent > "claude" default
+- LoopConfig.agent_override holds the CLI override; resolve_agent() does the priority logic
+- Agents invoke CLIs directly (claude, opencode) - no shell script intermediaries
 - Use `signal._HANDLER` type (not `signal.Handlers`) for signal handler storage
 ---
 
@@ -65,5 +68,26 @@ Started: 2026-01-23
 - **Learnings for future iterations:**
   - Package import name is `ralph_uv` (underscore), CLI command is `ralph-uv` (hyphen)
   - After renaming a package, must regenerate uv.lock with `uv lock`
-  - hatchling build target must match the actual directory: `packages = ["src/ralph_uv"]`
+   - hatchling build target must match the actual directory: `packages = ["src/ralph_uv"]`
+---
+
+## 2026-01-23 - US-003: Agent Abstraction Layer
+- Created src/ralph_uv/agents.py with Agent ABC, ClaudeAgent, OpencodeAgent, FailureTracker, create_agent(), resolve_agent()
+- Agent base class has abstract start(), is_done(), get_output() methods + concrete run() convenience method
+- ClaudeAgent: invokes `claude --print --output-format stream-json`, parses stream-json for result
+- OpencodeAgent: invokes `opencode run`, placeholder for full implementation in US-008
+- resolve_agent() implements priority: CLI --agent > story.agent > prd.agent > "claude" default
+- FailureTracker moved from loop.py to agents.py (same logic, now co-located with agents)
+- Refactored loop.py: removed _run_agent shell-script approach, _find_agents_dir, _extract_output, _detect_failure, _extract_error
+- Added LoopConfig.agent_override field for CLI pass-through
+- Updated cli.py to pass agent_override instead of resolved agent name
+- mypy passes clean (4 source files, no errors)
+- Files changed: src/ralph_uv/agents.py (new), src/ralph_uv/loop.py, src/ralph_uv/cli.py, prd.json
+- **Learnings for future iterations:**
+  - Agents invoke CLIs directly via subprocess.Popen - no need for bash wrapper scripts in agents/
+  - Agent.run() handles the full lifecycle: start -> write prompt to stdin -> wait -> get_output
+  - process.communicate() handles reading remaining stdout/stderr after stdin.close()
+  - ClaudeAgent uses `--print` mode which reads prompt from stdin when piped
+  - OpenCode uses `opencode run` which also reads prompt from stdin
+  - The `data: dict[str, Any] = json.loads(line)` pattern satisfies mypy strict for json parsing
 ---
