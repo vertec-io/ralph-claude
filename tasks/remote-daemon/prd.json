@@ -423,36 +423,36 @@
       "acceptanceCriteria": [
         {
           "description": "ralphd check runs system validation and reports status",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Checks: Python version, git, Ziti identity (enrolled), workspace dir (writable)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Checks: API keys set (ANTHROPIC_API_KEY), agent CLIs available",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Checks: Git auth configured (SSH key or credential helper)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Reports ready/not-ready status with actionable fix instructions",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Exit code 0 if ready, non-zero if issues found",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 11,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented comprehensive validation with CheckResult dataclass. Each check includes actionable fix instructions. Git auth check looks for SSH keys (id_ed25519, id_rsa, etc.) and git credential helper configuration."
     },
     {
       "id": "US-012",
