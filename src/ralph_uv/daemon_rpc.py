@@ -22,11 +22,11 @@ import os
 import platform
 import shutil
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from ralph_uv.daemon import Daemon, LoopInfo
+    from ralph_uv.daemon import Daemon
 
 # JSON-RPC 2.0 error codes
 PARSE_ERROR = -32700
@@ -40,6 +40,9 @@ AGENT_NOT_FOUND = -32001
 MAX_LOOPS_EXCEEDED = -32002
 LOOP_NOT_FOUND = -32003
 GIT_ERROR = -32004
+ORIGIN_MISMATCH = -32005
+BRANCH_NOT_FOUND = -32006
+DISK_FULL = -32007
 
 
 class RpcError(Exception):
@@ -212,6 +215,7 @@ class DaemonRpcHandler:
         Returns:
             loop_id: Unique ID for the started loop
             status: "starting"
+            worktree_path: Path to the checkout directory
         """
         # Parse and validate params
         try:
@@ -223,9 +227,10 @@ class DaemonRpcHandler:
 
         # Check max concurrent loops
         if self.daemon.active_loop_count >= self.daemon.config.max_concurrent_loops:
+            max_loops = self.daemon.config.max_concurrent_loops
             raise RpcError(
                 MAX_LOOPS_EXCEEDED,
-                f"Maximum concurrent loops reached ({self.daemon.config.max_concurrent_loops})",
+                f"Maximum concurrent loops reached ({max_loops})",
                 {"active_loops": self.daemon.active_loop_count},
             )
 
@@ -243,11 +248,55 @@ class DaemonRpcHandler:
 
         # Generate loop ID
         loop_id = f"loop-{uuid.uuid4().hex[:8]}"
+        task_name = self._extract_task_name(loop_params.task_dir)
 
-        # Create loop info (placeholder - actual loop start is in US-004+)
+        # Set up git workspace
+        from ralph_uv.workspace import (
+            BranchNotFoundError,
+            DiskFullError,
+            OriginMismatchError,
+            OriginUnreachableError,
+            WorkspaceError,
+        )
+
+        try:
+            worktree_info = await self.daemon.workspace_manager.setup_workspace(
+                origin_url=loop_params.origin_url,
+                branch=loop_params.branch,
+                task_name=task_name,
+            )
+        except OriginUnreachableError as e:
+            raise RpcError(
+                GIT_ERROR,
+                f"Cannot reach origin repository: {e}",
+                {"origin_url": loop_params.origin_url},
+            ) from e
+        except BranchNotFoundError as e:
+            raise RpcError(
+                BRANCH_NOT_FOUND,
+                f"Branch not found: {loop_params.branch}",
+                {"branch": loop_params.branch, "detail": str(e)},
+            ) from e
+        except OriginMismatchError as e:
+            raise RpcError(
+                ORIGIN_MISMATCH,
+                f"Origin URL mismatch: {e}",
+                {"origin_url": loop_params.origin_url},
+            ) from e
+        except DiskFullError as e:
+            raise RpcError(
+                DISK_FULL,
+                f"Insufficient disk space: {e}",
+            ) from e
+        except (WorkspaceError, ValueError) as e:
+            raise RpcError(
+                GIT_ERROR,
+                f"Workspace setup failed: {e}",
+            ) from e
+
+        # Create loop info
         from ralph_uv.daemon import LoopInfo
 
-        task_name = self._extract_task_name(loop_params.task_dir)
         loop_info = LoopInfo(
             loop_id=loop_id,
             task_name=task_name,
@@ -258,20 +307,22 @@ class DaemonRpcHandler:
             agent=loop_params.agent,
             status="starting",
             started_at=datetime.datetime.now().isoformat(),
+            worktree_path=str(worktree_info.worktree_path),
         )
 
         # Register the loop
         self.daemon._active_loops[loop_id] = loop_info
         self._log.info(
-            "Started loop %s: task=%s, branch=%s, agent=%s",
+            "Started loop %s: task=%s, branch=%s, agent=%s, worktree=%s",
             loop_id,
             task_name,
             loop_params.branch,
             loop_params.agent,
+            worktree_info.worktree_path,
         )
 
-        # TODO: Actually start the loop (git workspace, opencode serve, etc.)
-        # This will be implemented in US-004, US-006, US-007
+        # TODO: Actually start the loop (opencode serve, etc.)
+        # This will be implemented in US-006, US-007
 
         return {
             "loop_id": loop_id,
@@ -280,6 +331,7 @@ class DaemonRpcHandler:
             "branch": loop_params.branch,
             "agent": loop_params.agent,
             "max_iterations": loop_params.max_iterations,
+            "worktree_path": str(worktree_info.worktree_path),
         }
 
     async def _handle_stop_loop(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -453,7 +505,7 @@ class DaemonRpcHandler:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
             version = stdout.decode().strip().split("\n")[0][:100]
-        except (asyncio.TimeoutError, OSError):
+        except (TimeoutError, OSError):
             pass
 
         return AgentInfo(name=agent_name, available=True, path=path, version=version)

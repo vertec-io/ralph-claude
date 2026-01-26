@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ralph_uv.daemon_rpc import DaemonRpcHandler
+    from ralph_uv.workspace import WorkspaceManager
     from ralph_uv.ziti import ZitiControlService
 
 # Default paths
@@ -353,6 +354,7 @@ class Daemon:
         self._started_at: str | None = None
         self._control_service: ZitiControlService | None = None
         self._connection_handler: DaemonConnectionHandler | None = None
+        self._workspace_manager: WorkspaceManager | None = None
 
     @property
     def active_loop_count(self) -> int:
@@ -373,6 +375,15 @@ class Daemon:
     def ziti_enabled(self) -> bool:
         """Return True if Ziti is configured and available."""
         return self.config.ziti_identity_path is not None
+
+    @property
+    def workspace_manager(self) -> WorkspaceManager:
+        """Return the workspace manager, creating it if needed."""
+        if self._workspace_manager is None:
+            from ralph_uv.workspace import WorkspaceManager
+
+            self._workspace_manager = WorkspaceManager(self.config.workspace_dir)
+        return self._workspace_manager
 
     def apply_environment(self) -> None:
         """Apply loaded environment variables to the process environment."""
@@ -449,6 +460,9 @@ class Daemon:
 
         # Ensure workspace directory exists
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        # Prune stale worktrees on startup
+        await self.workspace_manager.prune_stale_worktrees()
 
         # Set up signal handlers
         loop = asyncio.get_running_loop()

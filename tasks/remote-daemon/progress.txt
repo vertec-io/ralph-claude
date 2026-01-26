@@ -117,3 +117,29 @@ Reason: shutdown signal
   - os.getloadavg() returns load averages (may not be available on all platforms)
   - JSON-RPC 2.0 notifications (no `id` field) should return None, not a response
 ---
+
+## 2026-01-26 - US-004 Completed
+- **What was implemented:**
+  - Created `src/ralph_uv/workspace.py` module for git workspace management
+  - `resolve_project_name()`: Extracts project name from various URL formats (https, ssh, local paths)
+  - `WorkspaceManager` class: High-level workspace operations for loops
+  - Bare repository caching at `~/ralph-workspaces/{project}/bare.git`
+  - Worktree creation at `checkouts/{task}-{uuid}` for loop isolation
+  - `prune_stale_worktrees()`: Runs `git worktree prune` on daemon startup
+  - Error classes: `OriginUnreachableError`, `BranchNotFoundError`, `OriginMismatchError`, `DiskFullError`
+  - Integrated `WorkspaceManager` into `Daemon` class with lazy initialization
+  - Updated `start_loop` RPC to create workspace and return `worktree_path`
+  - Added custom RPC error codes: `ORIGIN_MISMATCH`, `BRANCH_NOT_FOUND`, `DISK_FULL`
+- **Files changed:**
+  - `src/ralph_uv/workspace.py` (new)
+  - `src/ralph_uv/daemon.py` (modified - added workspace_manager property, worktree pruning)
+  - `src/ralph_uv/daemon_rpc.py` (modified - integrated workspace setup in start_loop)
+  - `tasks/remote-daemon/prd.json` (marked US-004 as passing)
+- **Learnings for future iterations:**
+  - URL parsing: Handle both parsed URLs and SSH-style `git@host:path` formats separately
+  - `git fetch origin branch:branch` updates the local branch reference in a bare repo
+  - `git worktree add` requires an existing branch reference in the repository
+  - `shutil.disk_usage()` checks available space, find existing parent for new directories
+  - asyncio subprocess with timeout prevents git commands from hanging indefinitely
+  - Normalize URLs for comparison (strip .git suffix, trailing slashes, lowercase)
+---

@@ -137,44 +137,44 @@
       "acceptanceCriteria": [
         {
           "description": "Resolve project name from origin URL (strip .git suffix, take last path component)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Create ~/ralph-workspaces/{project}/bare.git via git clone --bare on first use",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Validate origin URL matches existing bare repo (error if mismatch)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "git fetch origin {branch} into bare repo on each start_loop request",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Create isolated worktree: git worktree add checkouts/{task}-{uuid} {branch}",
-          "passes": false
+          "passes": true
         },
         {
           "description": "git worktree prune on daemon startup to clean stale worktrees",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Return checkout path in start_loop response",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Handle errors: origin unreachable, branch not found, disk full",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 4,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in workspace.py with WorkspaceManager class. Integrated into daemon.py and daemon_rpc.py. start_loop now sets up git workspace and returns worktree_path."
     },
     {
       "id": "US-005",
