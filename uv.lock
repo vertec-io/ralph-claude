@@ -127,6 +127,12 @@ wheels = [
 ]
 
 [[package]]
+name = "openziti"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/42/76/9d0f1e13ea48b6366afae46a70425613e8fc0827983daf65b4b24144a062/openziti-1.5.0.tar.gz", hash = "sha256:d86d71107c25d843cbbd2ace39e44622201db04a0db0902471b18ab6d6719879", size = 37116, upload-time = "2025-11-18T22:33:31.694Z" }
+
+[[package]]
 name = "pathspec"
 version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -142,6 +148,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "libtmux" },
+    { name = "openziti" },
 ]
 
 [package.dev-dependencies]
@@ -153,6 +160,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "libtmux", specifier = ">=0.37" },
+    { name = "openziti", specifier = ">=1.0.0" },
 ]
 
 [package.metadata.requires-dev]

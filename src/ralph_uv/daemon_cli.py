@@ -173,10 +173,26 @@ def check(
     else:
         warnings.append(f"Workspace dir will be created: {config.workspace_dir}")
 
+    # Check Ziti SDK availability
+    from ralph_uv.ziti import check_ziti_available, check_identity_valid
+
+    if check_ziti_available():
+        click.echo("  openziti SDK: OK")
+    else:
+        warnings.append("openziti SDK not installed (pip install openziti)")
+
     # Check Ziti identity
     if config.ziti_identity_path:
         if config.ziti_identity_path.is_file():
-            click.echo(f"  Ziti identity: OK ({config.ziti_identity_path})")
+            if check_ziti_available():
+                valid, msg = check_identity_valid(config.ziti_identity_path)
+                if valid:
+                    click.echo(f"  Ziti identity: OK ({config.ziti_identity_path})")
+                else:
+                    issues.append(f"Ziti identity invalid: {msg}")
+            else:
+                click.echo(f"  Ziti identity file: OK ({config.ziti_identity_path})")
+                warnings.append("Cannot validate identity without openziti SDK")
         else:
             issues.append(f"Ziti identity not found: {config.ziti_identity_path}")
     else:

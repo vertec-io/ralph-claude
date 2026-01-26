@@ -60,3 +60,32 @@ Reason: shutdown signal
   - Click's Path type with path_type=Path auto-converts to pathlib.Path
   - asyncio.Event works well for shutdown coordination with signal handlers
 ---
+
+## 2026-01-26 - US-002 Completed
+- **What was implemented:**
+  - Created `src/ralph_uv/ziti.py` module with OpenZiti SDK integration
+  - `ZitiService` class: handles identity loading, service binding, connection accepting
+  - `ZitiControlService` class: manages the main control service (ralph-control-{hostname})
+  - Concurrent connection handling using asyncio tasks
+  - Connection lifecycle: accept -> wrap in asyncio streams -> handle -> close
+  - Comprehensive logging for Ziti enrollment, binding, and connection events
+  - Graceful shutdown with timeout for active connections
+  - Integrated `ZitiControlService` into `Daemon` class
+  - Added `DaemonConnectionHandler` for handling incoming RPC connections (placeholder for US-003)
+  - Updated `daemon_cli.py` check command to validate Ziti identity
+  - Added `openziti>=1.0.0` dependency to `pyproject.toml`
+- **Files changed:**
+  - `src/ralph_uv/ziti.py` (new)
+  - `src/ralph_uv/daemon.py` (modified - added Ziti integration)
+  - `src/ralph_uv/daemon_cli.py` (modified - added Ziti checks)
+  - `pyproject.toml` (added openziti dependency)
+  - `uv.lock` (updated)
+  - `tasks/remote-daemon/prd.json` (marked US-002 as passing)
+- **Learnings for future iterations:**
+  - openziti Python SDK uses `openziti.load(path)` which returns (context, error_code)
+  - `context.bind(service_name)` returns a socket that can be used with standard listen/accept
+  - The SDK's accept() is blocking, so use `run_in_executor` in asyncio code
+  - Use `settimeout(1.0)` on server socket to allow periodic shutdown checks
+  - asyncio.StreamReaderProtocol + create_connection can wrap sockets in streams
+  - openziti package lacks type stubs, use `# type: ignore[import-untyped]`
+---

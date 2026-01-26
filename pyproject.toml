@@ -8,6 +8,7 @@ license = {text = "MIT"}
 dependencies = [
     "click>=8.1",
     "libtmux>=0.37",
+    "openziti>=1.0.0",
 ]
 
 [project.scripts]

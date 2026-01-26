@@ -4,6 +4,7 @@ This module provides:
 - Configuration loading from TOML and environment files
 - Daemon lifecycle management
 - Active loop registry
+- Ziti control service integration
 """
 
 from __future__ import annotations
@@ -18,7 +19,10 @@ import tomllib
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from ralph_uv.ziti import ZitiControlService
 
 # Default paths
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "ralph"
@@ -248,6 +252,65 @@ class LoopInfo:
     worktree_path: str | None = None
 
 
+class DaemonConnectionHandler:
+    """Handler for incoming control service connections.
+
+    This implements the ConnectionHandler protocol from ziti.py and
+    handles JSON-RPC requests from clients.
+    """
+
+    def __init__(self, daemon: Daemon) -> None:
+        """Initialize the connection handler.
+
+        Args:
+            daemon: The daemon instance to handle requests for
+        """
+        self.daemon = daemon
+        self._log = logging.getLogger("ralphd.handler")
+
+    async def handle_connection(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        """Handle an incoming connection.
+
+        Reads NDJSON-framed JSON-RPC requests and sends responses.
+
+        Args:
+            reader: Stream reader for receiving data
+            writer: Stream writer for sending data
+        """
+        self._log.debug("New connection established")
+
+        try:
+            while True:
+                # Read a line (NDJSON framing)
+                line = await reader.readline()
+                if not line:
+                    # Connection closed
+                    break
+
+                # Placeholder for JSON-RPC handling (US-003)
+                # For now, just echo back acknowledgment
+                self._log.debug("Received request: %s", line.decode().strip())
+
+                # Simple ping/pong for testing connectivity
+                response = b'{"jsonrpc":"2.0","result":"pong","id":null}\n'
+                writer.write(response)
+                await writer.drain()
+
+        except asyncio.CancelledError:
+            self._log.debug("Connection handler cancelled")
+            raise
+        except Exception as e:
+            self._log.exception("Error handling connection: %s", e)
+        finally:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+
 class Daemon:
     """Ralph daemon that manages loop execution.
 
@@ -270,6 +333,8 @@ class Daemon:
         self._shutdown_event = asyncio.Event()
         self._hostname = socket.gethostname()
         self._started_at: str | None = None
+        self._control_service: ZitiControlService | None = None
+        self._connection_handler: DaemonConnectionHandler | None = None
 
     @property
     def active_loop_count(self) -> int:
@@ -281,11 +346,64 @@ class Daemon:
         """Return the hostname for service naming."""
         return self._hostname
 
+    @property
+    def control_service_name(self) -> str:
+        """Return the control service name."""
+        return f"ralph-control-{self._hostname}"
+
+    @property
+    def ziti_enabled(self) -> bool:
+        """Return True if Ziti is configured and available."""
+        return self.config.ziti_identity_path is not None
+
     def apply_environment(self) -> None:
         """Apply loaded environment variables to the process environment."""
         for key, value in self.config.env_vars.items():
             os.environ[key] = value
             self._log.debug("Set environment variable: %s", key)
+
+    async def _start_ziti_control_service(self) -> bool:
+        """Start the Ziti control service.
+
+        Returns:
+            True if started successfully, False otherwise
+        """
+        if not self.ziti_enabled:
+            self._log.info("Ziti not configured - skipping control service")
+            return True
+
+        from ralph_uv.ziti import ZitiControlService, check_ziti_available
+
+        if not check_ziti_available():
+            self._log.warning(
+                "openziti package not installed - control service disabled"
+            )
+            return True
+
+        assert self.config.ziti_identity_path is not None
+
+        # Create connection handler
+        self._connection_handler = DaemonConnectionHandler(self)
+
+        # Create and start control service
+        self._control_service = ZitiControlService(
+            identity_path=self.config.ziti_identity_path,
+            hostname=self._hostname,
+            handler=self._connection_handler,
+        )
+
+        self._log.info(
+            "Starting Ziti control service: %s", self._control_service.service_name
+        )
+
+        if not await self._control_service.start():
+            self._log.error("Failed to start Ziti control service")
+            return False
+
+        self._log.info(
+            "Ziti control service started: %s", self._control_service.service_name
+        )
+        return True
 
     async def start(self) -> None:
         """Start the daemon.
@@ -293,7 +411,8 @@ class Daemon:
         This method:
         1. Applies environment variables
         2. Sets up signal handlers
-        3. Starts the main event loop
+        3. Starts the Ziti control service (if configured)
+        4. Waits for shutdown signal
         """
         import datetime
 
@@ -301,6 +420,11 @@ class Daemon:
         self._log.info("Starting ralphd on %s", self._hostname)
         self._log.info("Workspace directory: %s", self.config.workspace_dir)
         self._log.info("Max concurrent loops: %d", self.config.max_concurrent_loops)
+
+        if self.config.ziti_identity_path:
+            self._log.info("Ziti identity: %s", self.config.ziti_identity_path)
+        else:
+            self._log.info("Ziti not configured (no identity path)")
 
         # Apply environment variables
         self.apply_environment()
@@ -312,6 +436,11 @@ class Daemon:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self._handle_shutdown_signal, sig)
+
+        # Start Ziti control service
+        if not await self._start_ziti_control_service():
+            self._log.error("Failed to start - exiting")
+            return
 
         self._log.info("Daemon started, waiting for shutdown signal...")
 
@@ -328,7 +457,14 @@ class Daemon:
         self._shutdown_event.set()
 
     async def _cleanup(self) -> None:
-        """Clean up active loops on shutdown."""
+        """Clean up active loops and Ziti services on shutdown."""
+        # Clean up Ziti control service
+        if self._control_service is not None:
+            self._log.info("Shutting down Ziti control service...")
+            await self._control_service.shutdown()
+            self._control_service = None
+
+        # Clean up active loops
         if not self._active_loops:
             self._log.info("No active loops to clean up")
             return
@@ -347,10 +483,18 @@ class Daemon:
 
     def get_health(self) -> dict[str, Any]:
         """Return health/status information about the daemon."""
+        ziti_status = "disabled"
+        if self._control_service is not None:
+            ziti_status = "bound" if self._control_service.is_bound else "not_bound"
+        elif self.ziti_enabled:
+            ziti_status = "configured"
+
         return {
             "hostname": self._hostname,
             "started_at": self._started_at,
             "active_loops": self.active_loop_count,
             "max_concurrent_loops": self.config.max_concurrent_loops,
             "workspace_dir": str(self.config.workspace_dir),
+            "ziti_status": ziti_status,
+            "control_service": self.control_service_name if self.ziti_enabled else None,
         }
