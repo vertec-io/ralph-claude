@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ralph_uv.daemon_rpc import DaemonRpcHandler
     from ralph_uv.ziti import ZitiControlService
 
 # Default paths
@@ -267,6 +268,15 @@ class DaemonConnectionHandler:
         """
         self.daemon = daemon
         self._log = logging.getLogger("ralphd.handler")
+        self._rpc_handler: DaemonRpcHandler | None = None
+
+    def _get_rpc_handler(self) -> DaemonRpcHandler:
+        """Get or create the RPC handler (lazy initialization)."""
+        if self._rpc_handler is None:
+            from ralph_uv.daemon_rpc import DaemonRpcHandler
+
+            self._rpc_handler = DaemonRpcHandler(self.daemon)
+        return self._rpc_handler
 
     async def handle_connection(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -279,7 +289,10 @@ class DaemonConnectionHandler:
             reader: Stream reader for receiving data
             writer: Stream writer for sending data
         """
+        from ralph_uv.daemon_rpc import format_response
+
         self._log.debug("New connection established")
+        rpc_handler = self._get_rpc_handler()
 
         try:
             while True:
@@ -289,14 +302,19 @@ class DaemonConnectionHandler:
                     # Connection closed
                     break
 
-                # Placeholder for JSON-RPC handling (US-003)
-                # For now, just echo back acknowledgment
-                self._log.debug("Received request: %s", line.decode().strip())
+                raw_request = line.decode().strip()
+                if not raw_request:
+                    continue
 
-                # Simple ping/pong for testing connectivity
-                response = b'{"jsonrpc":"2.0","result":"pong","id":null}\n'
-                writer.write(response)
-                await writer.drain()
+                self._log.debug("Received request: %s", raw_request[:200])
+
+                # Process the JSON-RPC request
+                response = await rpc_handler.handle_request(raw_request)
+
+                # Send response (skip for notifications which return None)
+                if response is not None:
+                    writer.write(format_response(response))
+                    await writer.drain()
 
         except asyncio.CancelledError:
             self._log.debug("Connection handler cancelled")

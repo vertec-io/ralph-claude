@@ -89,3 +89,31 @@ Reason: shutdown signal
   - asyncio.StreamReaderProtocol + create_connection can wrap sockets in streams
   - openziti package lacks type stubs, use `# type: ignore[import-untyped]`
 ---
+
+## 2026-01-26 - US-003 Completed
+- **What was implemented:**
+  - Created `src/ralph_uv/daemon_rpc.py` module with JSON-RPC 2.0 handler
+  - `DaemonRpcHandler` class: dispatches RPC methods with proper error handling
+  - `start_loop` method: accepts origin_url, branch, task_dir, max_iterations, agent params
+  - `stop_loop` method: accepts loop_id, marks loop for stopping
+  - `list_loops` method: returns all active loops with full status info
+  - `get_health` method: returns daemon uptime, active loop count, system resources
+  - `get_agents` method: returns available agent CLIs with path and version
+  - Proper JSON-RPC 2.0 error responses (parse error, invalid request, method not found, invalid params, internal error)
+  - Custom error codes for daemon-specific errors (agent not found, max loops exceeded, loop not found, git error)
+  - Agent availability checking with 5-minute cache
+  - System resource info (memory, load average) for health endpoint
+  - NDJSON framing via `format_response()` function
+  - Integrated `DaemonRpcHandler` into `DaemonConnectionHandler` with lazy initialization
+- **Files changed:**
+  - `src/ralph_uv/daemon_rpc.py` (new)
+  - `src/ralph_uv/daemon.py` (modified - integrated RPC handler)
+  - `tasks/remote-daemon/prd.json` (marked US-003 as passing)
+- **Learnings for future iterations:**
+  - Use `TYPE_CHECKING` block for imports that create circular dependencies
+  - Lazy initialization of handlers avoids import issues (import inside method)
+  - Agent version detection with asyncio subprocess and timeout handles hangs gracefully
+  - /proc/meminfo parsing works on Linux for memory stats
+  - os.getloadavg() returns load averages (may not be available on all platforms)
+  - JSON-RPC 2.0 notifications (no `id` field) should return None, not a response
+---

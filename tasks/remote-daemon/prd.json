@@ -95,40 +95,40 @@
       "acceptanceCriteria": [
         {
           "description": "start_loop method: accepts origin_url, branch, task_dir, max_iterations, agent params",
-          "passes": false
+          "passes": true
         },
         {
           "description": "stop_loop method: accepts loop_id, sends abort to the running loop",
-          "passes": false
+          "passes": true
         },
         {
           "description": "list_loops method: returns all active loops with status, iteration, agent, task info",
-          "passes": false
+          "passes": true
         },
         {
           "description": "get_health method: returns daemon uptime, active loop count, system resources",
-          "passes": false
+          "passes": true
         },
         {
           "description": "get_agents method: returns available agent CLIs with versions",
-          "passes": false
+          "passes": true
         },
         {
           "description": "JSON-RPC 2.0 error responses for invalid params, agent not found, max loops exceeded",
-          "passes": false
+          "passes": true
         },
         {
           "description": "NDJSON framing on the Ziti stream (same as existing RPC protocol)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in daemon_rpc.py with DaemonRpcHandler. Integrated into daemon.py DaemonConnectionHandler. All RPC methods implemented with proper error handling and NDJSON framing."
     },
     {
       "id": "US-004",
