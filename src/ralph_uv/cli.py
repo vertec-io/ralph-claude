@@ -488,7 +488,7 @@ def run(
             max_iterations = DEFAULT_ITERATIONS
         else:
             max_iterations = click.prompt(
-                f"Max iterations", type=int, default=DEFAULT_ITERATIONS
+                "Max iterations", type=int, default=DEFAULT_ITERATIONS
             )
 
     assert max_iterations is not None  # Guaranteed by prompt/default above
@@ -565,7 +565,7 @@ def checkpoint(task: str) -> None:
 @cli.command(name="attach")
 @click.argument("task")
 def attach_cmd(task: str) -> None:
-    """Attach to a running session's tmux pane."""
+    """Attach to a running session"""
     rc = attach(task)
     if rc != 0:
         raise SystemExit(rc)

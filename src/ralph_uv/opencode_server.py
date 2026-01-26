@@ -210,15 +210,21 @@ class OpencodeServer:
 
         Uses POST /session/:id/message which blocks until the agent responds.
         Returns the response data.
+
+        The opencode serve API expects a payload with a `parts` array:
+        {"parts": [{"type": "text", "text": "..."}]}
         """
         url = f"{self._base_url}/session/{session_id}/message"
         self._log.info(
             "Sending prompt to session %s (length=%d)", session_id, len(prompt)
         )
 
+        # OpenCode API expects parts array format
+        payload = {"parts": [{"type": "text", "text": prompt}]}
+
         response = self._http_post(
             url,
-            {"message": prompt},
+            payload,
             timeout=None,  # No timeout for sync prompts
         )
         self._log.info("Prompt response received for session %s", session_id)
@@ -229,13 +235,19 @@ class OpencodeServer:
 
         Uses POST /session/:id/prompt_async which returns immediately.
         Use wait_for_idle() to detect completion.
+
+        The opencode serve API expects a payload with a `parts` array:
+        {"parts": [{"type": "text", "text": "..."}]}
         """
         url = f"{self._base_url}/session/{session_id}/prompt_async"
         self._log.info(
             "Sending async prompt to session %s (length=%d)", session_id, len(prompt)
         )
 
-        response = self._http_post(url, {"message": prompt})
+        # OpenCode API expects parts array format
+        payload = {"parts": [{"type": "text", "text": prompt}]}
+
+        response = self._http_post(url, payload)
         self._log.info("Async prompt accepted for session %s", session_id)
         return response
 

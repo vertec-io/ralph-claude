@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 ralph-uv = "ralph_uv.cli:cli"
+ralphd = "ralph_uv.daemon_cli:cli"
 
 [build-system]
 requires = ["hatchling"]

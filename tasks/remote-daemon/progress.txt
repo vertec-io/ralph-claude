@@ -3,3 +3,60 @@ Effort: remote-daemon
 Type: Feature
 Started: 2026-01-23
 ---
+
+## 2026-01-26 09:21 - FAILURE (Iteration 1)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 1
+- **Error:** OpenCode server error: HTTP POST http://127.0.0.1:14096/session/ses_4051b230fffe3Y3Yrm7bhhMYew/message failed: HTTP Error 400: Bad Request
+---
+
+## 2026-01-26 09:21 - FAILURE (Iteration 2)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 2
+- **Error:** OpenCode server error: HTTP POST http://127.0.0.1:14096/session/ses_4051b1b19ffeUxdM6lqRc09ge6/message failed: HTTP Error 400: Bad Request
+---
+
+## 2026-01-26 09:21 - FAILURE (Iteration 3)
+- **Agent:** opencode
+- **Story:** US-001
+- **Consecutive failures:** 3
+- **Error:** OpenCode server error: HTTP POST http://127.0.0.1:14096/session/ses_4051b132affeHlnCHR53PwTM0M/message failed: HTTP Error 400: Bad Request
+---
+
+## 2026-01-26 09:21 - FAILOVER
+- **From agent:** opencode
+- **To agent:** claude
+- **Story:** US-001
+- **Consecutive failures before failover:** 3
+- **Reason:** OpenCode server error: HTTP POST http://127.0.0.1:14096/session/ses_4051b132affeHlnCHR53PwTM0M/message failed: HTTP Error 400: Bad Request
+---
+
+---
+CHECKPOINT at 2026-01-26 09:21
+Iteration: 4/5 | Stories: 0/12 | Agent: claude
+Reason: shutdown signal
+---
+
+## 2026-01-26 - US-001 Completed
+- **What was implemented:**
+  - Created `daemon.py` module with `DaemonConfig` dataclass and configuration loading
+  - TOML config loading from `~/.config/ralph/daemon.toml` (workspace_dir, max_concurrent_loops, ziti_identity_path, logging settings)
+  - Environment variable loading from `~/.config/ralph/env` (shell-style env file with export support)
+  - Created `daemon_cli.py` with Click-based CLI (`ralphd start`, `ralphd check`)
+  - `--identity` and `--workspace-dir` CLI flags to override config
+  - Rotating log handler to `~/.local/state/ralph-uv/daemon.log`
+  - Signal handlers for graceful shutdown on SIGTERM/SIGINT
+  - Registered `ralphd` entrypoint in `pyproject.toml`
+- **Files changed:**
+  - `src/ralph_uv/daemon.py` (new)
+  - `src/ralph_uv/daemon_cli.py` (new)
+  - `pyproject.toml` (added ralphd entrypoint)
+  - `tasks/remote-daemon/prd.json` (marked US-001 as passing)
+- **Learnings for future iterations:**
+  - tomllib is built-in to Python 3.11+ (no external dependency needed)
+  - Using RotatingFileHandler for log rotation is cleaner than external logrotate
+  - Click's Path type with path_type=Path auto-converts to pathlib.Path
+  - asyncio.Event works well for shutdown coordination with signal handlers
+---
