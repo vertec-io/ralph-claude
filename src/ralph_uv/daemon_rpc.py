@@ -14,18 +14,17 @@ The protocol uses NDJSON (newline-delimited JSON) framing on the Ziti stream.
 
 from __future__ import annotations
 
-import asyncio
 import datetime
 import json
 import logging
 import os
 import platform
-import shutil
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ralph_uv.agent_manager import AgentManager
     from ralph_uv.daemon import Daemon
 
 # JSON-RPC 2.0 error codes
@@ -87,25 +86,6 @@ class StartLoopParams:
         )
 
 
-@dataclass
-class AgentInfo:
-    """Information about an available agent CLI."""
-
-    name: str
-    available: bool
-    path: str | None = None
-    version: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to dict for JSON-RPC response."""
-        return {
-            "name": self.name,
-            "available": self.available,
-            "path": self.path,
-            "version": self.version,
-        }
-
-
 class DaemonRpcHandler:
     """Handles JSON-RPC requests for the Ralph daemon.
 
@@ -131,10 +111,17 @@ class DaemonRpcHandler:
             "get_agents": self._handle_get_agents,
         }
 
-        # Cache for agent availability (invalidated periodically)
-        self._agent_cache: dict[str, AgentInfo] = {}
-        self._agent_cache_time: datetime.datetime | None = None
-        self._agent_cache_ttl = datetime.timedelta(minutes=5)
+        # Agent manager for CLI detection and auto-install (lazy initialized)
+        self._agent_manager: AgentManager | None = None
+
+    @property
+    def agent_manager(self) -> AgentManager:
+        """Get or create the agent manager."""
+        if self._agent_manager is None:
+            from ralph_uv.agent_manager import AgentManager
+
+            self._agent_manager = AgentManager()
+        return self._agent_manager
 
     async def handle_request(self, raw: str) -> dict[str, Any] | None:
         """Parse and dispatch a JSON-RPC request.
@@ -234,17 +221,20 @@ class DaemonRpcHandler:
                 {"active_loops": self.daemon.active_loop_count},
             )
 
-        # Validate agent availability
-        agent_info = await self._get_agent_info(loop_params.agent)
-        if not agent_info.available:
+        # Validate agent availability (attempts auto-install if missing)
+        from ralph_uv.agent_manager import AgentInstallError
+
+        try:
+            await self.agent_manager.ensure_agent_available(loop_params.agent)
+        except AgentInstallError as e:
             raise RpcError(
                 AGENT_NOT_FOUND,
-                f"Agent '{loop_params.agent}' is not available",
+                f"Agent '{loop_params.agent}' is not available: {e.message}",
                 {
                     "agent": loop_params.agent,
-                    "install_hint": self._get_install_hint(loop_params.agent),
+                    "install_instructions": e.instructions,
                 },
-            )
+            ) from e
 
         # Generate loop ID
         loop_id = f"loop-{uuid.uuid4().hex[:8]}"
@@ -444,79 +434,10 @@ class DaemonRpcHandler:
         Returns:
             agents: List of agent info dicts
         """
-        agents: list[dict[str, Any]] = []
-
-        for agent_name in ["opencode", "claude"]:
-            info = await self._get_agent_info(agent_name)
-            agents.append(info.to_dict())
-
-        return {"agents": agents}
+        agent_infos = await self.agent_manager.get_all_agents()
+        return {"agents": [info.to_dict() for info in agent_infos]}
 
     # --- Helper Methods ---
-
-    async def _get_agent_info(self, agent_name: str) -> AgentInfo:
-        """Get information about an agent CLI.
-
-        Uses a cache to avoid repeated filesystem lookups.
-
-        Args:
-            agent_name: The agent to check ("opencode" or "claude")
-
-        Returns:
-            AgentInfo with availability and version
-        """
-        # Check cache
-        now = datetime.datetime.now()
-        if (
-            self._agent_cache_time is not None
-            and now - self._agent_cache_time < self._agent_cache_ttl
-            and agent_name in self._agent_cache
-        ):
-            return self._agent_cache[agent_name]
-
-        # Refresh cache
-        info = await self._check_agent(agent_name)
-        self._agent_cache[agent_name] = info
-        self._agent_cache_time = now
-
-        return info
-
-    async def _check_agent(self, agent_name: str) -> AgentInfo:
-        """Check if an agent CLI is available and get its version.
-
-        Args:
-            agent_name: The agent to check
-
-        Returns:
-            AgentInfo with availability and version
-        """
-        path = shutil.which(agent_name)
-        if path is None:
-            return AgentInfo(name=agent_name, available=False)
-
-        # Try to get version
-        version: str | None = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                agent_name,
-                "--version",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
-            version = stdout.decode().strip().split("\n")[0][:100]
-        except (TimeoutError, OSError):
-            pass
-
-        return AgentInfo(name=agent_name, available=True, path=path, version=version)
-
-    def _get_install_hint(self, agent_name: str) -> str:
-        """Get installation hint for an agent."""
-        hints = {
-            "opencode": "curl -fsSL https://opencode.ai/install | bash",
-            "claude": "npm install -g @anthropic-ai/claude-code",
-        }
-        return hints.get(agent_name, f"Install {agent_name} and ensure it's in PATH")
 
     def _extract_task_name(self, task_dir: str) -> str:
         """Extract task name from task directory path."""

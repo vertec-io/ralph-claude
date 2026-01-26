@@ -183,36 +183,36 @@
       "acceptanceCriteria": [
         {
           "description": "Check 'which opencode' before starting a loop",
-          "passes": false
+          "passes": true
         },
         {
           "description": "If missing: attempt curl -fsSL https://opencode.ai/install | bash",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Verify installation succeeded with which opencode after install",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Return structured error if auto-install fails (with install instructions)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Cache agent availability (don't re-check on every loop start)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "get_agents RPC returns installed agents with version numbers",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 5,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in agent_manager.py with AgentManager class. Auto-install via curl for opencode and npm for claude. 5-minute cache TTL. Structured errors with install instructions."
     },
     {
       "id": "US-006",
