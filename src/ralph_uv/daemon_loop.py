@@ -50,6 +50,7 @@ class LoopStatus(Enum):
     EXHAUSTED = "exhausted"
     FAILED = "failed"
     STOPPING = "stopping"
+    TIMED_OUT = "timed_out"
 
 
 class IterationResult(Enum):
@@ -81,6 +82,7 @@ class LoopState:
     branch: str
     max_iterations: int
     push_frequency: int = 1
+    timeout_hours: float = 24.0  # Per-loop timeout in hours
 
     # Runtime state
     iteration: int = 0
@@ -92,6 +94,14 @@ class LoopState:
 
     # Stop signal
     stop_requested: bool = False
+
+    def is_timed_out(self) -> bool:
+        """Check if the loop has exceeded its timeout."""
+        if self.timeout_hours <= 0:
+            return False  # No timeout (infinite)
+        elapsed = datetime.now() - self.started_at
+        timeout_seconds = self.timeout_hours * 3600
+        return elapsed.total_seconds() > timeout_seconds
 
 
 class LoopDriver:
@@ -150,6 +160,7 @@ class LoopDriver:
             branch=loop_info.branch,
             max_iterations=loop_info.max_iterations,
             push_frequency=loop_info.push_frequency,
+            timeout_hours=loop_info.timeout_hours,
         )
 
         self._log.info(
@@ -206,6 +217,21 @@ class LoopDriver:
                 # Check for stop request
                 if state.stop_requested:
                     self._log.info("Loop %s: stop requested", state.loop_id)
+                    break
+
+                # Check for timeout
+                if state.is_timed_out():
+                    self._log.warning(
+                        "Loop %s: timed out after %.1f hours at iteration %d",
+                        state.loop_id,
+                        state.timeout_hours,
+                        iteration,
+                    )
+                    state.status = LoopStatus.TIMED_OUT
+                    state.last_error = (
+                        f"Loop timed out after {state.timeout_hours} hours"
+                    )
+                    await self._push_to_origin(state)
                     break
 
                 # Read PRD and find next story
@@ -335,12 +361,13 @@ class LoopDriver:
             loop_info.status = state.status.value
 
             # Deregister Ziti loop service (if registered)
-            # Only deregister here for natural completion/failure/exhaustion
+            # Only deregister here for natural completion/failure/exhaustion/timeout
             # stop_loop handles deregistration for cancelled loops
             if state.status in (
                 LoopStatus.COMPLETED,
                 LoopStatus.EXHAUSTED,
                 LoopStatus.FAILED,
+                LoopStatus.TIMED_OUT,
             ):
                 if self.daemon.loop_service_manager is not None:
                     try:
@@ -360,6 +387,16 @@ class LoopDriver:
 
             # Emit completion event
             await self._emit_loop_event(state, loop_info)
+
+            # Unregister from loop registry (persistence)
+            try:
+                await self.daemon.loop_registry.unregister_loop(state.loop_id)
+            except Exception as e:
+                self._log.warning(
+                    "Loop %s: failed to unregister from registry: %s",
+                    state.loop_id,
+                    e,
+                )
 
             # Clean up
             self._active_loops.pop(state.loop_id, None)
@@ -709,6 +746,9 @@ Please proceed with the highest priority incomplete story.
         elif state.status == LoopStatus.EXHAUSTED:
             # Exhausted is also a form of completion (max iterations)
             event_type = "loop_completed"
+        elif state.status == LoopStatus.TIMED_OUT:
+            # Timeout is treated as a failure
+            event_type = "loop_failed"
         else:
             event_type = "loop_failed"
 
@@ -721,11 +761,13 @@ Please proceed with the highest priority incomplete story.
             iterations_used=state.iteration,
             branch=state.branch,
             final_story=loop_info.final_story,
-            error=state.last_error if state.status == LoopStatus.FAILED else None,
+            error=state.last_error
+            if state.status in (LoopStatus.FAILED, LoopStatus.TIMED_OUT)
+            else None,
         )
 
-        # Update loop_info with last_error if failed
-        if state.status == LoopStatus.FAILED:
+        # Update loop_info with last_error if failed or timed out
+        if state.status in (LoopStatus.FAILED, LoopStatus.TIMED_OUT):
             loop_info.last_error = state.last_error
 
         self._log.info(

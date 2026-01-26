@@ -461,36 +461,36 @@
       "acceptanceCriteria": [
         {
           "description": "Enforce max_concurrent_loops (configurable, default: 4)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Return error if max loops exceeded on start_loop request",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Each loop gets: separate worktree, separate opencode serve port, separate Ziti service",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Per-loop timeout (configurable, default: 24h) - terminate loop if exceeded",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Track active loops in daemon's internal registry",
-          "passes": false
+          "passes": true
         },
         {
           "description": "On daemon restart: detect orphaned loop processes, clean up or re-adopt",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented LoopRegistry for persistence to ~/.local/state/ralph-uv/loop_registry.json. Per-loop timeout_hours field added to LoopInfo, StartLoopParams, LoopState. TIMED_OUT status added to LoopStatus. On daemon restart, orphans are detected and killed (SIGTERM then SIGKILL). Clean shutdown clears the registry. Max concurrent loops and isolation already existed from prior work."
     }
   ],
   "agent": "opencode"

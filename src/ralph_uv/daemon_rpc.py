@@ -64,6 +64,7 @@ class StartLoopParams:
     max_iterations: int = 50
     agent: str = "opencode"
     push_frequency: int = 1  # Push after every N iterations
+    timeout_hours: float = 24.0  # Per-loop timeout in hours (default: 24h)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> StartLoopParams:
@@ -83,6 +84,7 @@ class StartLoopParams:
             max_iterations=int(data.get("max_iterations", 50)),
             agent=str(data.get("agent", "opencode")),
             push_frequency=int(data.get("push_frequency", 1)),
+            timeout_hours=float(data.get("timeout_hours", 24.0)),
         )
 
 
@@ -365,6 +367,7 @@ class DaemonRpcHandler:
             opencode_pid=opencode_pid,
             ziti_service_name=ziti_service_name,
             push_frequency=loop_params.push_frequency,
+            timeout_hours=loop_params.timeout_hours,
         )
 
         # Register the loop
@@ -379,6 +382,9 @@ class DaemonRpcHandler:
             opencode_port,
         )
 
+        # Persist to loop registry for orphan detection on restart
+        await self.daemon.loop_registry.register_loop(loop_info)
+
         # Start the loop driver in the background (for opencode agent)
         if loop_params.agent == "opencode" and opencode_instance is not None:
             await self.daemon.loop_driver.start_loop(loop_info, opencode_instance)
@@ -390,6 +396,7 @@ class DaemonRpcHandler:
             "branch": loop_params.branch,
             "agent": loop_params.agent,
             "max_iterations": loop_params.max_iterations,
+            "timeout_hours": loop_params.timeout_hours,
             "worktree_path": str(worktree_info.worktree_path),
             "opencode_port": opencode_port,
             "opencode_pid": opencode_pid,
@@ -449,8 +456,9 @@ class DaemonRpcHandler:
             )
             self._log.info("OpenCode serve stopped for loop %s", loop_id)
 
-        # Remove loop from active list
+        # Remove loop from active list and registry
         del self.daemon._active_loops[loop_id]
+        await self.daemon.loop_registry.unregister_loop(loop_id)
 
         return {
             "loop_id": loop_id,

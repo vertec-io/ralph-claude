@@ -3,7 +3,8 @@
 This module provides:
 - Configuration loading from TOML and environment files
 - Daemon lifecycle management
-- Active loop registry
+- Active loop registry with persistence
+- Orphaned loop detection and cleanup on restart
 - Ziti control service integration
 - Event broadcasting to connected clients
 """
@@ -19,7 +20,7 @@ import socket
 import sys
 import tomllib
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -252,7 +253,7 @@ class LoopInfo:
     iteration: int
     max_iterations: int
     agent: str
-    status: str  # "starting", "running", "stopping", "completed", "failed"
+    status: str  # "starting", "running", "stopping", "completed", "failed", "timed_out"
     started_at: str
     opencode_port: int | None = None
     opencode_pid: int | None = None
@@ -261,6 +262,7 @@ class LoopInfo:
     push_frequency: int = 1  # Push after every N iterations (default: 1)
     final_story: str | None = None  # Last completed story ID (for completion events)
     last_error: str | None = None  # Error message (for failure events)
+    timeout_hours: float = 24.0  # Per-loop timeout in hours (default: 24h)
 
 
 @dataclass
@@ -294,6 +296,162 @@ class LoopEvent:
         if self.error is not None:
             data["error"] = self.error
         return data
+
+
+class LoopRegistry:
+    """Persists active loop information to disk for orphan detection.
+
+    On daemon restart, we can detect orphaned loops (processes that died
+    without proper cleanup) and either re-adopt them or clean them up.
+
+    The registry file is stored at ~/.local/state/ralph-uv/loop_registry.json
+    """
+
+    def __init__(self, registry_path: Path | None = None) -> None:
+        """Initialize the loop registry.
+
+        Args:
+            registry_path: Path to registry file (default: ~/.local/state/ralph-uv/loop_registry.json)
+        """
+        self._log = logging.getLogger("ralphd.registry")
+        self._path = registry_path or (DEFAULT_STATE_DIR / "loop_registry.json")
+        self._loops: dict[str, dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def load(self) -> list[dict[str, Any]]:
+        """Load registry from disk.
+
+        Returns:
+            List of orphaned loop entries (loops that were running when daemon died)
+        """
+        async with self._lock:
+            if not self._path.is_file():
+                self._loops = {}
+                return []
+
+            try:
+                content = self._path.read_text()
+                data = json.loads(content)
+                if not isinstance(data, dict):
+                    self._loops = {}
+                    return []
+
+                self._loops = data.get("loops", {})
+                # Return all loops as potential orphans (they were "active" when saved)
+                orphans = list(self._loops.values())
+                self._log.info(
+                    "Loaded registry with %d potential orphan(s)", len(orphans)
+                )
+                return orphans
+            except (OSError, json.JSONDecodeError) as e:
+                self._log.warning("Failed to load registry: %s", e)
+                self._loops = {}
+                return []
+
+    async def save(self) -> None:
+        """Save registry to disk."""
+        async with self._lock:
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                data = {"loops": self._loops}
+                self._path.write_text(json.dumps(data, indent=2))
+            except OSError as e:
+                self._log.warning("Failed to save registry: %s", e)
+
+    async def register_loop(self, loop_info: LoopInfo) -> None:
+        """Register an active loop."""
+        async with self._lock:
+            # Convert LoopInfo to dict for JSON serialization
+            self._loops[loop_info.loop_id] = {
+                "loop_id": loop_info.loop_id,
+                "task_name": loop_info.task_name,
+                "task_dir": loop_info.task_dir,
+                "branch": loop_info.branch,
+                "iteration": loop_info.iteration,
+                "max_iterations": loop_info.max_iterations,
+                "agent": loop_info.agent,
+                "status": loop_info.status,
+                "started_at": loop_info.started_at,
+                "opencode_port": loop_info.opencode_port,
+                "opencode_pid": loop_info.opencode_pid,
+                "worktree_path": loop_info.worktree_path,
+                "timeout_hours": loop_info.timeout_hours,
+            }
+        await self.save()
+        self._log.debug("Registered loop %s", loop_info.loop_id)
+
+    async def update_loop(self, loop_id: str, updates: dict[str, Any]) -> None:
+        """Update a loop's registry entry."""
+        async with self._lock:
+            if loop_id in self._loops:
+                self._loops[loop_id].update(updates)
+        await self.save()
+
+    async def unregister_loop(self, loop_id: str) -> None:
+        """Remove a loop from the registry."""
+        async with self._lock:
+            if loop_id in self._loops:
+                del self._loops[loop_id]
+                self._log.debug("Unregistered loop %s", loop_id)
+        await self.save()
+
+    async def clear(self) -> None:
+        """Clear all loops from registry."""
+        async with self._lock:
+            self._loops.clear()
+        await self.save()
+
+
+async def cleanup_orphaned_loop(
+    orphan: dict[str, Any],
+    workspace_dir: Path,
+    log: logging.Logger,
+) -> None:
+    """Clean up an orphaned loop.
+
+    Attempts to:
+    1. Kill any orphaned opencode serve process
+    2. Clean up worktree if it exists
+
+    Args:
+        orphan: Orphaned loop info from registry
+        workspace_dir: Base workspace directory
+        log: Logger instance
+    """
+    loop_id = orphan.get("loop_id", "unknown")
+    pid = orphan.get("opencode_pid")
+    worktree_path = orphan.get("worktree_path")
+
+    log.info("Cleaning up orphaned loop %s (pid=%s)", loop_id, pid)
+
+    # Try to kill orphaned process
+    if pid:
+        try:
+            # Check if process is still running
+            os.kill(pid, 0)  # Signal 0 = check existence
+            log.info("Killing orphaned process %d for loop %s", pid, loop_id)
+            # Try SIGTERM first
+            os.kill(pid, signal.SIGTERM)
+            # Wait a bit then SIGKILL if needed
+            await asyncio.sleep(2.0)
+            try:
+                os.kill(pid, 0)
+                # Still alive, use SIGKILL
+                os.kill(pid, signal.SIGKILL)
+                log.info("Sent SIGKILL to orphaned process %d", pid)
+            except OSError:
+                pass  # Process already dead
+        except OSError:
+            # Process doesn't exist (already dead)
+            log.debug("Orphaned process %d for loop %s no longer exists", pid, loop_id)
+
+    # Note: We don't clean up worktrees here because git worktree prune
+    # handles stale worktrees on daemon startup. The worktree might be
+    # useful for debugging anyway.
+    if worktree_path:
+        log.debug(
+            "Orphaned loop %s had worktree at %s (not removing)", loop_id, worktree_path
+        )
 
 
 class EventBroadcaster:
@@ -518,6 +676,7 @@ class Daemon:
     - Manages git workspaces for incoming loop requests
     - Starts/stops opencode serve instances per loop
     - Tracks active loops and their status
+    - Persists loop registry for orphan detection on restart
     """
 
     def __init__(self, config: DaemonConfig) -> None:
@@ -539,6 +698,7 @@ class Daemon:
         self._loop_driver: LoopDriver | None = None
         self._loop_service_manager: ZitiLoopServiceManager | None = None
         self._event_broadcaster: EventBroadcaster | None = None
+        self._loop_registry: LoopRegistry | None = None
 
     @property
     def active_loop_count(self) -> int:
@@ -621,6 +781,13 @@ class Daemon:
             )
         return self._loop_service_manager
 
+    @property
+    def loop_registry(self) -> LoopRegistry:
+        """Return the loop registry, creating it if needed."""
+        if self._loop_registry is None:
+            self._loop_registry = LoopRegistry()
+        return self._loop_registry
+
     def apply_environment(self) -> None:
         """Apply loaded environment variables to the process environment."""
         for key, value in self.config.env_vars.items():
@@ -674,10 +841,11 @@ class Daemon:
         """Start the daemon.
 
         This method:
-        1. Applies environment variables
-        2. Sets up signal handlers
-        3. Starts the Ziti control service (if configured)
-        4. Waits for shutdown signal
+        1. Loads loop registry and cleans up orphaned loops from previous runs
+        2. Applies environment variables
+        3. Sets up signal handlers
+        4. Starts the Ziti control service (if configured)
+        5. Waits for shutdown signal
         """
         import datetime
 
@@ -685,6 +853,7 @@ class Daemon:
         self._log.info("Starting ralphd on %s", self._hostname)
         self._log.info("Workspace directory: %s", self.config.workspace_dir)
         self._log.info("Max concurrent loops: %d", self.config.max_concurrent_loops)
+        self._log.info("Loop timeout: %d hours", self.config.loop_timeout_hours)
 
         if self.config.ziti_identity_path:
             self._log.info("Ziti identity: %s", self.config.ziti_identity_path)
@@ -696,6 +865,18 @@ class Daemon:
 
         # Ensure workspace directory exists
         self.config.workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        # Load loop registry and clean up orphans from previous runs
+        orphans = await self.loop_registry.load()
+        if orphans:
+            self._log.info("Found %d orphaned loop(s) from previous run", len(orphans))
+            for orphan in orphans:
+                await cleanup_orphaned_loop(
+                    orphan, self.config.workspace_dir, self._log
+                )
+            # Clear the registry after cleanup
+            await self.loop_registry.clear()
+            self._log.info("Orphan cleanup complete")
 
         # Prune stale worktrees on startup
         await self.workspace_manager.prune_stale_worktrees()
@@ -756,6 +937,11 @@ class Daemon:
             self._active_loops.clear()
         else:
             self._log.info("No active loops to clean up")
+
+        # Clear loop registry on clean shutdown (no orphans)
+        if self._loop_registry is not None:
+            await self._loop_registry.clear()
+            self._log.info("Loop registry cleared")
 
     def get_health(self) -> dict[str, Any]:
         """Return health/status information about the daemon."""

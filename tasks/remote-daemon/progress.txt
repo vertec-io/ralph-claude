@@ -43,3 +43,40 @@ _See progress-1.txt for detailed iteration logs._
   - click.style() provides cross-platform colored output
   - Separate "issues" (blocking) from "suggestions" (optional improvements)
 ---
+
+## 2026-01-26 - US-012 Completed
+- **What was implemented:**
+  - **LoopRegistry class** in daemon.py for persistent loop tracking
+    - Stores loop info to `~/.local/state/ralph-uv/loop_registry.json`
+    - Methods: load(), save(), register_loop(), update_loop(), unregister_loop(), clear()
+  - **Per-loop timeout support:**
+    - Added `timeout_hours` field to LoopInfo (default: 24h)
+    - Added `timeout_hours` field to StartLoopParams for RPC
+    - Added `timeout_hours` field to LoopState with `is_timed_out()` method
+    - Added `TIMED_OUT` status to LoopStatus enum
+    - Loop driver checks timeout at start of each iteration
+    - Timed out loops push to origin before stopping
+  - **Orphaned loop detection on daemon restart:**
+    - `cleanup_orphaned_loop()` function kills orphaned processes (SIGTERM then SIGKILL)
+    - Daemon loads registry on start, cleans up orphans, then clears registry
+  - **Registry integration:**
+    - Loops are registered when started via RPC
+    - Loops are unregistered when stopped via RPC or completed naturally
+    - Registry is cleared on clean daemon shutdown
+- **Files changed:**
+  - `src/ralph_uv/daemon.py` - Added LoopRegistry, cleanup_orphaned_loop, timeout_hours to LoopInfo
+  - `src/ralph_uv/daemon_rpc.py` - Added timeout_hours to StartLoopParams, register/unregister loops
+  - `src/ralph_uv/daemon_loop.py` - Added TIMED_OUT status, timeout check, registry cleanup
+  - `tasks/remote-daemon/prd.json` - Marked US-012 as passing
+- **Pre-existing features verified:**
+  - max_concurrent_loops enforcement in daemon_rpc.py:215-222
+  - Separate worktree per loop via workspace.py
+  - Separate port per loop via opencode_lifecycle.py (4096-5096 range)
+  - Separate Ziti service per loop via ziti.py
+  - Active loop tracking in daemon._active_loops dict
+- **Learnings for future iterations:**
+  - LoopRegistry uses JSON for simplicity; SQLite would be better for atomic updates
+  - asyncio.Lock protects shared registry state during concurrent operations
+  - Process cleanup uses SIGTERM then SIGKILL with 2s delay
+  - Registry is intentionally NOT cleared on unclean shutdown to preserve orphan info
+---
