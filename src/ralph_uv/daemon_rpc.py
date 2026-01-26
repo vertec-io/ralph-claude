@@ -287,6 +287,7 @@ class DaemonRpcHandler:
         # Start opencode serve instance (for opencode agent)
         opencode_port: int | None = None
         opencode_pid: int | None = None
+        opencode_instance = None  # Track the instance for loop driver
 
         if loop_params.agent == "opencode":
             from ralph_uv.opencode_lifecycle import (
@@ -300,11 +301,11 @@ class DaemonRpcHandler:
             )
 
             try:
-                instance = await self.daemon.opencode_manager.start_instance(
+                opencode_instance = await self.daemon.opencode_manager.start_instance(
                     loop_id, config
                 )
-                opencode_port = instance.port
-                opencode_pid = instance.pid
+                opencode_port = opencode_instance.port
+                opencode_pid = opencode_instance.pid
                 self._log.info(
                     "OpenCode serve started for loop %s: port=%d, pid=%s",
                     loop_id,
@@ -349,6 +350,10 @@ class DaemonRpcHandler:
             worktree_info.worktree_path,
             opencode_port,
         )
+
+        # Start the loop driver in the background (for opencode agent)
+        if loop_params.agent == "opencode" and opencode_instance is not None:
+            await self.daemon.loop_driver.start_loop(loop_info, opencode_instance)
 
         return {
             "loop_id": loop_id,
@@ -396,9 +401,12 @@ class DaemonRpcHandler:
         loop_info.status = "stopping"
         self._log.info("Stopping loop %s (task=%s)", loop_id, loop_info.task_name)
 
-        # Stop opencode serve instance (abort session, SIGTERM, SIGKILL)
+        # Stop the loop driver first (cancels the running iteration)
         if loop_info.agent == "opencode":
-            # Get the current session ID from the opencode manager if available
+            await self.daemon.loop_driver.stop_loop(loop_id)
+            self._log.info("Loop driver stopped for loop %s", loop_id)
+
+            # Then stop the opencode serve instance (abort session, SIGTERM, SIGKILL)
             instance = self.daemon.opencode_manager.get_instance(loop_id)
             session_id = instance.session_id if instance else None
 

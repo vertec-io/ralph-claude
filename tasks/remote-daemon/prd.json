@@ -267,48 +267,48 @@
       "acceptanceCriteria": [
         {
           "description": "Create a new session via POST /session at start of each iteration",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Build prompt using existing prompt.md template system (reuse prompt.py)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Send prompt via POST /session/{id}/message (synchronous, waits for response)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Monitor completion via SSE GET /event stream (wait for session.idle event)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "After each iteration: read prd.json from worktree to check story completion",
-          "passes": false
+          "passes": true
         },
         {
           "description": "If all stories pass: mark loop completed, push to origin, clean up",
-          "passes": false
+          "passes": true
         },
         {
           "description": "If max iterations reached: mark loop exhausted, push to origin",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Handle iteration failures: log error, increment failure counter, retry with backoff",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Include First-Run Setup section in prompt for iteration 1",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes",
-          "passes": false
+          "passes": true
         }
       ],
       "priority": 7,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Implemented in daemon_loop.py with LoopDriver class. Integrated into daemon.py and daemon_rpc.py. Uses aiohttp for async HTTP, SSE monitoring for completion detection, exponential backoff for retries."
     },
     {
       "id": "US-008",

@@ -198,3 +198,36 @@ Reason: shutdown signal
   - async/await pattern with asyncio.Lock prevents race conditions on port allocation
   - Separate instance tracking from loop tracking allows flexible lifecycle management
 ---
+
+## 2026-01-26 - US-007 Completed
+- **What was implemented:**
+  - Created `src/ralph_uv/daemon_loop.py` module with loop iteration driver
+  - `LoopDriver` class: drives iterations by sending prompts to opencode HTTP API
+  - `LoopState` dataclass: tracks loop state (iteration, failures, status)
+  - `IterationOutcome` dataclass: captures result of each iteration
+  - Session creation via `OpenCodeManager.create_session()` at start of each iteration
+  - Prompt building using existing `prompt.py` template system (`build_prompt()`)
+  - Send prompt via POST /session/{id}/message (synchronous, blocks until response)
+  - SSE monitoring via GET /event stream as backup completion detection
+  - After each iteration: read prd.json to check if all stories pass
+  - Loop completion: mark completed, push to origin with --force-with-lease
+  - Loop exhaustion: mark exhausted, push to origin when max iterations reached
+  - Retry with exponential backoff on failures (base 5s, max 60s, 3 max consecutive)
+  - First-Run Setup section added to prompt for iteration 1
+  - Integrated `LoopDriver` into `Daemon` class with lazy initialization
+  - Updated `daemon_rpc.py` to start loop driver after opencode instance starts
+  - Updated `_handle_stop_loop` to stop loop driver before stopping opencode instance
+- **Files changed:**
+  - `src/ralph_uv/daemon_loop.py` (new)
+  - `src/ralph_uv/daemon.py` (modified - added loop_driver property)
+  - `src/ralph_uv/daemon_rpc.py` (modified - integrated loop driver start/stop)
+  - `tasks/remote-daemon/prd.json` (marked US-007 as passing)
+- **Learnings for future iterations:**
+  - POST /session/{id}/message is synchronous - blocks until agent finishes
+  - SSE monitoring is useful as backup completion detection
+  - Exponential backoff with max delay prevents runaway retries
+  - Separate LoopDriver from OpenCodeManager keeps concerns isolated
+  - First-Run Setup section helps agent understand context on iteration 1
+  - asyncio.create_task with name parameter helps with debugging
+  - Use --force-with-lease for git push to prevent data loss
+---

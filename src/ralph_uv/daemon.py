@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ralph_uv.daemon_loop import LoopDriver
     from ralph_uv.daemon_rpc import DaemonRpcHandler
     from ralph_uv.opencode_lifecycle import OpenCodeManager
     from ralph_uv.workspace import WorkspaceManager
@@ -357,6 +358,7 @@ class Daemon:
         self._connection_handler: DaemonConnectionHandler | None = None
         self._workspace_manager: WorkspaceManager | None = None
         self._opencode_manager: OpenCodeManager | None = None
+        self._loop_driver: LoopDriver | None = None
 
     @property
     def active_loop_count(self) -> int:
@@ -397,6 +399,18 @@ class Daemon:
                 env_vars=self.config.env_vars,
             )
         return self._opencode_manager
+
+    @property
+    def loop_driver(self) -> LoopDriver:
+        """Return the loop driver, creating it if needed."""
+        if self._loop_driver is None:
+            from ralph_uv.daemon_loop import LoopDriver
+
+            self._loop_driver = LoopDriver(
+                daemon=self,
+                opencode_manager=self.opencode_manager,
+            )
+        return self._loop_driver
 
     def apply_environment(self) -> None:
         """Apply loaded environment variables to the process environment."""
