@@ -43,7 +43,7 @@ tasks/
 
 ## Output Format
 
-Generated files use **schemaVersion 2.2** with support for phases, story spawning, decision gates, and pause between stories.
+Generated files use **schemaVersion 2.2** with support for phases, story spawning, and decision gates.
 
 ### Basic Structure (Feature/Bug)
 
@@ -85,7 +85,6 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
   "branchName": "ralph/[effort-name]",
   "mergeTarget": "main",
   "autoMerge": false,
-  "pauseBetweenStories": false,
   "type": "investigation",
   "description": "[Description]",
   "phases": [
@@ -139,7 +138,7 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
       "blocks": [],
       "decisionConfig": {
         "slug": "architecture",
-        "inputFile": "decisions/US-010-DECIDE_architecture.md",
+        "inputFile": "tasks/{effort-name}/decisions/US-010-DECIDE_architecture.md",
         "status": "pending",
         "options": [],
         "agentRecommendation": null,
@@ -191,9 +190,9 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
 | `branchName` | string | Yes | Git branch name (ralph/effort-name) |
 | `mergeTarget` | string\|null | Yes | Branch to merge into, or null |
 | `autoMerge` | boolean | Yes | Auto-merge on completion |
-| `pauseBetweenStories` | boolean | No | Pause for user input between stories (default: false) |
 | `type` | string | Yes | "feature", "bug-investigation", or "investigation" |
 | `description` | string | Yes | PRD description |
+| `pauseBetweenStories` | boolean | No | Pause for user input between stories (default: false) |
 | `phases` | array | No | Phase definitions (investigation only) |
 | `userStories` | array | Yes | Array of story objects |
 
@@ -393,7 +392,6 @@ Add ability to mark tasks with different statuses.
   "branchName": "ralph/task-status",
   "mergeTarget": "main",
   "autoMerge": false,
-  "pauseBetweenStories": false,
   "type": "feature",
   "description": "Task Status Feature - Track task progress with status indicators",
   "userStories": [
@@ -477,7 +475,6 @@ Type: Decision Gate
   "branchName": "ralph/thermal-camera",
   "mergeTarget": "main",
   "autoMerge": false,
-  "pauseBetweenStories": false,
   "type": "investigation",
   "description": "Thermal Camera Control System - Read thermal frames and control equipment",
   "phases": [
@@ -553,7 +550,7 @@ Type: Decision Gate
       "blocks": [],
       "decisionConfig": {
         "slug": "architecture",
-        "inputFile": "decisions/US-010-DECIDE_architecture.md",
+        "inputFile": "tasks/{effort-name}/decisions/US-010-DECIDE_architecture.md",
         "status": "pending",
         "options": [],
         "agentRecommendation": null,
@@ -616,6 +613,72 @@ Ralph will:
 
 ---
 
+## Research Mode
+
+When converting a Research PRD (created by `/research-prd`), use these additional rules:
+
+### prd.json Differences
+
+1. **type:** Set to `"research"`
+2. **Story IDs:** Use `RS-` prefix (not `US-`)
+3. **No "Typecheck passes" criterion** — use document quality criteria instead
+4. **researchConfig:** Add research-specific configuration
+
+```json
+{
+  "schemaVersion": "2.2",
+  "type": "research",
+  "researchConfig": {
+    "outputDir": "research/{layer}/",
+    "architectureTargets": ["architecture/{layer}/{file}.md"],
+    "sourceRequirements": {
+      "minimumPerStory": 5,
+      "requirePrimarySources": true,
+      "requireURLs": true
+    }
+  }
+}
+```
+
+### Research Ralph Prompt
+
+When the user runs `/ralph-loop` for a research PRD, they should use this prompt template:
+
+```
+You are a research agent working on a Hyperfactory architecture research effort.
+
+Read tasks/{effort-name}/prd.json to find the next incomplete research story.
+
+For each research story:
+1. Read the story's acceptance criteria carefully
+2. Use WebSearch and WebFetch to find authoritative sources
+3. Analyze findings against Hyperfactory's constraints (air-gap, licensing, scale, manufacturing context)
+4. Write the research document to the specified deliverable path
+5. Cite ALL sources with URLs — no "industry best practice" without citation
+6. If you lack deep knowledge on a topic, say so explicitly and recommend specific readings
+7. Register new research files in research/index.md
+8. Update the story's acceptance criteria in prd.json as you complete them
+9. Mark the story as passes: true when all criteria are met
+
+For decision gate stories:
+1. Write the decision file to decisions/{slug}.md
+2. Include your recommendation with confidence level (HIGH/MEDIUM/LOW)
+3. Be honest about what you're unsure about
+4. Mark the decision status as "pending" — do NOT mark it as passes: true
+5. The loop will continue but the decision gate blocks downstream stories
+
+You do NOT write code, run typechecks, or verify in browser. You produce research documents.
+
+Log your progress to tasks/{effort-name}/progress.txt after each story.
+```
+
+The user invokes it as:
+```bash
+/ralph-loop [paste research prompt above] --max-iterations 30 --completion-promise 'All research stories complete'
+```
+
+---
+
 ## Checklist Before Saving
 
 Before writing prd.json, verify:
@@ -625,7 +688,6 @@ Before writing prd.json, verify:
 - [ ] `taskDir` field matches the directory path
 - [ ] `mergeTarget` field is set (branch name or `null`)
 - [ ] `autoMerge` field is set (`true` or `false`)
-- [ ] `pauseBetweenStories` field is set if user wants to pause between stories
 - [ ] `type` field is correct (feature, bug-investigation, or investigation)
 - [ ] `acceptanceCriteria` uses object format
 - [ ] Each story is completable in one iteration
@@ -638,3 +700,28 @@ Before writing prd.json, verify:
   - [ ] Decision gates have `type: "decision-gate"` and `decisionConfig`
   - [ ] `blockedBy`/`blocks` arrays set up correctly
   - [ ] Final validation story (US-999) exists
+
+---
+
+## After Conversion — Show Task Info
+
+After creating the prd.json, show the user the **task directory name and launch command** for the PRD just converted. This is what they need when the ralph script prompts for a task number.
+
+**Format:**
+
+```
+prd.json created at tasks/{effort-name}/prd.json ({N} stories, {type})
+
+Launch: /ralph-loop D:\{worktree} tasks/{effort-name}
+```
+
+If multiple PRDs were converted in one session, list all of them:
+
+```
+| # | Task Dir | Stories | Launch Command |
+|---|----------|---------|----------------|
+| 1 | tasks/dataview-full-app | 14 feature | /ralph-loop D:\dataview-full-app tasks/dataview-full-app |
+| 2 | tasks/shopflow-full-app | 21 feature | /ralph-loop D:\shopflow-full-app tasks/shopflow-full-app |
+```
+
+Keep it concise — only show the PRDs just created, not all active worktrees.

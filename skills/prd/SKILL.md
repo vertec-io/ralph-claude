@@ -219,19 +219,6 @@ N+1. Should Ralph auto-merge when complete, or ask first?
    B. Ask first (prompt for confirmation before merging)
 ```
 
-### For All PRDs, also ask about pausing between stories:
-
-```
-N+2. Should Ralph pause between user stories for your review?
-   A. No, continue automatically (Recommended)
-   B. Yes, keep Claude session open between stories
-```
-
-If user chooses A, set `pauseBetweenStories: false` in prd.json.
-If user chooses B, set `pauseBetweenStories: true` in prd.json.
-
-When pause is enabled, after each story completes Ralph keeps the Claude session open so you can continue chatting. Type `exit` in the Claude session to proceed to the next story.
-
 ---
 
 ## Step 4: PRD Structure
@@ -308,11 +295,6 @@ Where this branch should be merged when complete:
 If a merge target is specified, also indicate:
 - `auto-merge: yes` - Merge automatically when all stories pass
 - `auto-merge: no` - Ask for confirmation before merging
-
-### 12. Pause Between Stories
-Whether Ralph should pause between stories:
-- `pause-between-stories: no` - Continue automatically (default)
-- `pause-between-stories: yes` - Keep Claude session open after each story; type `exit` to continue
 
 ---
 
@@ -749,10 +731,6 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 
 `main` - Merge to main branch when complete.
 Auto-merge: No (ask for confirmation first)
-
-## Pause Between Stories
-
-No - Continue automatically
 ```
 
 ---
@@ -775,6 +753,5 @@ Before saving the PRD:
 - [ ] Functional requirements are numbered and unambiguous
 - [ ] Non-goals section defines clear boundaries
 - [ ] Merge target section specifies destination branch or none
-- [ ] Pause between stories setting documented (yes/no)
 - [ ] Saved PRD to `tasks/{effort-name}/prd.md`
 - [ ] Initialized `tasks/{effort-name}/progress.txt`
