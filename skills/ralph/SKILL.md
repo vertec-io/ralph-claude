@@ -760,6 +760,8 @@ If you are delegating prd.json creation to a background Agent (subagent), you **
    - acceptanceCriteria MUST be an array of objects: [{"description": "...", "passes": false}] (NOT string arrays)
    - The PRD MUST have a "description" field (string)
    - Do NOT add extra fields like "files", "deliverable", or "title" at the PRD level
+   - Decision gates MUST have decisionConfig.inputFile pointing to tasks/{effort-name}/decisions/{slug}.md (NOT repo root decisions/)
+   - Decision files go INSIDE the task directory, never at the repo root
    ```
 
 **Why this matters:** Background agents don't automatically receive skill context. Without explicit instructions, they generate "reasonable-looking" JSON with wrong field names (`stories` instead of `userStories`, string arrays instead of objects), which causes ralph-tui to fail to load the PRD. This has happened multiple times.
