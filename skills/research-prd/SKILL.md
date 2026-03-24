@@ -624,3 +624,17 @@ Before saving the Research PRD:
 - [ ] Created `tasks/{effort-name}/decisions/` directory
 - [ ] Saved PRD to `tasks/{effort-name}/prd.md`
 - [ ] Initialized `tasks/{effort-name}/progress.txt`
+
+---
+
+## Delegating to Background Agents
+
+If you are delegating research PRD creation to a background Agent (subagent), you **MUST** include the following in the agent's prompt:
+
+```
+Before generating the research PRD, read the skill file at C:\Users\apino\.claude\skills\research-prd\skill.md
+and follow the structure EXACTLY. Pay special attention to the research story types (RS-xxx, RS-xxx-DECIDE,
+RS-xxx-SPEC), the decision gate file template, and the checklist at the end.
+```
+
+**Why this matters:** Background agents don't automatically receive skill context. Without explicit instructions to read the skill file, they produce PRDs with inconsistent structure, missing decision gate templates, or wrong story type conventions — which then causes downstream failures when converting to prd.json via `/ralph`.

@@ -703,25 +703,63 @@ Before writing prd.json, verify:
 
 ---
 
-## After Conversion — Show Task Info
+## After Conversion — Show Task Info with TUI Number
 
-After creating the prd.json, show the user the **task directory name and launch command** for the PRD just converted. This is what they need when the ralph script prompts for a task number.
+After creating the prd.json, show the user the **Ralph TUI task number** and launch command. The TUI lists tasks alphabetically by directory name — determine the position so the user can select it directly.
 
-**Format:**
+**How to determine the TUI number:**
+
+```bash
+ls -1 tasks/ | sort | grep -n "{effort-name}" | cut -d: -f1
+```
+
+**Format (single PRD):**
 
 ```
 prd.json created at tasks/{effort-name}/prd.json ({N} stories, {type})
 
+| TUI # | Task Dir | Stories | Type |
+|-------|----------|---------|------|
+| 20 | tasks/fix-app-design-system-compliance | 8 | feature |
+
 Launch: /ralph-loop D:\{worktree} tasks/{effort-name}
 ```
 
-If multiple PRDs were converted in one session, list all of them:
+**Format (multiple PRDs):**
 
 ```
-| # | Task Dir | Stories | Launch Command |
-|---|----------|---------|----------------|
-| 1 | tasks/dataview-full-app | 14 feature | /ralph-loop D:\dataview-full-app tasks/dataview-full-app |
-| 2 | tasks/shopflow-full-app | 21 feature | /ralph-loop D:\shopflow-full-app tasks/shopflow-full-app |
+| TUI # | Task Dir | Stories | Type |
+|-------|----------|---------|------|
+| 16 | tasks/dataview-full-app | 14 | feature |
+| 47 | tasks/shopflow-full-app | 21 | feature |
+
+Launch commands:
+  /ralph-loop D:\dataview-full-app tasks/dataview-full-app
+  /ralph-loop D:\shopflow-full-app tasks/shopflow-full-app
 ```
 
-Keep it concise — only show the PRDs just created, not all active worktrees.
+The **TUI #** matches what `ralph-tui` shows when it prompts "Select task [1-N]:", so the user can type the number directly without scanning the full list. Keep it concise — only show the PRDs just created.
+
+---
+
+## Delegating to Background Agents
+
+If you are delegating prd.json creation to a background Agent (subagent), you **MUST** include the following in the agent's prompt:
+
+1. **Tell the agent to read this skill file first:**
+   ```
+   Before generating any JSON, read the skill file at C:\Users\apino\.claude\skills\ralph\skill.md
+   and follow the schema EXACTLY. Pay special attention to the "Output Format" and "Schema v2.1 Fields" sections.
+   ```
+
+2. **Explicitly list the critical field names that agents commonly get wrong:**
+   ```
+   CRITICAL schema requirements:
+   - The stories array MUST be named "userStories" (NOT "stories")
+   - Each story MUST have: id, title, description, acceptanceCriteria, priority, passes (boolean), notes (string)
+   - acceptanceCriteria MUST be an array of objects: [{"description": "...", "passes": false}] (NOT string arrays)
+   - The PRD MUST have a "description" field (string)
+   - Do NOT add extra fields like "files", "deliverable", or "title" at the PRD level
+   ```
+
+**Why this matters:** Background agents don't automatically receive skill context. Without explicit instructions, they generate "reasonable-looking" JSON with wrong field names (`stories` instead of `userStories`, string arrays instead of objects), which causes ralph-tui to fail to load the PRD. This has happened multiple times.

@@ -164,25 +164,45 @@ Start Ralph:
 
 ---
 
-## After Creation — Show Launch Commands
+## After Creation — Show Launch Info with TUI Task Number
 
-After creating worktrees, show the user **only the worktrees just created** with their launch commands. Don't list all active worktrees — the user just needs to know the task directory for the ones they're about to launch.
+After creating worktrees, show the user the **Ralph TUI task number** so they can select it without scanning a long list. The TUI lists tasks alphabetically by directory name — determine the position by sorting all `tasks/*/` directories alphabetically and finding where the new task falls.
 
-**Format:**
+**How to determine the TUI number:**
+
+```bash
+ls -1 tasks/ | sort | grep -n "{effort-name}" | cut -d: -f1
+```
+
+This gives you the number the user will type when `ralph-tui` prompts "Select task [1-N]:".
+
+**Format (single worktree):**
+
+```
+Worktree ready at D:\{effort-name} on branch {branchName}.
+
+| TUI # | Task Dir | Stories | Type |
+|-------|----------|---------|------|
+| 20 | tasks/fix-app-design-system-compliance | 8 | feature |
+
+Launch: /ralph-loop D:\{effort-name} tasks/{effort-name}
+```
+
+**Format (multiple worktrees):**
 
 ```
 Worktrees ready:
 
-| # | Worktree | Task Dir | Stories |
-|---|----------|----------|---------|
-| 1 | D:\3d-cad-research | tasks/3d-cad-research | 14 research |
-| 2 | D:\dataview-full-app | tasks/dataview-full-app | 14 feature |
-| 3 | D:\ai-dock-expansion | tasks/ai-dock-expansion | 7 feature |
+| TUI # | Task Dir | Stories | Type |
+|-------|----------|---------|------|
+| 3 | tasks/ai-dock-expansion | 7 | feature |
+| 16 | tasks/dataview-full-app | 14 | feature |
+| 47 | tasks/shopflow-full-app | 21 | feature |
 
 Launch commands:
-  /ralph-loop D:\3d-cad-research tasks/3d-cad-research
-  /ralph-loop D:\dataview-full-app tasks/dataview-full-app
   /ralph-loop D:\ai-dock-expansion tasks/ai-dock-expansion
+  /ralph-loop D:\dataview-full-app tasks/dataview-full-app
+  /ralph-loop D:\shopflow-full-app tasks/shopflow-full-app
 ```
 
-The user copies the task dir from here when the ralph script prompts for a task number. Keep it concise — only show what was just created.
+The **TUI #** column matches what `ralph-tui` shows when it prompts "Select task [1-N]:", so the user can type the number directly without scanning the full list.

@@ -755,3 +755,17 @@ Before saving the PRD:
 - [ ] Merge target section specifies destination branch or none
 - [ ] Saved PRD to `tasks/{effort-name}/prd.md`
 - [ ] Initialized `tasks/{effort-name}/progress.txt`
+
+---
+
+## Delegating to Background Agents
+
+If you are delegating PRD creation to a background Agent (subagent), you **MUST** include the following in the agent's prompt:
+
+```
+Before generating the PRD, read the skill file at C:\Users\apino\.claude\skills\prd\skill.md
+and follow the structure EXACTLY. Pay special attention to the story format, acceptance criteria
+standards, and the checklist at the end.
+```
+
+**Why this matters:** Background agents don't automatically receive skill context. Without explicit instructions to read the skill file, they produce PRDs with inconsistent structure, missing sections, or wrong formatting — which then causes downstream failures when converting to prd.json via `/ralph`.
