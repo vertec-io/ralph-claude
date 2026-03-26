@@ -64,6 +64,28 @@ This creates:
 - A new branch `{branchName}` from the current HEAD
 - A working directory at `../{effort-name}` (sibling to the main repo)
 
+### Step 4.5 — Copy .env files (CRITICAL)
+
+Git worktrees do NOT include `.gitignored` files like `.env`. The worktree will be missing environment variables needed to run the app (database URLs, API keys, auth secrets, etc.). **This causes silent failures** where services appear unreachable.
+
+**Copy all `.env` files from the main repo to the worktree:**
+
+```bash
+# Find all .env files in the main repo (they're gitignored, won't be in the worktree)
+find . -name '.env' -not -path '*/node_modules/*' -not -path '*/.git/*' | while read envfile; do
+  target="../{effort-name}/${envfile}"
+  if [ ! -f "$target" ]; then
+    mkdir -p "$(dirname "$target")"
+    cp "$envfile" "$target"
+    echo "  Copied $envfile → $target"
+  fi
+done
+```
+
+**Per-project .env locations:** Check `CLAUDE.md` or `AGENTS.md` files in the repo for project-specific `.env` locations. If the project has a `.env.example`, use it as a reference for required variables.
+
+**Why this matters:** Without the `.env`, apps can't reach databases, APIs, or services. The UI will show "unreachable" errors with no obvious cause. This has caused debugging confusion multiple times.
+
 ### Step 5 — Report to user
 
 Tell the user:
