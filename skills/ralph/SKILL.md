@@ -1,7 +1,7 @@
 ---
 name: ralph
 description: "Convert PRDs to prd.json format for the Ralph autonomous agent system. Use when you have an existing PRD and need to convert it to Ralph's JSON format. Triggers on: convert this prd, turn this into ralph format, create prd.json from this, ralph json, start ralph."
-version: "2.3"
+version: "2.4"
 ---
 
 # Ralph PRD Converter
@@ -331,8 +331,10 @@ For stories with testable logic:
 
 For stories that change UI:
 ```
-"Verify in browser"
+"Using Playwright MCP, verify: [specific behavior to check]"
 ```
+
+**IMPORTANT:** Ralph is a full Claude Code instance with Playwright MCP, Docker CLI, and Bash. It can start dev servers, rebuild containers, navigate browsers, click buttons, and assert results. Never treat browser verification as a "manual" step — always write explicit Playwright verification criteria with service startup instructions.
 
 For discovery stories:
 ```
@@ -355,16 +357,21 @@ For discovery stories:
 8. **taskDir**: Set to the task subdirectory path
 9. **Always add**: `{ "description": "Typecheck passes", "passes": false }`
 
+### Service & Process Management Rules
+
+10. **CRITICAL: Never kill all Node processes.** When starting or restarting dev servers, use targeted process management: kill by port (`lsof -ti:3001 | xargs kill` on Unix, or `netstat -ano | findstr :3001` then `taskkill /PID` on Windows) or by specific process name. **NEVER run `pkill node`, `killall node`, or `taskkill /IM node.exe /F`** — this kills the Playwright MCP server, which is irrecoverable and breaks all browser testing for the rest of the session.
+11. **Starting services for browser tests:** When an AC requires Playwright verification, start the required services (e.g., `cargo run` for hf-api, `bun run dev` for V2 app) in the background, wait for them to be ready, then use Playwright MCP to navigate and verify. Stop services after verification if they weren't already running.
+
 ### Investigation-Specific Rules
 
-10. **type**: Set to "investigation" for self-expanding PRDs
-11. **phases**: Define phase structure if PRD specifies phases
-12. **phase**: Set on each story to indicate which phase it belongs to
-13. **canSpawnStories**: Set to `true` on discovery stories that create implementation stories
-14. **spawnConfig**: Include `idPrefix` and `targetPhase` for spawning stories
-15. **Decision gates**: Create with `type: "decision-gate"` and `decisionConfig`
-16. **blockedBy/blocks**: Set up dependency chains between stories
-17. **US-999**: Create final validation story with high priority (999) and `blockedBy` all Phase 2 stories
+12. **type**: Set to "investigation" for self-expanding PRDs
+13. **phases**: Define phase structure if PRD specifies phases
+14. **phase**: Set on each story to indicate which phase it belongs to
+15. **canSpawnStories**: Set to `true` on discovery stories that create implementation stories
+16. **spawnConfig**: Include `idPrefix` and `targetPhase` for spawning stories
+17. **Decision gates**: Create with `type: "decision-gate"` and `decisionConfig`
+18. **blockedBy/blocks**: Set up dependency chains between stories
+19. **US-999**: Create final validation story with high priority (999) and `blockedBy` all Phase 2 stories
 
 ---
 
@@ -416,7 +423,7 @@ Add ability to mark tasks with different statuses.
         { "description": "Each task card shows colored status badge", "passes": false },
         { "description": "Badge colors: gray=pending, blue=in_progress, green=done", "passes": false },
         { "description": "Typecheck passes", "passes": false },
-        { "description": "Verify in browser", "passes": false }
+        { "description": "Using Playwright MCP, verify: task cards display colored status badges", "passes": false }
       ],
       "priority": 2,
       "passes": false,
@@ -693,7 +700,7 @@ Before writing prd.json, verify:
 - [ ] Each story is completable in one iteration
 - [ ] Stories are ordered by dependency
 - [ ] Every story has "Typecheck passes" criterion
-- [ ] UI stories have "Verify in browser" criterion
+- [ ] UI stories have explicit Playwright MCP verification criterion (not vague "Verify in browser")
 - [ ] **Investigation PRDs:**
   - [ ] `phases` array defined
   - [ ] Discovery stories have `phase`, `canSpawnStories`, `spawnConfig`

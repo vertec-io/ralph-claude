@@ -1,7 +1,7 @@
 ---
 name: prd
 description: "Generate a structured requirements document for features OR bug investigations. Use when planning a feature, troubleshooting a bug, or any multi-step effort. Triggers on: create a prd, write prd for, plan this feature, investigate this bug, troubleshoot, debug."
-version: "1.3"
+version: "1.4"
 ---
 
 # PRD Generator
@@ -251,12 +251,14 @@ Each story should be small enough to implement in one focused session (one Ralph
 - [ ] Specific verifiable criterion
 - [ ] Another criterion
 - [ ] Typecheck/lint passes
-- [ ] **[UI stories only]** Verify in browser
+- [ ] **[UI stories only]** Using Playwright MCP, verify: [specific observable behavior]
 ```
 
 **Important:**
 - Acceptance criteria must be verifiable, not vague. "Works correctly" is bad. "Button shows confirmation dialog before deleting" is good.
-- **For any story with UI changes:** Always include "Verify in browser" as acceptance criteria.
+- **For any story with UI changes:** Always include a Playwright MCP verification criterion. Be explicit about what to verify — don't just say "Verify in browser." Instead say "Using Playwright MCP, start the dev server, navigate to [URL], [perform action], verify [expected result]." Ralph is a full Claude Code instance with Playwright MCP, Docker CLI, and Bash — it can start services and test in a real browser.
+- **Service startup in ACs:** When stories require running services (dev servers, Docker containers, APIs), include the startup commands in the AC or in the story notes. Reference the local dev setup from CLAUDE.md (e.g., `bun run dev` on port 3001, `cargo run` on port 5001).
+- **CRITICAL: Never kill all Node processes.** When cleaning up or restarting services, use targeted process management (e.g., kill by port or PID). Running `pkill node` or `killall node` will kill the Playwright MCP server, which is irrecoverable and will break all subsequent browser testing in the session.
 
 ### 5. Functional Requirements
 Numbered list of specific functionalities:
@@ -380,7 +382,7 @@ Verify everything works together. Stories in this phase:
 - [ ] No console errors
 - [ ] Performance acceptable
 - [ ] Typecheck passes
-- [ ] Verify in browser (if applicable)
+- [ ] Using Playwright MCP, verify the UI renders correctly (if applicable)
 
 ## Decision Points
 
@@ -594,7 +596,7 @@ Clear description of the bug:
 - [ ] Test edge cases related to the fix
 - [ ] Remove or reduce debug logging if added
 - [ ] Typecheck passes
-- [ ] Verify in browser (if UI-related)
+- [ ] Using Playwright MCP, verify the UI renders correctly (if UI-related)
 
 ## Hypotheses
 Initial theories about what might be causing the issue:
@@ -674,7 +676,7 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 - [ ] Each task card shows colored priority badge (red=high, yellow=medium, gray=low)
 - [ ] Priority visible without hovering or clicking
 - [ ] Typecheck passes
-- [ ] Verify in browser
+- [ ] Using Playwright MCP, verify the UI renders correctly
 
 ### US-003: Add priority selector to task edit
 **Description:** As a user, I want to change a task's priority when editing it.
@@ -684,7 +686,7 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 - [ ] Shows current priority as selected
 - [ ] Saves immediately on selection change
 - [ ] Typecheck passes
-- [ ] Verify in browser
+- [ ] Using Playwright MCP, verify the UI renders correctly
 
 ### US-004: Filter tasks by priority
 **Description:** As a user, I want to filter the task list to see only high-priority items when I'm focused.
@@ -694,7 +696,7 @@ Add priority levels to tasks so users can focus on what matters most. Tasks can 
 - [ ] Filter persists in URL params
 - [ ] Empty state message when no tasks match filter
 - [ ] Typecheck passes
-- [ ] Verify in browser
+- [ ] Using Playwright MCP, verify the UI renders correctly
 
 ## Functional Requirements
 
