@@ -62,7 +62,7 @@ cd ralph-claude
 
 This installs:
 - `ralph-tui` binary to `~/.local/bin/`
-- `/prd` and `/ralph` skills to `~/.claude/skills/`
+- `/prd`, `/ralph`, `/ralph-worktree`, `/ralph-handoff`, and `/research-prd` skills to `~/.claude/skills/`
 - Default `prompt.md` to `~/.config/ralph/`
 
 **Using cargo (Rust users):**
@@ -77,6 +77,9 @@ Note: With cargo install, you'll need to manually copy skills and prompt.md:
 git clone https://github.com/apino/ralph-claude.git
 cp -r ralph-claude/skills/prd ~/.claude/skills/
 cp -r ralph-claude/skills/ralph ~/.claude/skills/
+cp -r ralph-claude/skills/ralph-worktree ~/.claude/skills/
+cp -r ralph-claude/skills/ralph-handoff ~/.claude/skills/
+cp -r ralph-claude/skills/research-prd ~/.claude/skills/
 mkdir -p ~/.config/ralph
 cp ralph-claude/prompt.md ~/.config/ralph/
 ```
@@ -110,12 +113,15 @@ chmod +x scripts/ralph/ralph.sh
 
 ### Installing skills globally
 
-The `/prd` and `/ralph` Claude Code skills are installed automatically with `install.sh`. To install manually:
+The Claude Code skills are installed automatically with `install.sh`, which iterates over every directory in `skills/`. To install manually:
 
 ```bash
 mkdir -p ~/.claude/skills
 cp -r skills/prd ~/.claude/skills/
 cp -r skills/ralph ~/.claude/skills/
+cp -r skills/ralph-worktree ~/.claude/skills/
+cp -r skills/ralph-handoff ~/.claude/skills/
+cp -r skills/research-prd ~/.claude/skills/
 ```
 
 ## Directory Structure
@@ -271,6 +277,9 @@ This keeps the active `tasks/` directory clean while preserving completed work.
 | `prompt.md` | Instructions given to each Claude Code instance |
 | `skills/prd/` | Skill for generating PRDs (features and bugs) |
 | `skills/ralph/` | Skill for converting PRDs to JSON |
+| `skills/ralph-worktree/` | Skill for creating an isolated git worktree for a Ralph PRD |
+| `skills/ralph-handoff/` | Skill for creating/updating a handoff.md so the next agent can pick up where this one left off |
+| `skills/research-prd/` | Skill for generating structured research PRDs (decision documents, not code) |
 | `prd.json.example` | Example PRD format |
 
 ## PRD Types
