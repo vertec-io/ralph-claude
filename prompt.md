@@ -1,4 +1,4 @@
-<!-- version: 2.4 -->
+<!-- version: 2.5 -->
 <!--
   Versioning Scheme:
   - MAJOR.MINOR format (e.g., 1.0, 2.0)
@@ -130,6 +130,34 @@ Only update AGENTS.md if you have **genuinely reusable knowledge** that would he
 - Do NOT commit broken code
 - Keep changes focused and minimal
 - Follow existing code patterns
+
+### Language-specific validation gates (CRITICAL for refactor PRDs)
+
+Before marking a story `passes: true`, you MUST run the appropriate validation gate for every project you modified. A story is NOT complete if any of these fail. These are not optional even if the acceptance criteria don't explicitly list them:
+
+**Rust crate modified** (files under `src/<crate>/`):
+- `cargo check` — must exit 0 with no new warnings vs. baseline
+- `cargo test --bin <crate>` (or appropriate test target) — all tests pass, no new failures
+
+**TypeScript / React / TSX project modified** (files under a project with `tsconfig.json` + `package.json`):
+- `bunx tsc --noEmit` (or `npx tsc --noEmit`) — must exit 0
+  - **This catches `TS6133` unused imports/params** that strict-mode projects enforce via `noUnusedLocals`/`noUnusedParameters`. Refactor PRDs that extract code into subcomponents commonly leave stale imports or destructured props behind. These will NOT be caught by running tests or Vite dev server — only by tsc.
+  - Run tsc in the SAME directory as the project's `tsconfig.json`, not from the repo root.
+- `bun test` (or equivalent) if tests exist — all tests pass
+
+**Python / pytest project modified:**
+- `pytest` or `python -m pytest` — all tests pass
+- `ruff check` or `flake8` if configured
+
+**Multiple projects modified in one story:**
+- Run the appropriate gate for EACH modified project, not just the "main" one
+- A refactor that touches both `src/hf-api/` (Rust) and `src/hyperfactory-app-v2/` (TypeScript) must run BOTH `cargo check` + `cargo test` AND `bunx tsc --noEmit`
+
+### Why this matters
+
+If a validation gate fails, the commit is broken regardless of how clean the diff looks. Refactors that move code around without running the language's type checker are the most common source of "it compiled on my machine but breaks at the audit gate" failures. Running the full gate before committing is MUCH cheaper than discovering the regression during post-PRD audit.
+
+If an acceptance criterion explicitly lists a different validation command (e.g., `cargo test --release`), use that instead. But the language-native type check is always a MINIMUM bar — never skip it.
 
 ## Bug Investigation Stories
 
