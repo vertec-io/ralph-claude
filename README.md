@@ -8,6 +8,8 @@ Ralph is an autonomous AI agent loop that runs [Claude Code](https://docs.anthro
 
 Based on [Geoffrey Huntley's Ralph pattern](https://ghuntley.com/ralph/).
 
+> **New to Ralph?** This README covers single-PRD quick-start mechanics. For the full team onboarding — mental model, multi-PRD orchestration, the pilot role, monitoring discipline, durable documents, and real-world case studies — read **[TRAINING.md](TRAINING.md)** after you've installed the skills.
+
 ## Prerequisites
 
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
@@ -273,13 +275,17 @@ This keeps the active `tasks/` directory clean while preserving completed work.
 
 | File | Purpose |
 |------|---------|
+| `TRAINING.md` | Team onboarding guide — mental model, multi-PRD orchestration, pilot role, monitoring, case studies |
 | `ralph.sh` | The bash loop that spawns fresh Claude Code instances |
 | `prompt.md` | Instructions given to each Claude Code instance |
-| `skills/prd/` | Skill for generating PRDs (features and bugs) |
-| `skills/ralph/` | Skill for converting PRDs to JSON |
-| `skills/ralph-worktree/` | Skill for creating an isolated git worktree for a Ralph PRD |
-| `skills/ralph-handoff/` | Skill for creating/updating a handoff.md so the next agent can pick up where this one left off |
-| `skills/research-prd/` | Skill for generating structured research PRDs (decision documents, not code) |
+| `skills/prd/` | Generate PRDs (features and bugs) |
+| `skills/research-prd/` | Generate structured research PRDs (decision documents, not code) |
+| `skills/ralph-audit/` | Audit a PRD with parallel disjoint-angle agents before launch |
+| `skills/ralph/` | Convert PRDs to JSON for Ralph |
+| `skills/ralph-worktree/` | Create an isolated git worktree for a single Ralph PRD |
+| `skills/ralph-runner/` | Launch multiple Ralph PRDs sequentially or in parallel with worktree isolation |
+| `skills/ralph-handoff/` | Create/update a handoff.md for cross-session continuity |
+| `skills/ralph-pilot/` | Meta-skill: the full lifecycle operator role — authors PRDs, audits, launches, monitors, intervenes |
 | `prd.json.example` | Example PRD format |
 
 ## PRD Types
