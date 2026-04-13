@@ -11,3 +11,6 @@ progress.txt
 
 # Rust build artifacts
 **/target
+
+# Ralph pilot interview — local working doc, not committed
+docs/ralph-pilot-interview.md
