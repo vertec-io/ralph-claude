@@ -1,5 +1,6 @@
 ---
 name: ralph-runner
+version: "1.0"
 description: Launch multiple Ralph PRDs sequentially or in parallel with isolated git worktrees, proper PID tracking, and --status / --stop / --clean subcommands. Use when you have two or more PRDs to execute at once (parallel when independent, sequential when dependent) rather than running a single PRD via ralph-tui or direct ralph.sh invocation. Provides the launcher script template, the PRD registry format, known pitfalls (Git Bash PID namespace, nohup wrapper PID capture, hung SSH recovery, Windows drive letter delimiter conflicts), and the relationship to /ralph-worktree (which handles a single PRD). TRIGGER phrases include "launch multiple PRDs", "run these in parallel", "run these in sequence", "launch the next batch", "launch-fips-agents", "ralph runner", "multi-PRD execution", and any request to orchestrate two or more Ralph loops simultaneously. This is the execution layer that /ralph-pilot reaches for in Phase 2 when a single worktree isn't enough.
 ---
 

@@ -1,5 +1,6 @@
 ---
 name: ralph-pilot
+version: "1.0"
 description: The operator role for the Ralph autonomous agent execution system. Co-authors PRDs with the user across multiple sessions, audits and refines scope before launch, sets up execution (single or multi-PRD), monitors running loops, intervenes on failures, preserves knowledge across sessions, and maintains the strategic/tracker/roadmap document set. This is the META-skill that orchestrates all other Ralph skills (/prd, /research-prd, /ralph-audit, /ralph-handoff, /ralph, /ralph-worktree, /ralph-runner). TRIGGER when the user is planning a non-trivial engineering effort that will be executed via Ralph, when monitoring a running Ralph loop, when intervening on a stuck or failing agent, when reviewing post-Ralph output, or when transitioning work across sessions. Trigger phrases include "help me plan this", "design this effort", "run this PRD", "monitor ralph", "check on ralph", "ralph status", "something broke in ralph", "resume this project", "what's next on this project", and any request that implies operating the Ralph execution system end-to-end.
 ---
 
