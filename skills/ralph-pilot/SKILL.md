@@ -1,6 +1,6 @@
 ---
 name: ralph-pilot
-version: "1.0"
+version: 1.1.0
 description: The operator role for the Ralph autonomous agent execution system. Co-authors PRDs with the user across multiple sessions, audits and refines scope before launch, sets up execution (single or multi-PRD), monitors running loops, intervenes on failures, preserves knowledge across sessions, and maintains the strategic/tracker/roadmap document set. This is the META-skill that orchestrates all other Ralph skills (/prd, /research-prd, /ralph-audit, /ralph-handoff, /ralph, /ralph-worktree, /ralph-runner). TRIGGER when the user is planning a non-trivial engineering effort that will be executed via Ralph, when monitoring a running Ralph loop, when intervening on a stuck or failing agent, when reviewing post-Ralph output, or when transitioning work across sessions. Trigger phrases include "help me plan this", "design this effort", "run this PRD", "monitor ralph", "check on ralph", "ralph status", "something broke in ralph", "resume this project", "what's next on this project", and any request that implies operating the Ralph execution system end-to-end.
 ---
 
@@ -398,7 +398,108 @@ If you catch yourself thinking "I'll remember that for next time" — stop. Writ
 4. Read `handoff.md` for session state.
 5. Check auto-memory for any loaded project memories.
 6. Skim the last ~10 commits on main to see recent activity.
-7. Ask the user: "What are we working on right now?" — unless the handoff already answered that question clearly.
-8. If a Ralph loop is already running, run the checkpoint diagnostic sweep and report status before doing anything else.
-9. If a PRD is mid-authoring, read it and ask if they want to continue, revise, or pause.
-10. Only after steps 1-9 do you actually start doing new work.
+7. **Check for other active pilots** (see §10.6). If any are running, read the registry and note which PIDs/worktrees/branches/cron slots belong to each. You are now one of N — respect the concurrency rules in §10 before doing anything that touches shared state.
+8. Ask the user: "What are we working on right now?" — unless the handoff already answered that question clearly.
+9. If a Ralph loop is already running, run the checkpoint diagnostic sweep and report status before doing anything else.
+10. If a PRD is mid-authoring, read it and ask if they want to continue, revise, or pause.
+11. Only after steps 1-10 do you actually start doing new work.
+
+---
+
+## 10. Multi-pilot concurrency
+
+You may not be the only ralph-pilot session on this machine. A user running multiple parallel efforts will spin up one pilot per effort. Before doing ANYTHING that touches shared state — killing processes, scheduling crons, writing memory, committing to main — you must verify you are operating only within your own scope. Getting this wrong is not a stylistic mistake; it can destroy another pilot's work.
+
+### 10.1 Process-kill safety (the critical rule)
+
+Multiple pilots have `claude.exe --print --stream-json` children. Killing "the 45-minute-old stream-json process" will cross-match across pilots. **Never kill a process you cannot uniquely trace back to your own ralph.sh.**
+
+Your ralph.sh Windows PID is findable by its command line, not its age:
+
+```
+powershell -Command "Get-CimInstance Win32_Process |
+  Where-Object { \$_.CommandLine -like '*ralph.sh*<your-task-dir>*' } |
+  Select-Object ProcessId,CreationDate"
+```
+
+From that PID, walk `ParentProcessId` to find descendants and kill only within your own tree. If you cannot uniquely identify your tree — if the command line matching is ambiguous, if multiple ralph.sh processes share your task dir, if you don't know which task dir is yours — **stop and wake the user**. Do not kill.
+
+"This is probably mine" is not good enough. The cost of pausing to confirm is one message; the cost of killing another pilot's active iteration is an hour of wasted Ralph work and a broken trust contract with the user.
+
+### 10.2 Cron offset protocol
+
+A default `*/20 * * * *` checkpoint cron fires at :00, :20, :40. Four pilots all using that default produce stampeded sweeps at the same instants — context churn, rate-limit pressure, overlapping reports. For any multi-pilot session, use offset expressions:
+
+| Slot | Cron | Fires at |
+|---|---|---|
+| A | `5,25,45 * * * *` | :05 :25 :45 |
+| B | `10,30,50 * * * *` | :10 :30 :50 |
+| C | `15,35,55 * * * *` | :15 :35 :55 |
+| D | `0,20,40 * * * *` or `*/20 * * * *` | :00 :20 :40 |
+
+Call `CronList` before `CronCreate` to see which slots are taken; claim a free one. If you were already running on `*/20`, migrate: `CronDelete <old-id>` then `CronCreate` with your assigned slot.
+
+### 10.3 Report prefixing
+
+Every user-facing checkpoint, status report, and intervention message must be prefixed with `[effort-name]` so the user can scan multiple pilots without reading bodies. Example:
+
+- `[mail-chatter-opt-out] Checkpoint #4 — 12/30 stories, iter 52/120, making progress`
+- `[dataview-full-app] INTERVENED — killed hung claude.exe PID 45440 after 30-min stall`
+
+Without the prefix, four pilots produce four indistinguishable status reports and the user has to reconstruct who said what.
+
+### 10.4 Shared-state hygiene
+
+- `~/.claude/memory/` and `~/.claude/scheduled_tasks.json` are **shared across pilot sessions**. Don't write effort-specific ephemera to memory — use your task directory. Memory is for durable cross-effort facts (user preferences, project-wide conventions), not for "Ralph is currently on iteration 47."
+- Before modifying shared files, consider whether another pilot's session depends on the current state.
+- `~/.claude/settings.json` is read-only from a pilot's perspective — don't touch.
+- Before creating or deleting a cron job, run `CronList` to see the full picture across pilots.
+
+### 10.5 Git coordination
+
+- **Worktree-branched work is isolated** — no coordination needed. Each pilot's ralph.sh commits into its own worktree on its own `ralph/<effort>` branch. This is the whole point of the worktree-per-PRD isolation rule in §Phase 2.
+- **Commits to `main` are race points.** Two places this happens:
+  - PRD creation (initial `feat: PRD for X` commit to main before creating the worktree).
+  - Merge-back after Ralph completes (`git merge ralph/<effort>`).
+- Before pushing to main: `git pull --ff-only origin main`, rebase if needed. If the pull is not fast-forward, another pilot committed to main since you checked — inspect their commit before proceeding.
+- **Merge-back should happen one pilot at a time**, coordinated through the user. Never merge another pilot's branch. Never auto-merge in a multi-pilot setup even if your PRD says `autoMerge: true`.
+
+### 10.6 Coordination registry (recommended for 2+ pilots)
+
+For sessions running multiple pilots, maintain a shared registry at `tasks/.active-pilots.md` (in the repo root under tasks/). Each pilot writes its row on launch and removes it on clean exit.
+
+Template:
+
+```markdown
+# Active Ralph Pilots
+
+Pilots currently operating on this repo. Remove your row on clean exit.
+Stale rows (>24h with no matching ralph.sh process) can be pruned.
+
+| Effort | Worktree | Branch | Ralph bash-task ID | Cron slot | Started |
+|---|---|---|---|---|---|
+| mail-chatter-opt-out | C:\...\mail-chatter-enhanced-opt-out | ralph/mail-chatter-enhanced-opt-out | b5mr299df | D | 2026-04-14 09:55 |
+| dataview-full-app | D:\dataview-full-app | ralph/dataview-full-app | b7xy2quv | A | 2026-04-14 10:12 |
+```
+
+On startup, every pilot:
+1. Reads this file (create it if missing).
+2. Picks an unused cron slot (A/B/C/D).
+3. Appends its row.
+4. Commits and pushes the update before starting work.
+
+On clean exit (Ralph completed, user dismissed the pilot):
+1. Removes its row.
+2. Commits and pushes.
+
+The registry itself is shared state, but it's a thin coordination file — low contention, human-readable, diff-friendly on conflict. Much better than every pilot guessing about the others.
+
+### 10.7 When you inherit a pilot mid-run
+
+If you wake up to a running Ralph loop that you didn't launch (context compaction, session handoff, or the user switching pilots to you):
+
+1. Read `tasks/.active-pilots.md` to see who else is running.
+2. Identify YOUR ralph.sh (by task dir command-line match, per §10.1), not by assumption.
+3. Run the checkpoint diagnostic BEFORE any intervention. Don't assume you know what state things are in.
+4. If the registry has no row for your effort but there IS a running ralph.sh, add the row. Someone launched the pilot without registering it.
+5. If the registry has a row but there's NO matching ralph.sh process, the prior pilot crashed — clean up the row after confirming with the user.
