@@ -269,6 +269,12 @@ echo ""
 echo "  $DESCRIPTION"
 echo ""
 
+# Track consecutive Anthropic API 5xx failures so we can back off instead of
+# spinning through the iteration budget at max speed during an upstream outage.
+# A failed iteration takes 10-30s; without backoff a 10-min outage burns 20+ iters.
+# With escalating backoff (30→60→120→300s capped) the same outage costs ~3-5 iters.
+CONSECUTIVE_API_ERRORS=0
+
 for i in $(seq 1 $MAX_ITERATIONS); do
   # Check and rotate progress file if needed
   rotate_progress_if_needed
@@ -385,6 +391,26 @@ $(cat "$PROMPT_FILE")
   fi
 
   echo ""
+
+  # Detect Anthropic API 5xx errors. The CLI emits these as `API Error: 5XX {...}`
+  # on stderr (which we redirect into OUTPUT_FILE above). When we hit one, the
+  # iteration finishes in ~10-30s having done zero useful work — without backoff
+  # the loop spins through the entire iteration budget at max speed during an
+  # upstream outage. Apply escalating backoff. Reset on any non-erroring iteration.
+  if echo "$OUTPUT" | grep -qE '^API Error: 5[0-9][0-9]'; then
+    CONSECUTIVE_API_ERRORS=$((CONSECUTIVE_API_ERRORS + 1))
+    case $CONSECUTIVE_API_ERRORS in
+      1) BACKOFF=30 ;;
+      2) BACKOFF=60 ;;
+      3) BACKOFF=120 ;;
+      *) BACKOFF=300 ;;
+    esac
+    echo "⚠ Anthropic API returned 5xx (consecutive failure #$CONSECUTIVE_API_ERRORS). Backing off ${BACKOFF}s before next iteration..."
+    sleep "$BACKOFF"
+  else
+    CONSECUTIVE_API_ERRORS=0
+  fi
+
   echo "Iteration $i complete. Continuing in 2 seconds..."
   sleep 2
 done

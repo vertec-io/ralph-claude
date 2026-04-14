@@ -227,6 +227,52 @@ When you discover something worth keeping, route it:
 
 Never let a finding die in prose. Every discovery that would save a future session time deserves a durable home. The tracker is cheap to update and expensive to recreate.
 
+### Pilot-managed dev servers (when Ralph needs runtime verification)
+
+If a PRD has acceptance criteria that require a running app — "verify the page renders with real data," "the endpoint returns 200," "the modal opens on click," "Playwright spec passes" — Ralph needs a way to verify those at runtime. The wrong pattern is letting Ralph spin up its own dev servers per iteration: `cargo run`, `bun run dev`, `npm start`, `pnpm dev`, etc. all spawn long-running foreground processes that never exit, the iteration hangs forever waiting on the subprocess, and the pilot has to kill them. We have learned this the hard way; if you skip this protocol, expect to repeat it.
+
+**The right pattern: pilot owns server lifecycle, agent owns verification via Playwright MCP.**
+
+When you take over a Ralph run that has UI/runtime verification stories ahead, set up the dev servers from your pilot side BEFORE Ralph hits those stories. The agent then drives the running servers via the `mcp__playwright__*` tool family (which is already loaded as a child process of every claude.exe — every Ralph iteration can use it without setup).
+
+**Setup steps (do this once at the start of any session that will hit runtime-verification stories):**
+
+1. **Identify the project's dev servers and their URLs.** Read the project's CLAUDE.md / AGENTS.md / README for the canonical local-dev runbook. For a typical Rust-backend + JS-frontend project this is usually two servers (e.g., `cargo run` for the API, `bun run dev`/`pnpm dev` for the UI) plus a database.
+
+2. **Check what's already running.** Use PowerShell `Get-NetTCPConnection -LocalPort {port} -State Listen` to see if anything's listening on the expected ports. Don't double-launch — orphaned dev servers from a previous session may still be alive and attached to the right working tree.
+
+3. **Start the backend under a watch wrapper, not as plain `cargo run`.** For Rust use `cargo watch -x run` (requires `cargo-watch` crate, install with `cargo install cargo-watch` if missing — usually pre-installed on dev machines). The watch wrapper rebuilds and restarts the binary automatically when source files change, so the agent's edits to `src/{backend}/src/**` go live without manual pilot intervention. **Do not start plain `cargo run`** — it builds once and the binary is frozen until you manually rebuild, which means Ralph's edits never get exercised at runtime and you'll be lying to the agent about what the server is running.
+
+4. **Start the frontend dev server normally** — modern bundlers (Vite, Next.js, Bun's dev server) all have HMR built in. The frontend's edits go live within ~1 second of save. No watch wrapper needed.
+
+5. **Launch both servers via `Bash` with `run_in_background: true`** so they're parented to your Claude Code process, not to ralph.sh and not to a terminal you might close. They will live for the rest of your pilot session. Capture each background task ID — you'll need them if you want to restart later.
+
+6. **Verify each server is up.** Tail the background task output until you see the "listening on" line. For HTTP servers, `curl -sf http://127.0.0.1:{port}/health` (or whatever the health endpoint is) is a good final check.
+
+7. **Update the project's `tasks/{prd}/PILOT_NOTES.md`** (or equivalent agent-facing instructions file) with:
+   - The exact URLs the agent should use
+   - The credentials of any seeded test users (so the agent can log in via Playwright MCP without creating new accounts)
+   - An EXPLICIT BAN on the agent starting its own dev servers (with the exact commands forbidden — `cargo run`, `bun run dev`, etc.)
+   - A note that backend Rust changes auto-reload via `cargo watch` and frontend changes auto-reload via HMR, so the agent does not need to restart anything itself
+   - A note that if either server stops responding, the agent should document the failure in `progress.txt` and the pilot will restart it at the next check-in
+   - A pointer to the Playwright MCP tools (`mcp__playwright__browser_navigate`, `_snapshot`, `_console_messages`, `_network_requests`, etc.) as the verification mechanism
+
+8. **Add the dev servers to your monitoring sweep.** During each 20-minute checkpoint, check that the pilot-managed servers are still listening on their ports. If a backend crash or panic killed `cargo watch`'s child binary, restart it. If the frontend dev server segfaulted (rare but possible), restart it. The agent depends on these being available — silent server crashes look identical to "agent isn't doing anything" from the commit log perspective.
+
+**Anti-patterns to refuse:**
+
+- ❌ Letting the agent run `cargo run` / `bun run dev` per iteration — blocks forever, the pilot has to kill, agent retries next iteration, infinite waste
+- ❌ Telling the agent "defer browser verification to manual pilot review" when Playwright MCP is right there — this is the overcorrection from getting burned by the previous anti-pattern; we have the tools, use them
+- ❌ Starting plain `cargo run` from the pilot side (no watch wrapper) — agent's Rust edits never go live, agent thinks code works, real binary is from an hour ago
+- ❌ Starting servers in a terminal window and walking away — when the terminal closes (or your session ends, or Windows restarts the host), the servers die silently and Ralph is testing against nothing
+- ❌ Sharing dev servers across multiple Ralph runs / multiple worktrees — they get confused about which code is being tested
+
+**When NOT to set up pilot-managed servers:**
+
+- The PRD has zero browser/runtime verification stories — pure backend code with `cargo test` coverage doesn't need a live server (the test framework spins up its own ephemeral binaries)
+- The project has no Playwright MCP available — falls back to "verify via integration tests, defer manual UI checks"
+- The PRD's stories are all on a remote system (e.g., a VM, an embedded device, a CI runner) — the pilot can't run those locally; either set them up on the remote and document the remote URLs, or accept the deferral
+
 ---
 
 ## 3. The invisible-moves interview (for transitioning to new team members)
