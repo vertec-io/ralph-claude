@@ -1,0 +1,14 @@
+[Unit]
+Description=ralph-monitor — local PRD monitoring server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@INSTALL_DIR@
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin:%h/.bun/bin
+ExecStart=@BUN_BIN@ run @INSTALL_DIR@/server/index.ts
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

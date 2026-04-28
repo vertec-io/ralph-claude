@@ -1,0 +1,18 @@
+[Unit]
+Description=Ralph-Pilot-Native watchdog timer (@UNIT_NAME@)
+
+[Timer]
+# First tick 5 minutes after enabling, then every 25 minutes thereafter.
+# The 20-min staleness threshold (in run-watchdog.sh) is intentionally
+# tighter than this 25-min tick interval so a healthy orchestrator that
+# touches .heartbeat at every commit / Agent call is never falsely
+# resurrected, while a dead session is detected within ~45 min worst-case
+# (one tick interval plus the staleness threshold).
+OnActiveSec=5min
+OnUnitActiveSec=25min
+Unit=@UNIT_NAME@.service
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

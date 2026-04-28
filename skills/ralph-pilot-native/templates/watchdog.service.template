@@ -1,0 +1,13 @@
+[Unit]
+Description=Ralph-Pilot-Native watchdog tick (@UNIT_NAME@)
+Documentation=https://github.com/anthropics/claude-code
+
+[Service]
+Type=oneshot
+WorkingDirectory=@WORKTREE_DIR@
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:%h/.local/bin:%h/.bun/bin:%h/.cargo/bin
+ExecStart=/bin/bash @WATCHDOG_SCRIPT@ @TASK_DIR@ @WORKTREE_DIR@ @SESSION_ID@
+TimeoutStartSec=10min
+# A single tick should never run longer than 10 minutes; if it does,
+# something is wrong (likely a hung claude --resume) and we kill it
+# rather than let overlapping ticks pile up.
