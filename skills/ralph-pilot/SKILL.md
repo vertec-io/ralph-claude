@@ -1,6 +1,6 @@
 ---
 name: ralph-pilot
-version: 1.1.0
+version: 1.3.0
 description: The operator role for the Ralph autonomous agent execution system. Co-authors PRDs with the user across multiple sessions, audits and refines scope before launch, sets up execution (single or multi-PRD), monitors running loops, intervenes on failures, preserves knowledge across sessions, and maintains the strategic/tracker/roadmap document set. This is the META-skill that orchestrates all other Ralph skills (/prd, /research-prd, /ralph-audit, /ralph-handoff, /ralph, /ralph-worktree, /ralph-runner). TRIGGER when the user is planning a non-trivial engineering effort that will be executed via Ralph, when monitoring a running Ralph loop, when intervening on a stuck or failing agent, when reviewing post-Ralph output, or when transitioning work across sessions. Trigger phrases include "help me plan this", "design this effort", "run this PRD", "monitor ralph", "check on ralph", "ralph status", "something broke in ralph", "resume this project", "what's next on this project", and any request that implies operating the Ralph execution system end-to-end.
 ---
 
@@ -43,6 +43,8 @@ Every non-trivial effort goes through these phases. You own orchestration across
 
 7. **Don't convert to prd.json until authoring is truly complete.** `/ralph` converts prd.md to the JSON format Ralph consumes. Once converted and launched, you can still edit prd.json but you're now racing against a running agent. Far better to finalize authoring first.
 
+8. **Assess the two optional mode flags before converting.** Before `/ralph` runs, decide whether this PRD should enable `modelHintMode` (delegation + parallelism on mechanical stories), `cavemanMode` (compressed progress files + terse headless chat output), both, or neither. See §11 for the full recommendation protocol. **Both default to `false` (classic Ralph behavior).** You must get explicit user confirmation before flipping either to `true` in prd.json. The `/ralph-modelhint` and `/ralph-caveman` skills can handle each toggle independently if the user wants to opt into just one.
+
 **Common pitfalls in Phase 1:**
 
 - **Rushing to execute.** The temptation to launch Ralph early is strong because watching Ralph run is exciting. Resist it. A PRD that saves you 3 more questions during authoring costs you 30 iterations of wasted execution later.
@@ -68,6 +70,13 @@ Every non-trivial effort goes through these phases. You own orchestration across
 4. **Set up the tracking context.** Before launch, make sure `docs/internal/outstanding-items.md` and any project-specific trackers are current. Check that handoff.md reflects the start state. The pilot's future self (in the next session) will read these to pick up where this session left off.
 
 5. **Confirm execution permissions with the user.** For efforts that touch public-visible resources (upstream PRs, production systems, external APIs), get explicit user confirmation before launching. "Can Ralph push to vertec-io branches autonomously?" is a real question worth asking if it hasn't been answered.
+
+6. **Surface both mode flags in the launch summary.** Before the user kicks off the loop, show them:
+   - `modelHintMode: true|false` — and if true, the modelHint distribution (e.g., "18 stories: 3 opus, 8 sonnet, 7 haiku")
+   - `cavemanMode: true|false` — and if true, whether caveman-compress was run on AGENTS.md/CLAUDE.md by `/ralph-worktree`, plus a note that chat output will be terse when the run is headless
+   - A one-line summary of what this combination means behaviorally (e.g., "delegation on, compression off: independent stories parallelize but all output stays in full prose")
+   
+   This is the last chance the user has to override either flag cheaply; after launch, flag changes mid-flight require stopping and restarting Ralph.
 
 ### Phase 3 — Monitoring (the longest phase; the partnership is at its most valuable here)
 
@@ -503,3 +512,144 @@ If you wake up to a running Ralph loop that you didn't launch (context compactio
 3. Run the checkpoint diagnostic BEFORE any intervention. Don't assume you know what state things are in.
 4. If the registry has no row for your effort but there IS a running ralph.sh, add the row. Someone launched the pilot without registering it.
 5. If the registry has a row but there's NO matching ralph.sh process, the prior pilot crashed — clean up the row after confirming with the user.
+
+---
+
+## 11. Optional mode flags — `modelHintMode` and `cavemanMode`
+
+Every Ralph PRD carries two **independent** boolean flags on prd.json: `modelHintMode` and `cavemanMode`. Both default to `false` (classic Ralph: full Opus, serial, prose). They are orthogonal — flip either, both, or neither. You own the recommendation. The human owns the decision. **Default to both `false` unless the user confirms otherwise in so many words.**
+
+The focused skills `/ralph-modelhint` and `/ralph-caveman` each handle one flag's toggle + confirmation flow. You can invoke them when the user asks for just one, or run the combined flow below when both are on the table.
+
+### 11.1 What each flag does (recap)
+
+**`modelHintMode: true`** — delegation + parallelism
+- Stories with `modelHint: "sonnet"` or `"haiku"` run as Agent sub-tasks on those models; Opus reviews the returned patch, re-runs validation, commits.
+- Independent unblocked stories may run in parallel (cap 3 concurrent sub-agents).
+- Safety carve-outs: decision gates, `canSpawnStories: true`, and US-999 always stay on Opus regardless of `modelHint`.
+
+**`cavemanMode: true`** — compression + terse output
+- `ralph.sh` compresses rotated `progress-N.txt` files via `caveman-compress` (silent no-op if CLI not installed).
+- `/ralph-worktree` compresses AGENTS.md/CLAUDE.md at worktree setup.
+- Headless runs (not attached to ralph-tui) get terse caveman-style chat output.
+- Always-prose carve-outs: commits, `decisions/*.md`, AGENTS.md additions during a run, Codebase Patterns section of progress.txt.
+
+### 11.2 Per-flag scoring worksheets
+
+Assess each flag **independently**. A PRD can be a good fit for one and a bad fit for the other.
+
+**modelHintMode worksheet:**
+
+| Signal | Score toward on | Score toward off |
+|---|---|---|
+| PRD has 15+ stories | +1 | |
+| PRD has 30+ stories | +2 | |
+| ≥60% of stories look mechanical (CRUD, view XML, callsite migrations, test scaffolds, straight-from-spec UI) | +2 | |
+| ≥50% of stories need novel design decisions | | +2 |
+| PRD type is `investigation` or `research` | | +2 |
+| >3 decision gates | | +1 |
+| Unfamiliar codebase (first PRD here) | | +1 |
+| User flagged cost/wall-clock as a constraint | +1 | |
+| Stories span multiple subsystems requiring broad context | | +1 |
+
+Recommend `modelHintMode: true` when "on" total ≥ 3 AND higher than "off" total. Otherwise recommend off.
+
+**cavemanMode worksheet:**
+
+| Signal | Score toward on | Score toward off |
+|---|---|---|
+| Run will be headless (ralph-runner, background, nohup — no ralph-tui) | +2 | |
+| PRD is large enough that progress.txt will rotate (~300+ lines of iteration logs expected) | +2 | |
+| Worktree has substantial AGENTS.md / CLAUDE.md files (>200 lines total) | +1 | |
+| `caveman` CLI is installed on PATH | +1 | |
+| User flagged token cost as a constraint | +1 | |
+| PRD has >3 decision gates (monitoring gets harder with terse logs) | | +1 |
+| New workflow where pristine iteration logs help debugging | | +2 |
+| Run will be attached to ralph-tui with a human watching live | | +1 |
+
+Recommend `cavemanMode: true` when "on" total ≥ 3 AND higher than "off" total. Otherwise recommend off.
+
+These are heuristics, not algorithms. If the numbers say yes but your gut says no, go with the gut and note why.
+
+### 11.3 The confirmation ask — three common shapes
+
+**Shape A — both recommended on (the old "efficiency" equivalent):**
+
+```
+This PRD has {N} stories, {M} mechanical. Two optional mode flags look like 
+wins here. Want me to enable both?
+
+modelHintMode: true  → delegate mechanical stories to Haiku/Sonnet; Opus 
+  reviews each patch and commits. Independent stories parallelize. Decision 
+  gates, discovery, US-999 stay on Opus.
+cavemanMode: true    → compress rotated progress files and AGENTS.md once at 
+  setup (requires caveman CLI: {installed|not installed}). Terse chat output 
+  when running headless. Commits, decision files, and Codebase Patterns stay 
+  in full prose.
+
+Tradeoffs: delegation has quality variance (misjudged stories need rework on 
+Opus). Caveman output makes live monitoring of decision gates harder.
+
+Reply "both", "modelhint only", "caveman only", or "neither" (the default).
+```
+
+**Shape B — only one flag recommended:**
+
+Use the `/ralph-modelhint` or `/ralph-caveman` skill directly — each handles its own one-flag confirmation flow.
+
+**Shape C — default (both off):**
+
+Don't ask at all. Just include a single line in the launch summary: `"Mode flags: both off (classic Ralph — Opus, serial, prose)."` No need to surface options the user didn't ask for.
+
+**Never** flip either flag without explicit confirmation in the conversation. "I think modelHintMode is probably fine" is not confirmation. "Yes, enable it" is.
+
+### 11.4 Setting the flags
+
+After confirmation, each flag goes into prd.json at the top level:
+
+```json
+{
+  "schemaVersion": "2.4",
+  ...
+  "modelHintMode": true,
+  "cavemanMode": true,
+  ...
+}
+```
+
+If `modelHintMode: true`, also populate `modelHint` on stories using the heuristics in `/ralph`'s §Optional Mode Flags section. Stories where you're unsure get `opus` (the safe default). Decision gates, discovery stories with `canSpawnStories: true`, and the final validation story (US-999) are always `opus` regardless of surface shape — prompt.md's safety carve-outs will refuse to delegate these anyway, but setting the hint correctly keeps the PRD self-documenting.
+
+If `cavemanMode: true` and the worktree already exists, offer to run the one-time caveman pass on AGENTS.md/CLAUDE.md now rather than waiting for the next `/ralph-worktree` run.
+
+### 11.5 Mid-flight observability
+
+During Phase 3 monitoring, the checkpoint diagnostic sweep gains flag-specific questions:
+
+**If `modelHintMode: true`:** "Is delegation actually working?"
+- Ralph pulling stories back to Opus repeatedly ("sub-agent hedged", "validation failed after applying patch") → modelHint classification was wrong; you paid the delegation overhead without the savings.
+- Parallel sub-agents producing conflicting patches on the same files → the independence assumption was wrong; stories shared more files than their ACs suggested.
+- Downgrade protocol: flip `modelHintMode: false` in prd.json. The `modelHint` fields remain on stories but are now inert — no need to strip them. Restart ralph.sh. Document in progress.txt.
+
+**If `cavemanMode: true`:** "Is compression actually working?"
+- Caveman-style output leaking into commit messages or decision files → prompt.md's output-style carve-outs were misunderstood; flip `cavemanMode: false` or escalate the issue upstream.
+- Progress file compression appears broken → check that `caveman` is still installed on PATH; silent failures are possible if the environment changed mid-run.
+- Downgrade protocol: flip `cavemanMode: false`. The compressed `*.original.md` backups exist; restore them if readability has actually regressed. Restart ralph.sh.
+
+**Flags are independent at downgrade time too.** You don't have to turn both off together — if `cavemanMode` is causing trouble but `modelHintMode` is working fine, downgrade only the broken flag.
+
+### 11.6 Post-execution review
+
+In Phase 4, if the run used either flag, record a brief retrospective in the handoff:
+
+**modelHintMode:**
+- How many stories were delegated vs pulled back to Opus?
+- Did commit quality on delegated stories match Opus-only commit quality?
+- Did parallel sub-agents produce any rework?
+- Was the token savings worth the added complexity?
+
+**cavemanMode:**
+- Did the terse output hurt monitoring? Did it help speed?
+- How much did compression shrink progress.txt and AGENTS.md in practice?
+- Did anything leak compression that should have stayed verbose?
+
+Log findings to project memory so the next recommendation is better informed. If either flag produced bad results on this codebase, that's durable knowledge — save a project memory and reference it in future recommendations for this repo.

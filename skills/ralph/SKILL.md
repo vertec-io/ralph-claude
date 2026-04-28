@@ -1,7 +1,7 @@
 ---
 name: ralph
 description: "Convert PRDs to prd.json format for the Ralph autonomous agent system. Use when you have an existing PRD and need to convert it to Ralph's JSON format. Triggers on: convert this prd, turn this into ralph format, create prd.json from this, ralph json, start ralph."
-version: "2.4"
+version: "2.6"
 ---
 
 # Ralph PRD Converter
@@ -43,19 +43,21 @@ tasks/
 
 ## Output Format
 
-Generated files use **schemaVersion 2.2** with support for phases, story spawning, and decision gates.
+Generated files use **schemaVersion 2.4** with support for phases, story spawning, decision gates, and optional mode flags.
 
 ### Basic Structure (Feature/Bug)
 
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "2.4",
   "project": "[Project Name]",
   "taskDir": "tasks/[effort-name]",
   "branchName": "ralph/[effort-name]",
   "mergeTarget": "main|{branch-name}|null",
   "autoMerge": false,
   "pauseBetweenStories": false,
+  "modelHintMode": false,
+  "cavemanMode": false,
   "type": "feature|bug-investigation|investigation",
   "description": "[Description from PRD title/intro]",
   "userStories": [
@@ -68,6 +70,7 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
         { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 1,
+      "modelHint": "opus",
       "passes": false,
       "notes": ""
     }
@@ -79,7 +82,7 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
 
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "2.4",
   "project": "[Project Name]",
   "taskDir": "tasks/[effort-name]",
   "branchName": "ralph/[effort-name]",
@@ -178,13 +181,13 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
 
 ---
 
-## Schema v2.1 Fields
+## Schema v2.4 Fields
 
 ### PRD-Level Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `schemaVersion` | string | Yes | Always "2.2" for new files |
+| `schemaVersion` | string | Yes | Always "2.4" for new files |
 | `project` | string | Yes | Project name |
 | `taskDir` | string | Yes | Path to task subdirectory |
 | `branchName` | string | Yes | Git branch name (ralph/effort-name) |
@@ -193,6 +196,8 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
 | `type` | string | Yes | "feature", "bug-investigation", or "investigation" |
 | `description` | string | Yes | PRD description |
 | `pauseBetweenStories` | boolean | No | Pause for user input between stories (default: false) |
+| `modelHintMode` | boolean | No | Default false. When true, stories with `modelHint` are delegated to Agent sub-tasks on cheaper models; independent unblocked stories may run in parallel. See §Optional Mode Flags. |
+| `cavemanMode` | boolean | No | Default false. When true, Ralph compresses progress files, uses caveman-style terse chat output when running headless, and `/ralph-worktree` compresses AGENTS.md/CLAUDE.md once at setup. See §Optional Mode Flags. |
 | `phases` | array | No | Phase definitions (investigation only) |
 | `userStories` | array | Yes | Array of story objects |
 
@@ -218,6 +223,7 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
 | `priority` | number | Yes | Execution order (lower = first) |
 | `passes` | boolean | Yes | Story completion status |
 | `notes` | string | Yes | Scratchpad for context |
+| `modelHint` | string | No | "opus" (default), "sonnet", or "haiku". Only honored when `modelHintMode: true`. See §Optional Mode Flags. |
 | `phase` | number | No | Which phase (investigation only) |
 | `type` | string | No | "decision-gate" for decisions |
 | `canSpawnStories` | boolean | No | Can create child stories |
@@ -246,6 +252,71 @@ Generated files use **schemaVersion 2.2** with support for phases, story spawnin
 | `confidenceLevel` | string | "HIGH", "MEDIUM", "LOW" |
 | `userSelection` | string | User's chosen option |
 | `userNotes` | string | Additional user context |
+
+---
+
+## Optional Mode Flags
+
+Ralph supports two **independent** mode flags on prd.json: `modelHintMode` and `cavemanMode`. Both default to `false`. They are orthogonal — you can enable either, both, or neither.
+
+The default is always **both off** (i.e., the classic Ralph behavior: full Opus, serial, prose). Flip them only when `/ralph-pilot` has recommended the change AND the user has explicitly confirmed it, or when the user directly invoked `/ralph-modelhint` or `/ralph-caveman`.
+
+### `modelHintMode: true` — delegation + parallelism
+
+What it changes:
+- `modelHint` on stories is **honored**: stories tagged `"sonnet"` or `"haiku"` are delegated to Agent sub-tasks on those models; Opus reviews the returned patch, re-runs the validation gate, and commits.
+- Independent unblocked stories may run as **parallel** Agent sub-tasks (main thread serializes the apply+commit step; cap is 3 concurrent sub-agents).
+- Safety carve-outs: decision-gate stories, `canSpawnStories: true` discovery stories, and the final validation story (US-999) always run on Opus regardless of their `modelHint`.
+
+Best for: large PRDs (~15+ stories) where ≥50% of work is mechanical (CRUD, view XML from a spec, test scaffolds, callsite migrations). Cost savings come from Haiku/Sonnet delegation; wall-clock savings come from parallelism.
+
+Avoid when: >50% of stories need Opus anyway (delegation overhead defeats the savings), PRD is research/investigation-heavy, or you don't yet know the codebase well enough to classify stories.
+
+### `cavemanMode: true` — compression + terse output
+
+What it changes:
+- `ralph.sh` runs `caveman` on rotated `progress-N.txt` files so future iterations that read them consume fewer input tokens.
+- `/ralph-worktree` runs a one-time `caveman` pass on AGENTS.md and CLAUDE.md files in the worktree at setup (these load every session, so compression here is high-leverage).
+- When the run is **headless** (not attached to ralph-tui), `ralph.sh` sets `RALPH_HEADLESS=1` and prompt.md adopts caveman-style terse chat output.
+- **Always in full prose regardless of this flag:** commit messages, decision-gate files (`decisions/*.md`), AGENTS.md additions during a run, and the Codebase Patterns section of progress.txt. Compression on these degrades readability for humans (commits) or for future Ralph iterations (patterns) and is never worth it.
+
+Best for: long-running PRDs where input-token cost compounds (progress.txt grows large, AGENTS.md is substantial), or any PRD where output readability matters less than speed/cost.
+
+Avoid when: PRD is decision-gate-heavy (compressed decision docs are harder for humans to review — though the carve-out protects decisions/*.md itself, surrounding context gets compressed), or you want every iteration's chat log to stay pristine for debugging a new workflow.
+
+### Combinations
+
+| `modelHintMode` | `cavemanMode` | Result |
+|---|---|---|
+| false | false | **Default.** Classic Ralph: Opus, serial, prose. |
+| true | false | Delegation + parallelism, full-prose output. |
+| false | true | Opus serial everywhere, but compressed context and terse headless output. |
+| true | true | Maximum efficiency. Previously called "efficiency mode." |
+
+### Who sets the flags
+
+The PRD author sets both flags when generating prd.json. `/ralph-pilot` §11 (or the focused skills `/ralph-modelhint` and `/ralph-caveman`) will have already gotten explicit user confirmation. **Do not flip either to `true` unilaterally** — default to `false` if no pilot or user confirmation is on record.
+
+### `modelHint` guidance
+
+Populate `modelHint` on stories only when `modelHintMode: true`. If the PRD (or pilot) did not specify per-story model hints, use these heuristics. Default to `"opus"` if unsure.
+
+| Story shape | modelHint |
+|---|---|
+| Architecture / design / data-model stories | `opus` |
+| Decision-gate stories | `opus` |
+| Discovery/research stories | `opus` |
+| Final validation stories (US-999) | `opus` |
+| Add a column + migration | `haiku` |
+| Write view XML / form layout from a spec | `haiku` |
+| Add a filter dropdown to an existing list | `haiku` |
+| Write tests for an already-designed helper | `haiku` |
+| Mechanical callsite migration (rename X→Y across N files) | `haiku` |
+| New UI component with non-trivial state | `sonnet` |
+| Server action with non-trivial business logic | `sonnet` |
+| Refactor that touches multiple modules | `sonnet` |
+
+When in doubt, prefer `opus`. A wrongly-hinted mechanical story costs a tiny bit of Opus; a wrongly-hinted design story costs a bad commit.
 
 ---
 
@@ -347,7 +418,7 @@ For discovery stories:
 
 ### Basic Rules (All PRDs)
 
-1. **schemaVersion**: Always set to "2.2"
+1. **schemaVersion**: Always set to "2.4"
 2. **Each user story becomes one JSON entry**
 3. **IDs**: Sequential (US-001, US-002) or hierarchical (US-010, US-010-A, US-010-B)
 4. **Priority**: Based on dependency order, then document order
@@ -393,7 +464,7 @@ Add ability to mark tasks with different statuses.
 **Output:** `tasks/task-status/prd.json`
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "2.4",
   "project": "TaskApp",
   "taskDir": "tasks/task-status",
   "branchName": "ralph/task-status",
@@ -476,7 +547,7 @@ Type: Decision Gate
 **Output:** `tasks/thermal-camera/prd.json`
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "2.4",
   "project": "ThermalControl",
   "taskDir": "tasks/thermal-camera",
   "branchName": "ralph/thermal-camera",
@@ -633,7 +704,7 @@ When converting a Research PRD (created by `/research-prd`), use these additiona
 
 ```json
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "2.4",
   "type": "research",
   "researchConfig": {
     "outputDir": "research/{layer}/",
@@ -690,7 +761,8 @@ The user invokes it as:
 
 Before writing prd.json, verify:
 
-- [ ] `schemaVersion` is set to "2.2"
+- [ ] `schemaVersion` is set to "2.4"
+- [ ] `modelHintMode` and `cavemanMode` are both `false` unless /ralph-pilot, /ralph-modelhint, or /ralph-caveman has explicitly confirmed the change with the user
 - [ ] prd.json is saved in the same directory as prd.md
 - [ ] `taskDir` field matches the directory path
 - [ ] `mergeTarget` field is set (branch name or `null`)

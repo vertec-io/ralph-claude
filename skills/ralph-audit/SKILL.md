@@ -1,7 +1,7 @@
 ---
 name: ralph-audit
 description: "Audit a PRD (or any plan document) with parallel disjoint-angle audit agents before running Ralph. Catches blockers, mega-stories, broken codebase assumptions, and design flaws while they're still cheap to fix. Use when a PRD has been drafted but not yet converted to prd.json. Triggers on: audit this prd, ralph audit, audit before ralph, pressure-test the prd, audit the plan."
-version: "1.0"
+version: "1.2"
 ---
 
 # Ralph Audit
@@ -314,9 +314,101 @@ critical audit). Cite file paths.
 
 ---
 
-## Step 4: Launch the Five Audits in Parallel
+### Angle 6 (CONDITIONAL): Mode-Flag Sanity Check
 
-**Critical:** launch all 5 `Agent` calls in a **single message**. This is the only way to get true parallelism — sequential messages run sequentially.
+**Run this angle if and only if** the PRD (or the pilot's plan for it) proposes `modelHintMode: true` OR `cavemanMode: true`, OR any stories carry `modelHint` fields. Skip for PRDs that leave both flags at their `false` default.
+
+**Purpose:** catch mismatches between the proposed mode flags and the actual shape of the PRD. The two flags are independent and evaluated independently — a PRD can be a good fit for one but wrong for the other. Also catches misclassified `modelHint` assignments that would drive Ralph to delegate work that actually needs Opus.
+
+**Template prompt:**
+
+```
+Audit whether a PRD's proposed mode flags (modelHintMode, cavemanMode) and
+per-story modelHint assignments match the actual shape of the work.
+
+**PRD path:** {ABSOLUTE_PATH_TO_PRD}
+**Proposed modelHintMode:** {true|false}
+**Proposed cavemanMode:** {true|false}
+
+**Context:** Ralph has two independent mode flags:
+- modelHintMode: when true, stories tagged modelHint: sonnet/haiku run as
+  Agent sub-tasks on cheaper models; Opus reviews + commits each patch.
+  Independent stories may parallelize. Decision gates, canSpawnStories:
+  true, and US-999 always stay on Opus regardless.
+- cavemanMode: when true, ralph.sh compresses rotated progress files,
+  /ralph-worktree compresses AGENTS.md/CLAUDE.md once at setup, and chat
+  output goes terse when running headless. Commits, decisions/*.md,
+  AGENTS.md additions during the run, and the Codebase Patterns section
+  of progress.txt always stay in full prose.
+
+Both default to false (classic Ralph).
+
+**Your job — four checks, each evaluating one concern:**
+
+1. **modelHintMode fit check.** If proposed true, classify each story as:
+   - MECHANICAL: CRUD, migration + column, view XML from a spec, test
+     scaffolding for an already-designed helper, callsite rename across N files
+   - THINKING: new abstraction, data-model design, non-trivial business logic,
+     architecture, refactor touching multiple concerns
+   - DECISION/RESEARCH: type: decision-gate, canSpawnStories: true,
+     discovery stories, US-999 final validation
+
+   Compute percentages. Judge:
+   - ≥50% MECHANICAL → modelHintMode fit OK
+   - 30-49% MECHANICAL → MARGINAL, note that savings may be modest
+   - <30% MECHANICAL or >3 DECISION/RESEARCH → WRONG FLAG, recommend flipping
+     modelHintMode to false
+
+   If proposed false but ≥70% MECHANICAL and >20 stories → QUESTION, consider
+   flipping modelHintMode to true. Otherwise the false choice is fine.
+
+2. **modelHint assignment check.** (Only runs if modelHintMode is true.) For
+   each story with a modelHint:
+   - `opus` on MECHANICAL work → WASTED OPPORTUNITY (minor cost leakage, not
+     a blocker)
+   - `sonnet`/`haiku` on THINKING work → RISK, will produce bad patches
+   - `sonnet`/`haiku` on DECISION/RESEARCH → BLOCKER, prompt.md will refuse
+     to delegate these anyway, so the hint is wrong and misleading
+   - Missing hints on a modelHintMode: true PRD → QUESTION, stories without
+     one default to opus (which defeats the point of enabling the flag)
+
+3. **modelHintMode safety carve-outs.** Verify that these stories, if present,
+   have `modelHint: "opus"` (or no hint):
+   - Any story with `type: "decision-gate"`
+   - Any story with `canSpawnStories: true`
+   - The final validation story (highest priority number, usually US-999)
+
+4. **cavemanMode fit check.** If proposed true, consider:
+   - Will this run be headless (ralph-runner, background) or attached to
+     ralph-tui? Headless → full benefit from terse output. ralph-tui attached
+     → terse output suppressed anyway, so compression is the only savings.
+   - Does the PRD have >3 decision gates? If so, flag that terse iteration
+     logs can make mid-run monitoring of decisions harder (the decision
+     files themselves stay in prose via carve-out, but surrounding context
+     gets compressed).
+   - Is the PRD small (<10 stories) and unlikely to rotate progress.txt?
+     Compression benefit may be marginal.
+
+   If proposed false but the PRD is 30+ stories and will run headless →
+   QUESTION, consider cavemanMode true. Otherwise false is fine.
+
+**Deliverable:** punch list with these categories:
+- [MODEL-HINT-MODE-WRONG] — modelHintMode setting doesn't fit PRD shape
+- [CAVEMAN-MODE-WRONG] — cavemanMode setting doesn't fit PRD shape
+- [HINT-WRONG] — modelHint classification that will cause bad delegation
+- [HINT-MISSING] — modelHintMode true but stories lack hints (defaults to
+  opus, costs the whole point of enabling the flag)
+- [HINT-WASTED] — opus hint on mechanical work (minor cost leakage)
+- [SAFETY] — decision gate / discovery / validation story with non-opus hint
+
+Report each flag's verdict separately. Cite story IDs. Under 500 words.
+```
+
+---
+
+## Step 4: Launch the Audits in Parallel
+
+**Critical:** launch all audit `Agent` calls in a **single message**. This is the only way to get true parallelism — sequential messages run sequentially.
 
 ```
 <launch in one message>
@@ -325,6 +417,8 @@ Agent(subagent_type: "general-purpose", description: "Audit story sizing and ACs
 Agent(subagent_type: "general-purpose", description: "Audit architectural design", prompt: "<angle 3 prompt>")
 Agent(subagent_type: "general-purpose", description: "Audit sequencing and dependencies", prompt: "<angle 4 prompt>")
 Agent(subagent_type: "general-purpose", description: "Audit <topic-specific>", prompt: "<angle 5 prompt>")
+# Only if PRD proposes modelHintMode: true OR cavemanMode: true OR has modelHints:
+Agent(subagent_type: "general-purpose", description: "Audit mode-flag fit", prompt: "<angle 6 prompt>")
 </launch in one message>
 ```
 
@@ -439,8 +533,9 @@ Before returning the consolidated report:
 - [ ] Identified the topic-specific risk and picked the 5th angle accordingly
 - [ ] Populated Angle 1's claim list with concrete items from the PRD
 - [ ] Customized Angle 5's prompt with specific files / patterns / questions
-- [ ] Launched all 5 audits in a **single message** (5 Agent calls in one tool-use block)
-- [ ] Waited for all 5 to return
+- [ ] Launched all audits in a **single message** (5 or 6 Agent calls in one tool-use block)
+- [ ] If the PRD proposes modelHintMode: true OR cavemanMode: true OR carries modelHint fields, included Angle 6
+- [ ] Waited for all audits to return
 - [ ] De-duplicated findings across auditors
 - [ ] Assigned severity tags per the rules
 - [ ] Produced a consolidated report with CRITICAL / HIGH / SEQUENCING / MEDIUM sections

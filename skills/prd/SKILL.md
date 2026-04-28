@@ -1,7 +1,7 @@
 ---
 name: prd
 description: "Generate a structured requirements document for features OR bug investigations. Use when planning a feature, troubleshooting a bug, or any multi-step effort. Triggers on: create a prd, write prd for, plan this feature, investigate this bug, troubleshoot, debug."
-version: "1.4"
+version: "1.5"
 ---
 
 # PRD Generator
@@ -246,6 +246,7 @@ Each story should be small enough to implement in one focused session (one Ralph
 ```markdown
 ### US-001: [Title]
 **Description:** As a [user], I want [feature] so that [benefit].
+**Model Hint:** opus|sonnet|haiku  *(optional — see below)*
 
 **Acceptance Criteria:**
 - [ ] Specific verifiable criterion
@@ -253,6 +254,21 @@ Each story should be small enough to implement in one focused session (one Ralph
 - [ ] Typecheck/lint passes
 - [ ] **[UI stories only]** Using Playwright MCP, verify: [specific observable behavior]
 ```
+
+**Model Hint (optional):**
+
+When the PRD will run with `modelHintMode: true` (see the /ralph skill, or the `/ralph-modelhint` skill), each story can carry a `modelHint` that tells Ralph which model tier to delegate the implementation to. When `modelHintMode` is false (the default), the hint is ignored, so it's safe to add it proactively.
+
+Rough guide — when in doubt, leave the hint off and let Ralph default to Opus:
+
+| Story shape | modelHint |
+|---|---|
+| Architecture / design / data-model work | `opus` (default) |
+| Decision gates, discovery, research, final validation | `opus` (default) |
+| Add a column + migration, write view XML from a spec, write tests for an already-designed helper, mechanical callsite renames | `haiku` |
+| New UI component with non-trivial state, server action with non-trivial business logic, multi-module refactor | `sonnet` |
+
+Only add hints if the PRD is likely to run with `modelHintMode: true`. Adding them otherwise is harmless but clutters the doc.
 
 **Important:**
 - Acceptance criteria must be verifiable, not vague. "Works correctly" is bad. "Button shows confirmation dialog before deleting" is good.

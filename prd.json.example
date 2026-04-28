@@ -1,11 +1,13 @@
 {
-  "schemaVersion": "2.2",
+  "schemaVersion": "2.4",
   "project": "MyApp",
   "taskDir": "tasks/task-priority",
   "branchName": "ralph/task-priority",
   "mergeTarget": "main",
   "autoMerge": false,
   "pauseBetweenStories": false,
+  "modelHintMode": false,
+  "cavemanMode": false,
   "type": "feature",
   "description": "Task Priority System - Add priority levels to tasks",
   "userStories": [
@@ -19,6 +21,7 @@
         { "description": "Typecheck passes", "passes": false }
       ],
       "priority": 1,
+      "modelHint": "haiku",
       "passes": false,
       "notes": ""
     },

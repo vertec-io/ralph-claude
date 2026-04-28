@@ -1,7 +1,7 @@
 ---
 name: ralph-worktree
 description: "Create an isolated git worktree for a Ralph PRD so it can run without conflicting with other work. Use after /prd and /ralph have created the task directory and prd.json. Triggers on: start ralph, create worktree for ralph, ralph worktree, launch ralph, kick off ralph."
-version: "1.0"
+version: "1.2"
 ---
 
 # Ralph Worktree Launcher
@@ -85,6 +85,40 @@ done
 **Per-project .env locations:** Check `CLAUDE.md` or `AGENTS.md` files in the repo for project-specific `.env` locations. If the project has a `.env.example`, use it as a reference for required variables.
 
 **Why this matters:** Without the `.env`, apps can't reach databases, APIs, or services. The UI will show "unreachable" errors with no obvious cause. This has caused debugging confusion multiple times.
+
+### Step 4.6 — Caveman compression pass (conditional)
+
+Read the PRD's `cavemanMode` field (default `false`). **If and only if it is `true`**, do a one-time caveman-compress pass on long-lived context files in the worktree so every Ralph iteration loads fewer input tokens.
+
+(This step is independent of `modelHintMode` — the two flags are orthogonal. See `/ralph-caveman` and `/ralph-modelhint` for the toggle skills.)
+
+Check whether `caveman` is on PATH (it's installed by `npx skills add JuliusBrussee/caveman/caveman-compress` or the plugin, or it lives at `d:/caveman/caveman-compress/scripts/cli.py`):
+
+```bash
+command -v caveman >/dev/null 2>&1 || echo "caveman-compress not installed; skipping"
+```
+
+If available, compress the files that Ralph reads on every iteration:
+
+```bash
+# AGENTS.md files get loaded on every session start
+find ../{effort-name} -name 'AGENTS.md' -not -path '*/node_modules/*' -not -path '*/.git/*' -print0 | \
+  xargs -0 -I {} caveman "{}" >/dev/null
+
+# CLAUDE.md at the worktree root, if present
+[ -f ../{effort-name}/CLAUDE.md ] && caveman ../{effort-name}/CLAUDE.md >/dev/null
+```
+
+Caveman-compress writes the compressed version in place and saves `*.original.md` as a human-readable backup. It passes code blocks, file paths, commands, and headings through untouched — only prose gets compressed.
+
+**Do NOT compress:**
+- The PRD itself (`prd.md`, `prd.json`) — the pilot may still be reading it.
+- Decision files (`decisions/*.md`) — they must stay legible for user review.
+- `progress.txt` on first setup — it's nearly empty and ralph.sh will compress rotated history files itself during the run.
+
+Report the count of compressed files and the total tokens saved (caveman prints this).
+
+**If `cavemanMode: false`, skip this step entirely.** Compression without the accompanying runtime support (compressed progress rotation, terse headless output) reduces readability for no reliable savings.
 
 ### Step 5 — Report to user
 

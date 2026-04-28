@@ -247,6 +247,14 @@ EOF
 
     echo "Created summary. Previous progress saved to progress-$n.txt"
     echo ""
+
+    # cavemanMode PRDs: compress the rotated progress file so any future
+    # iteration that reads it (for cross-reference) consumes fewer input tokens.
+    # Requires caveman-compress on PATH. Silent no-op if unavailable.
+    if [ "$CAVEMAN_MODE" = "true" ] && command -v caveman >/dev/null 2>&1; then
+      caveman "$TASK_DIR/progress-$n.txt" >/dev/null 2>&1 && \
+        echo "Compressed progress-$n.txt with caveman-compress" || true
+    fi
   fi
 }
 
@@ -255,6 +263,18 @@ DESCRIPTION=$(jq -r '.description // "No description"' "$PRD_FILE" 2>/dev/null |
 BRANCH_NAME=$(jq -r '.branchName // "unknown"' "$PRD_FILE" 2>/dev/null || echo "unknown")
 TOTAL_STORIES=$(jq '.userStories | length' "$PRD_FILE" 2>/dev/null || echo "?")
 COMPLETED_STORIES=$(jq '[.userStories[] | select(.passes == true)] | length' "$PRD_FILE" 2>/dev/null || echo "?")
+# Read the two independent mode flags (both default false / classic Ralph).
+MODEL_HINT_MODE=$(jq -r '.modelHintMode // false' "$PRD_FILE" 2>/dev/null || echo "false")
+CAVEMAN_MODE=$(jq -r '.cavemanMode // false' "$PRD_FILE" 2>/dev/null || echo "false")
+
+# cavemanMode + not-attached-to-ralph-tui → terse chat output in prompt.md.
+# ralph-tui (interactive) sets RALPH_TUI=1 when launching this script; in that
+# case we keep prose output because a human is watching the stream live.
+if [ "$CAVEMAN_MODE" = "true" ] && [ "${RALPH_TUI:-0}" != "1" ]; then
+  export RALPH_HEADLESS=1
+else
+  export RALPH_HEADLESS=0
+fi
 
 echo ""
 echo "╔═══════════════════════════════════════════════════════════════╗"
@@ -265,6 +285,8 @@ echo "  Task:       $TASK_DIR"
 echo "  Branch:     $BRANCH_NAME"
 echo "  Progress:   $COMPLETED_STORIES / $TOTAL_STORIES stories complete"
 echo "  Max iters:  $MAX_ITERATIONS"
+echo "  modelHint:  $MODEL_HINT_MODE"
+echo "  caveman:    $CAVEMAN_MODE$([ "$RALPH_HEADLESS" = "1" ] && echo " (headless → terse output)")"
 echo ""
 echo "  $DESCRIPTION"
 echo ""
@@ -293,6 +315,9 @@ for i in $(seq 1 $MAX_ITERATIONS); do
 Task Directory: $TASK_DIR
 PRD File: $TASK_DIR/prd.json
 Progress File: $TASK_DIR/progress.txt
+modelHintMode: $MODEL_HINT_MODE
+cavemanMode: $CAVEMAN_MODE
+RALPH_HEADLESS: ${RALPH_HEADLESS:-0}
 
 $(cat "$PROMPT_FILE")
 "
