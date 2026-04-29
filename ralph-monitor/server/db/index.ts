@@ -8,9 +8,13 @@
 // per-connection, so this matters even though we only open once).
 //
 // Migrations run lazily on first getDb() call.
+//
+// Per-table CRUD lives in ./projects.ts, ./efforts.ts, ./sessions.ts. We
+// re-export the row types and the helpers that callers reach for most often
+// so `import { ... } from './db'` keeps working as a one-stop entry point.
 
 import { Database } from 'bun:sqlite'
-import { mkdirSync, realpathSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { runMigrations } from './migrate'
@@ -44,58 +48,59 @@ export function closeDb(): void {
   }
 }
 
-// Normalize a project root_dir: realpath it (resolves symlinks, canonicalizes
-// case where the FS preserves it) and strip any trailing slash. Case is NOT
-// lowercased — preserving the on-disk case keeps macOS HFS+ / case-insensitive
-// FSes correct, and Linux is case-sensitive so the realpath result is already
-// canonical.
-export function normalizeRootDir(rootDir: string): string {
-  // realpathSync.native is the libc-backed realpath() — faster than the JS
-  // fallback and matches platform behavior exactly.
-  const real = realpathSync.native(rootDir)
-  // Strip trailing slash unless this would make the path empty (root /).
-  if (real.length > 1 && real.endsWith('/')) return real.slice(0, -1)
-  return real
-}
+// Re-exports from the per-table modules so consumers can import everything
+// they need from `./db`. The modules themselves remain the source of truth —
+// nothing here re-implements behavior.
+export {
+  createProject,
+  getProjectById,
+  getProjectByRootDir,
+  listProjects,
+  updateProject,
+  archiveProject,
+  unarchiveProject,
+  hardDeleteProject,
+  normalizeRootDir,
+} from './projects'
+export type {
+  Project,
+  CreateProjectInput,
+  CreateProjectResult,
+  ListProjectsFilter,
+  UpdateProjectPatch,
+} from './projects'
 
-export interface CreateProjectInput {
-  id?: string
-  name: string
-  root_dir: string
-}
+export {
+  createEffort,
+  getEffortById,
+  listEffortsByProject,
+  updateEffort,
+  archiveEffort,
+  unarchiveEffort,
+  hardDeleteEffort,
+  EffortPrdPathRequiredError,
+} from './efforts'
+export type {
+  Effort,
+  EffortKind,
+  EffortStatus,
+  CreateEffortInput,
+  ListEffortsFilter,
+  UpdateEffortPatch,
+} from './efforts'
 
-export interface CreateProjectResult {
-  projectId: string
-  effortId: string
-  rootDir: string
-}
-
-// Insert a project + auto-generated 'general' effort in a single transaction.
-// AC10 invariant: every project has at least one effort at insertion time so
-// session creation has a valid parent immediately. US-002 will move this into
-// db/projects.ts; for US-001 we expose it here so the schema invariant has a
-// callable surface.
-export function createProjectWithGeneralEffort(
-  db: Database,
-  input: CreateProjectInput,
-): CreateProjectResult {
-  const projectId = input.id ?? crypto.randomUUID()
-  const effortId = crypto.randomUUID()
-  const rootDir = normalizeRootDir(input.root_dir)
-  const now = Date.now()
-
-  const insertProject = db.prepare(
-    'INSERT INTO projects (id, name, root_dir, created_at) VALUES (?, ?, ?, ?)',
-  )
-  const insertEffort = db.prepare(
-    `INSERT INTO efforts (id, project_id, name, kind, status, created_at)
-     VALUES (?, ?, 'General', 'general', 'active', ?)`,
-  )
-
-  db.transaction(() => {
-    insertProject.run(projectId, input.name, rootDir, now)
-    insertEffort.run(effortId, projectId, now)
-  })()
-
-  return { projectId, effortId, rootDir }
-}
+export {
+  createSession,
+  getSessionById,
+  listSessionsByEffort,
+  updateSession,
+  hardDeleteSession,
+  SessionIdCollisionError,
+  OneLiveSessionPerEffortError,
+} from './sessions'
+export type {
+  Session,
+  SessionMode,
+  CreateSessionInput,
+  UpdateSessionPatch,
+} from './sessions'
