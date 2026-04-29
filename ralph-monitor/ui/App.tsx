@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
 import { useServerStream } from './sse'
+import { authFetch } from './auth'
 import type { PRDRecord, UserStory, AppEvent, CommitRow, ClaudeProcess, AgentTask } from '../server/types'
 
 marked.setOptions({ gfm: true, breaks: false })
@@ -799,7 +800,7 @@ function FileModal({ path, onClose }: { path: string; onClose: () => void }) {
     let cancelled = false
     setLoading(true)
     setError(null)
-    fetch(`/api/file?path=${encodeURIComponent(path)}`)
+    authFetch(`/api/file?path=${encodeURIComponent(path)}`)
       .then(async r => {
         if (!r.ok) throw new Error((await r.json()).error ?? 'load failed')
         return r.json() as Promise<{ content: string; mtime: number }>
@@ -822,7 +823,7 @@ function FileModal({ path, onClose }: { path: string; onClose: () => void }) {
   useEffect(() => {
     const id = setInterval(async () => {
       try {
-        const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`)
+        const r = await authFetch(`/api/file?path=${encodeURIComponent(path)}`)
         if (!r.ok) return
         const data = await r.json() as { mtime: number; content: string }
         setExternalMtime(data.mtime)
@@ -842,7 +843,7 @@ function FileModal({ path, onClose }: { path: string; onClose: () => void }) {
     setSaving(true)
     setSaveError(null)
     try {
-      const r = await fetch('/api/file', {
+      const r = await authFetch('/api/file', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path, content, expectedMtime: mtime ?? undefined }),
@@ -865,7 +866,7 @@ function FileModal({ path, onClose }: { path: string; onClose: () => void }) {
   const reload = async () => {
     setLoading(true)
     try {
-      const r = await fetch(`/api/file?path=${encodeURIComponent(path)}`)
+      const r = await authFetch(`/api/file?path=${encodeURIComponent(path)}`)
       const data = await r.json() as { content: string; mtime: number }
       setContent(data.content)
       setOriginalContent(data.content)

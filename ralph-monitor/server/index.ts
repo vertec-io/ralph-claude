@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { streamSSE } from 'hono/streaming'
-import { readFile, writeFile, stat } from 'node:fs/promises'
-import { resolve, isAbsolute } from 'node:path'
+import { readFile, writeFile, stat, mkdir, rename } from 'node:fs/promises'
+import { resolve, isAbsolute, dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 import { store } from './store'
 import { startWatchers } from './watchers'
 import { agents } from './agents'
@@ -11,16 +12,76 @@ import { projectsRouter } from './routes/projects'
 import { effortsRouter } from './routes/efforts'
 import { sessionsRouter } from './routes/sessions'
 import { buildLifecycleSnapshot } from './routes/lifecycle'
+import { bearerMiddleware, getOrCreateToken } from './auth'
 import type { AppEvent } from './types'
+
+// US-004: refuse to bind to anything except 127.0.0.1. ralph-monitor's
+// security model assumes loopback-only — exposing the API on a routable
+// interface would let any host on the LAN reach the same endpoints with
+// nothing but the bearer token (which lives in a 0o600 file in the user's
+// HOME). We surface the refusal in two places: stderr (so the launching shell
+// sees it) and ~/.config/ralph-monitor/last-error.txt (so a service launcher
+// like systemd can show the same message after the process exits).
+//
+// MUST run before any DB/server bring-up so a misconfigured launch fails
+// before touching any state.
+const RALPH_MONITOR_BIND = process.env.RALPH_MONITOR_BIND ?? '127.0.0.1'
+if (RALPH_MONITOR_BIND !== '127.0.0.1') {
+  const msg =
+    'ralph-monitor refuses to bind to non-loopback address. ' +
+    'Set RALPH_MONITOR_BIND=127.0.0.1 or unset it. Network exposure is not supported in v1.'
+  const errPath = join(homedir(), '.config', 'ralph-monitor', 'last-error.txt')
+  try {
+    await mkdir(dirname(errPath), { recursive: true, mode: 0o700 })
+    const tmp = errPath + '.tmp'
+    await writeFile(tmp, msg + '\n', { encoding: 'utf8' })
+    await rename(tmp, errPath)
+  } catch {
+    // Even if we can't write the file, stderr + non-zero exit still happens.
+  }
+  console.error(msg)
+  process.exit(1)
+}
 
 // Initialize sqlite + apply migrations on startup. Lazy inside getDb(), but we
 // invoke once eagerly so any schema problem fails loudly at boot rather than
 // at the first request that touches the DB.
 getDb()
 
+// Materialize the auth token early. Generates and writes to disk on first
+// boot; subsequent boots reuse the existing file. Doing this eagerly means
+// the dev-token endpoint has nothing async to do at request time.
+getOrCreateToken()
+
 const app = new Hono()
 
 app.use('/*', cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
+
+// Dev-token endpoint MUST be registered before bearerMiddleware mounts on
+// /api/* — the whole point is that the UI can fetch the token without
+// already having one. The endpoint additionally guards itself: it only
+// returns the token when the request's Host header is loopback, so even if
+// some future change accidentally exposes the API to a routable interface
+// the token still doesn't leak.
+app.get('/api/dev-token', (c) => {
+  const host = c.req.header('host') ?? ''
+  // Match 127.0.0.1[:port] or localhost[:port]. We're deliberately strict —
+  // 0.0.0.0, ::1, and other loopback aliases are not accepted because we
+  // refuse to bind to them in the first place.
+  const isLoopback = /^(127\.0\.0\.1|localhost)(:\d+)?$/.test(host)
+  if (!isLoopback) return c.json({ error: 'not_found' }, 404)
+  return c.json({ token: getOrCreateToken() })
+})
+
+// Bearer auth on all API and event-stream routes. Static assets (the
+// vite-built UI) and the /event hook receiver are NOT under /api/* and so
+// stay unauthenticated by virtue of path scoping. The /event hook is invoked
+// by Claude Code hooks running on the same machine — we trust the loopback
+// boundary there too.
+const auth = bearerMiddleware()
+app.use('/api/*', auth)
+app.use('/events', auth)
+app.use('/events/*', auth)
 
 // Project hierarchy REST endpoints (US-003).
 app.route('/', projectsRouter)
@@ -263,6 +324,10 @@ console.log(`UI dev: bun run dev:ui (then open http://localhost:5173)`)
 
 export default {
   port,
+  // Hard-coded loopback. The startup guard above already refuses to run if
+  // RALPH_MONITOR_BIND was set to anything else, so we don't even read the
+  // env var here — what comes in via that var is only allowed to be the
+  // value we'd hard-code anyway.
   hostname: '127.0.0.1',
   fetch: app.fetch,
   idleTimeout: 0,  // SSE connections are long-lived
