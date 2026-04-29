@@ -24,6 +24,7 @@
 
 import { realpathSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
+import path from 'node:path'
 
 export interface Worktree {
   path: string         // absolute path as reported by git (NOT realpath'd)
@@ -149,6 +150,39 @@ export function isPathInProjectOrWorktree(
   for (const wt of listWorktrees(projN)) {
     const wtN = realpathOrNull(wt.path)
     if (wtN && wtN === pickedN) return true
+  }
+  return false
+}
+
+// Returns true if `pickedPath` is INSIDE (or equal to) `projectRootDir` itself
+// or one of its git worktrees. Unlike `isPathInProjectOrWorktree` (which
+// checks for exact root/worktree-root match), this uses a prefix check so that
+// file paths nested anywhere under those roots are accepted.
+//
+// Used by US-015c (POST /api/projects/:id/efforts) to validate prd_path.
+//
+// Handles two cases:
+//   1. The path exists on disk: realpath both sides (handles symlinks).
+//   2. The path does NOT yet exist (e.g. prd.json not written yet): fall back
+//      to path.resolve(pickedPath) for a lexical prefix check. This allows
+//      creating a prd effort whose prd.json will be created later by the agent.
+//      If the path isn't absolute after resolve, return false.
+export function isPathInsideProjectOrWorktree(
+  projectRootDir: string,
+  pickedPath: string,
+): boolean {
+  const sep = path.sep
+  const projN = realpathOrNull(projectRootDir)
+  if (!projN) return false
+
+  // Attempt realpath of the picked path (works if it exists on disk).
+  const pickedN = realpathOrNull(pickedPath) ?? path.resolve(pickedPath)
+
+  if (pickedN === projN || pickedN.startsWith(projN + sep)) return true
+  for (const wt of listWorktrees(projN)) {
+    const wtN = realpathOrNull(wt.path)
+    if (!wtN) continue
+    if (pickedN === wtN || pickedN.startsWith(wtN + sep)) return true
   }
   return false
 }

@@ -29,6 +29,7 @@ import {
 import { store } from '../store'
 import { getSnapshotForPath } from '../snapshot'
 import { watchEffortPrd, unwatchEffortPrd, rewatchEffortPrd } from '../effortWatchers'
+import { isPathInsideProjectOrWorktree } from '../git/worktrees'
 
 export const effortsRouter = new Hono()
 
@@ -93,6 +94,19 @@ effortsRouter.post('/api/projects/:id/efforts', async (c) => {
       : body.working_dir === null
         ? null
         : undefined
+
+  // Validate prd_path is inside project root or a known worktree.
+  // Non-empty prd_path (for kind='prd') must resolve to a path that starts
+  // with project.root_dir or one of its git worktrees — guards against
+  // path-traversal-style issues and keeps efforts anchored to their project.
+  if (kind === 'prd' && typeof prd_path === 'string' && prd_path.trim().length > 0) {
+    if (!isPathInsideProjectOrWorktree(project.root_dir, prd_path)) {
+      return c.json(
+        { error: 'prd_path_outside_project_or_worktree', details: { prd_path } },
+        422,
+      )
+    }
+  }
 
   let effort: Effort
   try {

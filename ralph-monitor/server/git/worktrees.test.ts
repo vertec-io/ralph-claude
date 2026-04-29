@@ -24,6 +24,7 @@ import { join } from 'node:path'
 import {
   parseWorktreeList,
   isPathInProjectOrWorktree,
+  isPathInsideProjectOrWorktree,
   clearWorktreeCacheForTests,
 } from './worktrees'
 
@@ -184,5 +185,71 @@ describe('isPathInProjectOrWorktree (non-git dir)', () => {
     expect(
       isPathInProjectOrWorktree(proj, '/tmp/does-not-exist-rmrm-worktrees-test/abc'),
     ).toBe(false)
+  })
+})
+
+describe('isPathInsideProjectOrWorktree (non-git dir)', () => {
+  // Unlike isPathInProjectOrWorktree (exact match), this helper accepts any
+  // path nested under the project root or a worktree root.
+
+  test('exact project root matches', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    expect(isPathInsideProjectOrWorktree(proj, proj)).toBe(true)
+  })
+
+  test('subdir of project root matches', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    const sub = join(proj, 'subdir')
+    mkdirSync(sub)
+    expect(isPathInsideProjectOrWorktree(proj, sub)).toBe(true)
+  })
+
+  test('deeply nested path inside project root matches', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    const nested = join(proj, 'a', 'b', 'c')
+    mkdirSync(nested, { recursive: true })
+    expect(isPathInsideProjectOrWorktree(proj, nested)).toBe(true)
+  })
+
+  test('different tmp dir does NOT match', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    const other = tmp()
+    expect(isPathInsideProjectOrWorktree(proj, other)).toBe(false)
+  })
+
+  test('non-existent path OUTSIDE project returns false', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    // Completely different path — not under proj at all.
+    expect(
+      isPathInsideProjectOrWorktree(proj, '/tmp/does-not-exist-rmrm-worktrees-test-inside/prd.json'),
+    ).toBe(false)
+  })
+
+  test('non-existent path with prefix matching project root returns true (future prd.json)', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    // path.resolve produces the lexical path even if the file doesn't exist yet.
+    const futurePrd = join(proj, 'tasks', 'future-story', 'prd.json')
+    // The file doesn't exist — but its prefix is proj.
+    expect(isPathInsideProjectOrWorktree(proj, futurePrd)).toBe(true)
+  })
+
+  test('symlink to file inside project matches', () => {
+    clearWorktreeCacheForTests()
+    const proj = tmp()
+    const sub = join(proj, 'tasks')
+    mkdirSync(sub)
+    // Create a real file inside the project to symlink to.
+    const realFile = join(sub, 'prd.json')
+    require('node:fs').writeFileSync(realFile, '{}')
+    const linkParent = tmp()
+    const link = join(linkParent, 'prd-link.json')
+    symlinkSync(realFile, link)
+    expect(isPathInsideProjectOrWorktree(proj, link)).toBe(true)
   })
 })

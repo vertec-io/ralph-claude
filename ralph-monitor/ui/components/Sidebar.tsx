@@ -36,6 +36,7 @@ import { authFetch } from '../auth'
 import { ContextMenu, useContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { NewProjectDialog } from './NewProjectDialog'
+import { NewEffortDialog } from './NewEffortDialog'
 
 export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
 
@@ -722,6 +723,13 @@ export function Sidebar({
 
   const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
 
+  // New Effort dialog state — stores { projectId, rootDir } when open, null when closed.
+  const [newEffortTarget, setNewEffortTarget] = useState<{
+    projectId: string
+    rootDir: string
+    initialPickedPath?: string
+  } | null>(null)
+
   // Per-project expansion state (shared across sections via a single set)
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   const toggleProject = (id: string) => {
@@ -802,6 +810,12 @@ export function Sidebar({
   const handleProjectContextMenu = (project: Project, e: React.MouseEvent) => {
     e.preventDefault()
     const items: MenuItem[] = [
+      {
+        label: 'New Effort',
+        onClick: () => {
+          setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir })
+        },
+      },
       {
         label: project.pinned ? 'Unpin' : 'Pin',
         onClick: async () => {
@@ -981,6 +995,21 @@ export function Sidebar({
               >
                 New Project
               </button>
+              {selectedProjectId && (() => {
+                const proj = projects.find((p) => p.id === selectedProjectId)
+                return proj ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlusMenuOpen(false)
+                      setNewEffortTarget({ projectId: proj.id, rootDir: proj.root_dir })
+                    }}
+                    className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
+                  >
+                    New Effort
+                  </button>
+                ) : null
+              })()}
             </div>
           )}
         </div>
@@ -1047,13 +1076,37 @@ export function Sidebar({
           setShowNewProjectDialog(false)
           onRefresh?.()
         }}
-        onAddAsEffort={() => {
-          // US-015c will add the full effort-create flow; for now just close.
+        onAddAsEffort={(projectId, pickedPath) => {
+          // Open the New Effort dialog for the matched project, pre-filling prd_path.
           setShowNewProjectDialog(false)
-          onRefresh?.()
+          const proj = projects.find((p) => p.id === projectId)
+          if (proj) {
+            setNewEffortTarget({
+              projectId: proj.id,
+              rootDir: proj.root_dir,
+              initialPickedPath: pickedPath,
+            })
+          } else {
+            onRefresh?.()
+          }
         }}
         projects={projects.map((p) => ({ id: p.id, name: p.name }))}
       />
+
+      {/* New Effort dialog */}
+      {newEffortTarget && (
+        <NewEffortDialog
+          open={true}
+          projectId={newEffortTarget.projectId}
+          projectRootDir={newEffortTarget.rootDir}
+          initialPickedPath={newEffortTarget.initialPickedPath}
+          onClose={() => setNewEffortTarget(null)}
+          onCreated={() => {
+            setNewEffortTarget(null)
+            onRefresh?.()
+          }}
+        />
+      )}
     </aside>
   )
 }

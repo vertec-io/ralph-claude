@@ -318,6 +318,93 @@ describe('POST /api/projects/:id/efforts', () => {
       cap.stop()
     }
   })
+
+  // ---------------------------------------------------------------------------
+  // prd_path worktree-scope validation (US-015c)
+  // ---------------------------------------------------------------------------
+
+  test("kind='prd' with prd_path inside project root dir -> 201", async () => {
+    const dir = tmpProjectDir()
+    const r = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'PRDInside', root_dir: dir }),
+      }),
+    )
+    const proj = await r.json()
+
+    // Create a real file inside the project root.
+    const prdPath = join(dir, 'prd.json')
+    writeFileSync(prdPath, JSON.stringify({ title: 'test', userStories: [] }))
+
+    const res = await app.fetch(
+      new Request(`http://test/api/projects/${proj.id}/efforts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Inside PRD', kind: 'prd', prd_path: prdPath }),
+      }),
+    )
+    expect(res.status).toBe(201)
+    const effort = await res.json()
+    expect(effort.kind).toBe('prd')
+    expect(effort.prd_path).toBe(prdPath)
+  })
+
+  test("kind='prd' with prd_path outside project root -> 422 prd_path_outside_project_or_worktree", async () => {
+    const dir = tmpProjectDir()
+    const r = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'PRDOutside', root_dir: dir }),
+      }),
+    )
+    const proj = await r.json()
+
+    // Use a path in a completely different tmp dir.
+    const otherDir = tmpProjectDir()
+    const prdPath = join(otherDir, 'prd.json')
+    writeFileSync(prdPath, '{}')
+
+    const res = await app.fetch(
+      new Request(`http://test/api/projects/${proj.id}/efforts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Outside PRD', kind: 'prd', prd_path: prdPath }),
+      }),
+    )
+    expect(res.status).toBe(422)
+    const body = await res.json()
+    expect(body.error).toBe('prd_path_outside_project_or_worktree')
+  })
+
+  test("kind='prd' with non-existent prd_path inside project -> 201 (path.resolve fallback)", async () => {
+    const dir = tmpProjectDir()
+    const r = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'PRDNonExist', root_dir: dir }),
+      }),
+    )
+    const proj = await r.json()
+
+    // A prd.json that doesn't exist yet on disk but IS inside the project root.
+    // The server uses path.resolve fallback to accept it (agent will create it later).
+    const prdPath = join(dir, 'tasks', 'future-story', 'prd.json')
+
+    const res = await app.fetch(
+      new Request(`http://test/api/projects/${proj.id}/efforts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Future PRD', kind: 'prd', prd_path: prdPath }),
+      }),
+    )
+    expect(res.status).toBe(201)
+    const body = await res.json()
+    expect(body.prd_path).toBe(prdPath)
+  })
 })
 
 describe('DELETE /api/sessions/:id?purge_jsonl=true', () => {
@@ -982,10 +1069,11 @@ describe('GET /api/efforts/:id/snapshot', () => {
     expect(rp.status).toBe(201)
     const proj = await rp.json()
 
-    // prd.json lives inside its own subdir so path resolution is unambiguous.
-    const prdDir = mkdtempSync(join(tmpdir(), 'ralph-monitor-prd-'))
-    tempDirs.push(prdDir)
-    const prdPath = join(prdDir, 'prd.json')
+    // prd.json lives inside a subdir of the project root so it passes the
+    // prd_path_outside_project_or_worktree validation introduced in US-015c.
+    const prdSubDir = join(dir, 'tasks', 'snapshot-test')
+    mkdirSync(prdSubDir, { recursive: true })
+    const prdPath = join(prdSubDir, 'prd.json')
 
     if (opts.writePrd) {
       writeFileSync(
@@ -1067,10 +1155,11 @@ describe('effort prd watcher', () => {
     )
     const proj = await rp.json()
 
-    // Write an initial prd.json to a temp dir.
-    const prdDir = mkdtempSync(join(tmpdir(), 'ralph-monitor-watcher-'))
-    tempDirs.push(prdDir)
-    const prdPath = join(prdDir, 'prd.json')
+    // Write an initial prd.json inside the project root so it passes the
+    // prd_path_outside_project_or_worktree validation (US-015c).
+    const prdSubDir = join(dir, 'tasks', 'watcher-test')
+    mkdirSync(prdSubDir, { recursive: true })
+    const prdPath = join(prdSubDir, 'prd.json')
     writeFileSync(prdPath, JSON.stringify({ title: 'v1', userStories: [] }))
 
     const re = await app.fetch(
