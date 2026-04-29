@@ -13,12 +13,14 @@
 // Cascaded session deletes do not emit individual events.
 
 import { Hono } from 'hono'
+import { unlink } from 'node:fs/promises'
 import {
   getDb,
   getProjectById,
   createEffort,
   getEffortById,
   listEffortsByProject,
+  listSessionsByEffort,
   updateEffort,
   hardDeleteEffort,
   EffortPrdPathRequiredError,
@@ -256,18 +258,76 @@ effortsRouter.patch('/api/efforts/:id', async (c) => {
   return c.json(updated)
 })
 
-// DELETE /api/efforts/:id — no typed-name requirement.
-effortsRouter.delete('/api/efforts/:id', (c) => {
+// GET /api/efforts/:id/cascade-stats — returns { session_count }
+// Used by the delete-effort UI to show "This will delete N sessions."
+effortsRouter.get('/api/efforts/:id/cascade-stats', (c) => {
   const id = c.req.param('id')
   const db = getDb()
   const existing = getEffortById(db, id)
   if (!existing) {
     return c.json({ error: 'effort-not-found', details: { id } }, 404)
   }
+  const sessions = listSessionsByEffort(db, id)
+  return c.json({ session_count: sessions.length })
+})
+
+// DELETE /api/efforts/:id?purge_jsonls=true|false — no typed-name requirement.
+//
+// Live-session block: if the effort has any live sessions, returns 409
+// and performs no DB writes.
+//
+// purge_jsonls (default false): when true, after the DB delete, also
+// unlinks the on-disk JSONL files for all child sessions.
+effortsRouter.delete('/api/efforts/:id', async (c) => {
+  const id = c.req.param('id')
+  const purgeJsonls = c.req.query('purge_jsonls') === 'true'
+
+  const db = getDb()
+  const existing = getEffortById(db, id)
+  if (!existing) {
+    return c.json({ error: 'effort-not-found', details: { id } }, 404)
+  }
+
+  // Live-session block.
+  const liveIds = countLiveSessions(id)
+  if (liveIds.length > 0) {
+    return c.json(
+      {
+        error: 'effort_has_live_sessions',
+        details: { effort_id: id, live_session_ids: liveIds },
+      },
+      409,
+    )
+  }
+
+  // Collect JSONL paths BEFORE the cascade delete.
+  const jsonlPaths: string[] = []
+  if (purgeJsonls) {
+    const sessions = listSessionsByEffort(db, id)
+    for (const session of sessions) {
+      if (session.jsonl_path) jsonlPaths.push(session.jsonl_path)
+    }
+  }
+
   hardDeleteEffort(db, id)
   store.recordEvent({ type: 'effort.deleted', ts: Date.now(), id })
   // Stop watching the prd.json file for this effort (no-op if not a prd-kind).
   unwatchEffortPrd(id)
+
+  // Unlink JSONL files — best-effort (ENOENT is ignored).
+  if (purgeJsonls) {
+    for (const p of jsonlPaths) {
+      try {
+        await unlink(p)
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException)?.code
+        if (code !== 'ENOENT') {
+          console.warn(`[efforts] purge_jsonls unlink failed for ${p}:`, (err as Error)?.message)
+        }
+      }
+    }
+  }
+
   return c.body(null, 204)
 })
 

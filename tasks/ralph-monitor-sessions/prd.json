@@ -1391,23 +1391,23 @@
       "acceptanceCriteria": [
         {
           "description": "Delete project requires typed-name confirmation matching project.name exactly; UI dialog explicitly states cascade ('This will delete N efforts and M sessions. JSONL files are NOT deleted unless you also tick \"purge JSONLs\".')",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Delete effort requires single-button confirmation (no typed name); cascade warning shown; live-session block enforced",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Delete session offers a purge_jsonl checkbox (default unchecked); on confirm calls DELETE /api/sessions/:id?purge_jsonl=<bool>",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Endpoints reject deletes when a child row has a live session; UI surfaces the error",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Using Playwright MCP, attempt to delete a project without typing the name -> blocked; type the name -> succeeds; delete a session with purge_jsonl ticked -> JSONL is removed from disk",

@@ -38,6 +38,9 @@ import type { MenuItem } from './ContextMenu'
 import { NewProjectDialog } from './NewProjectDialog'
 import { NewEffortDialog } from './NewEffortDialog'
 import { NewSessionDialog } from './NewSessionDialog'
+import { ConfirmDeleteProjectDialog } from './ConfirmDeleteProjectDialog'
+import { ConfirmDeleteEffortDialog } from './ConfirmDeleteEffortDialog'
+import { ConfirmDeleteSessionDialog } from './ConfirmDeleteSessionDialog'
 
 export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
 
@@ -208,26 +211,12 @@ async function patchProject(id: string, patch: Record<string, unknown>): Promise
   })
 }
 
-async function deleteProject(id: string, confirmName: string): Promise<void> {
-  await authFetch(`/api/projects/${id}?confirm_name=${encodeURIComponent(confirmName)}`, {
-    method: 'DELETE',
-  })
-}
-
 async function patchEffort(id: string, patch: Record<string, unknown>): Promise<Response> {
   return authFetch(`/api/efforts/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
   })
-}
-
-async function deleteEffort(id: string): Promise<void> {
-  await authFetch(`/api/efforts/${id}`, { method: 'DELETE' })
-}
-
-async function deleteSession(id: string, purgeJsonl: boolean): Promise<void> {
-  await authFetch(`/api/sessions/${id}?purge_jsonl=${purgeJsonl}`, { method: 'DELETE' })
 }
 
 // Kill: US-016c will add the actual endpoint. For now we POST to
@@ -722,68 +711,6 @@ function Section({
 }
 
 // ---------------------------------------------------------------------------
-// DeleteSessionDialog
-// ---------------------------------------------------------------------------
-
-interface DeleteSessionDialogProps {
-  session: Session
-  onConfirm: (purgeJsonl: boolean) => void
-  onCancel: () => void
-}
-
-function DeleteSessionDialog({ session, onConfirm, onCancel }: DeleteSessionDialogProps) {
-  const [purge, setPurge] = useState(false)
-  const title = session.title ?? session.id.slice(0, 8)
-
-  // ESC cancels
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
-    window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
-  }, [onCancel])
-
-  return (
-    <div
-      className="fixed inset-0 z-[10000] bg-black/60 flex items-center justify-center p-6"
-      onClick={onCancel}
-    >
-      <div
-        className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-6 max-w-sm w-full"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 className="text-base font-semibold text-zinc-100 mb-2">Delete session?</h2>
-        <p className="text-sm text-zinc-400 mb-4">
-          Session <span className="font-mono text-zinc-200">{title}</span> will be permanently deleted.
-        </p>
-        <label className="flex items-center gap-2 mb-5 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={purge}
-            onChange={(e) => setPurge(e.target.checked)}
-            className="accent-rose-500"
-          />
-          <span className="text-sm text-zinc-300">Also delete JSONL transcript from disk</span>
-        </label>
-        <div className="flex justify-end gap-2">
-          <button
-            onClick={onCancel}
-            className="px-4 py-1.5 rounded text-sm text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 transition"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={() => onConfirm(purge)}
-            className="px-4 py-1.5 rounded text-sm bg-rose-700 text-white hover:bg-rose-600 transition"
-          >
-            Delete
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
 // Sidebar
 // ---------------------------------------------------------------------------
 
@@ -914,7 +841,9 @@ export function Sidebar({
 
   const menu = useContextMenu()
 
-  // Delete-session dialog state
+  // Delete dialog state for project / effort / session
+  const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null)
+  const [deleteEffortTarget, setDeleteEffortTarget] = useState<Effort | null>(null)
   const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null)
 
   // Inline rename state — stores the id of the project or effort being renamed
@@ -1002,24 +931,8 @@ export function Sidebar({
         label: 'Delete',
         destructive: true,
         separator: true,
-        onClick: async () => {
-          const ok = window.confirm(
-            `Delete project "${project.name}"?\n\nThis will also delete all efforts and sessions. Type the project name to confirm.`,
-          )
-          if (!ok) return
-          // Typed-name confirmation (full dialog deferred to US-017b; for now
-          // we use a second prompt to get the typed name).
-          const typed = window.prompt(`Type "${project.name}" to confirm deletion:`)
-          if (typed !== project.name) {
-            if (typed !== null) window.alert('Name did not match — deletion cancelled.')
-            return
-          }
-          try {
-            await deleteProject(project.id, project.name)
-            onRefresh?.()
-          } catch (err) {
-            window.alert(`Delete failed: ${(err as Error)?.message ?? err}`)
-          }
+        onClick: () => {
+          setDeleteProjectTarget(project)
         },
       },
     ]
@@ -1069,15 +982,8 @@ export function Sidebar({
         label: 'Delete',
         destructive: true,
         separator: true,
-        onClick: async () => {
-          const ok = window.confirm(`Delete effort "${effort.name}"?\n\nThis will also delete all sessions.`)
-          if (!ok) return
-          try {
-            await deleteEffort(effort.id)
-            onRefresh?.()
-          } catch (err) {
-            window.alert(`Delete failed: ${(err as Error)?.message ?? err}`)
-          }
+        onClick: () => {
+          setDeleteEffortTarget(effort)
         },
       },
     ]
@@ -1109,7 +1015,7 @@ export function Sidebar({
     }
 
     items.push({
-      label: 'Delete',
+      label: 'Delete…',
       destructive: true,
       separator: items.length > 0,
       onClick: () => {
@@ -1231,21 +1137,39 @@ export function Sidebar({
       {/* Context menu portal — renders at fixed position over everything */}
       <ContextMenu {...menu.state} onClose={menu.close} />
 
+      {/* Delete-project confirmation dialog */}
+      {deleteProjectTarget && (
+        <ConfirmDeleteProjectDialog
+          project={deleteProjectTarget}
+          onClose={() => setDeleteProjectTarget(null)}
+          onDeleted={() => {
+            setDeleteProjectTarget(null)
+            onRefresh?.()
+          }}
+        />
+      )}
+
+      {/* Delete-effort confirmation dialog */}
+      {deleteEffortTarget && (
+        <ConfirmDeleteEffortDialog
+          effort={deleteEffortTarget}
+          onClose={() => setDeleteEffortTarget(null)}
+          onDeleted={() => {
+            setDeleteEffortTarget(null)
+            onRefresh?.()
+          }}
+        />
+      )}
+
       {/* Delete-session confirmation dialog */}
       {deleteSessionTarget && (
-        <DeleteSessionDialog
+        <ConfirmDeleteSessionDialog
           session={deleteSessionTarget}
-          onConfirm={async (purge) => {
-            const target = deleteSessionTarget
+          onClose={() => setDeleteSessionTarget(null)}
+          onDeleted={() => {
             setDeleteSessionTarget(null)
-            try {
-              await deleteSession(target.id, purge)
-              onRefresh?.()
-            } catch (err) {
-              window.alert(`Delete failed: ${(err as Error)?.message ?? err}`)
-            }
+            onRefresh?.()
           }}
-          onCancel={() => setDeleteSessionTarget(null)}
         />
       )}
 

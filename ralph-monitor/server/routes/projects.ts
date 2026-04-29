@@ -15,6 +15,7 @@
 
 import { Hono } from 'hono'
 import { SQLiteError } from 'bun:sqlite'
+import { unlink } from 'node:fs/promises'
 import {
   getDb,
   createProject,
@@ -22,6 +23,7 @@ import {
   getProjectByRootDir,
   listProjects,
   listEffortsByProject,
+  listSessionsByEffort,
   updateProject,
   updateEffort,
   hardDeleteProject,
@@ -240,6 +242,23 @@ projectsRouter.patch('/api/projects/:id', async (c) => {
   return c.json(updated)
 })
 
+// GET /api/projects/:id/cascade-stats — returns { effort_count, session_count }
+// Used by the delete-project UI to show "This will delete N efforts and M sessions."
+projectsRouter.get('/api/projects/:id/cascade-stats', (c) => {
+  const id = c.req.param('id')
+  const db = getDb()
+  const existing = getProjectById(db, id)
+  if (!existing) {
+    return c.json({ error: 'project-not-found', details: { id } }, 404)
+  }
+  const allEfforts = listEffortsByProject(db, id)
+  let sessionCount = 0
+  for (const effort of allEfforts) {
+    sessionCount += listSessionsByEffort(db, effort.id).length
+  }
+  return c.json({ effort_count: allEfforts.length, session_count: sessionCount })
+})
+
 // GET /api/projects/check-worktree?path=<picked-path>
 //
 // Returns { matched: true, projectId, branch } if the given path resolves (via
@@ -262,14 +281,21 @@ projectsRouter.get('/api/projects/check-worktree', (c) => {
   return c.json(result)
 })
 
-// DELETE /api/projects/:id?confirm_name=<typed>
+// DELETE /api/projects/:id?confirm_name=<typed>&purge_jsonls=true|false
 //
 // Cascades through FKs to efforts + sessions. The cascaded child events are
 // NOT individually emitted — clients reconcile via the lifecycle snapshot or
 // by tree-walking after the project.deleted fires.
-projectsRouter.delete('/api/projects/:id', (c) => {
+//
+// Live-session block: if any child effort has a live session, returns 409
+// and performs no DB writes. Reuses the `_liveCheckOverride` test seam.
+//
+// purge_jsonls (default false): when true, after the DB cascade, also
+// unlinks the on-disk JSONL files for all sessions in all efforts.
+projectsRouter.delete('/api/projects/:id', async (c) => {
   const id = c.req.param('id')
   const confirmName = c.req.query('confirm_name')
+  const purgeJsonls = c.req.query('purge_jsonls') === 'true'
 
   const db = getDb()
   const existing = getProjectById(db, id)
@@ -287,9 +313,53 @@ projectsRouter.delete('/api/projects/:id', (c) => {
     )
   }
 
+  // Live-session block: check all efforts before any DB write.
+  const allEfforts = listEffortsByProject(db, id)
+  const offendingEfforts: Array<{ effort_id: string; live_session_ids: string[] }> = []
+  for (const effort of allEfforts) {
+    const liveIds = countLiveSessions(effort.id)
+    if (liveIds.length > 0) {
+      offendingEfforts.push({ effort_id: effort.id, live_session_ids: liveIds })
+    }
+  }
+  if (offendingEfforts.length > 0) {
+    return c.json(
+      {
+        error: 'project_has_live_sessions',
+        details: { offending_efforts: offendingEfforts },
+      },
+      409,
+    )
+  }
+
+  // Collect JSONL paths BEFORE the cascade delete (rows gone after).
+  const jsonlPaths: string[] = []
+  if (purgeJsonls) {
+    for (const effort of allEfforts) {
+      const sessions = listSessionsByEffort(db, effort.id)
+      for (const session of sessions) {
+        if (session.jsonl_path) jsonlPaths.push(session.jsonl_path)
+      }
+    }
+  }
+
   hardDeleteProject(db, id)
   evictWorktreeCacheForProject(existing.root_dir)
   store.recordEvent({ type: 'project.deleted', ts: Date.now(), id })
+
+  // Unlink JSONL files after the DB cascade — best-effort (ENOENT is ignored).
+  if (purgeJsonls) {
+    for (const p of jsonlPaths) {
+      try {
+        await unlink(p)
+      } catch (err: unknown) {
+        const code = (err as NodeJS.ErrnoException)?.code
+        if (code !== 'ENOENT') {
+          console.warn(`[projects] purge_jsonls unlink failed for ${p}:`, (err as Error)?.message)
+        }
+      }
+    }
+  }
 
   return c.body(null, 204)
 })
