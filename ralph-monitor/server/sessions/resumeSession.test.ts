@@ -249,7 +249,7 @@ describe('resumeSession — failure modes', () => {
     expect(rec.calls.length).toBe(0)
   })
 
-  test('JsonlMissingError when jsonl_path no longer exists on disk', async () => {
+  test('falls back to fresh spawn (--session-id) when jsonl_path missing on disk', async () => {
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), { name: 'P-jsonl-missing', root_dir: dir })
     const effort = createEffort(getDb(), {
@@ -266,16 +266,17 @@ describe('resumeSession — failure modes', () => {
     })
 
     const rec = recordingSpawner()
-    let err: unknown = null
-    try {
-      await resumeSession({ session_id: sessionId }, { spawner: rec.spawner })
-    } catch (e) {
-      err = e
-    }
-    expect(err).toBeInstanceOf(JsonlMissingError)
-    expect(rec.calls.length).toBe(0)
+    await resumeSession({ session_id: sessionId }, { spawner: rec.spawner })
 
-    // Row preserved (no hard-delete on this failure).
+    // Spawner WAS invoked, with --session-id (fresh spawn argv) instead of
+    // --resume. Same uuid is passed so the session row continues to map.
+    expect(rec.calls.length).toBe(1)
+    const argv = rec.calls[0]!.args
+    expect(argv).toContain('--session-id')
+    expect(argv).toContain(sessionId)
+    expect(argv).not.toContain('--resume')
+
+    // Row preserved (still mapped to the same id).
     expect(getSessionById(getDb(), sessionId)).not.toBeNull()
   })
 

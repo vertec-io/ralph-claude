@@ -65,26 +65,39 @@ export function buildSelectionUrl(s: Selection): string {
  * `setSelection` updates window.location.hash via pushState so the user can
  * press Back to undo navigation.
  */
+// Read a Selection from the current location, accepting either the
+// canonical hash form (#/p/.../e/.../s/...) or a pathname form
+// (/p/.../e/.../s/...) for back-compat with URLs that were written before
+// the router was hash-corrected.
+function readCurrentSelection(): Selection {
+  const hash = window.location.hash
+  if (hash && hash !== '#' && hash !== '#/') return parseSelection(hash)
+  // Fall back to pathname so deep links pasted directly work.
+  const path = window.location.pathname
+  if (path.startsWith('/p/')) return parseSelection('#' + path)
+  return { projectId: null, effortId: null, sessionId: null }
+}
+
 export function useSelection(): [Selection, (s: Selection) => void] {
   const [selection, setSelectionState] = useState<Selection>(() =>
-    parseSelection(window.location.hash),
+    readCurrentSelection(),
   )
 
   useEffect(() => {
-    const handler = () => {
-      setSelectionState(parseSelection(window.location.hash))
-    }
+    const handler = () => setSelectionState(readCurrentSelection())
     window.addEventListener('hashchange', handler)
-    return () => window.removeEventListener('hashchange', handler)
+    window.addEventListener('popstate', handler)
+    return () => {
+      window.removeEventListener('hashchange', handler)
+      window.removeEventListener('popstate', handler)
+    }
   }, [])
 
   const setSelection = (s: Selection) => {
     const url = buildSelectionUrl(s)
-    // Use history.pushState so the user can go Back; this does NOT fire
-    // hashchange (browsers only fire hashchange for user-initiated navigation or
-    // calls to window.location.hash = '…'), so we update React state manually.
-    const hashPart = url.startsWith('#') ? url.slice(1) : url
-    history.pushState(null, '', hashPart || '/')
+    // Push the hash-form URL (keeps the leading '#') so subsequent reads of
+    // window.location.hash work and refreshing the page preserves selection.
+    history.pushState(null, '', url)
     setSelectionState(s)
   }
 

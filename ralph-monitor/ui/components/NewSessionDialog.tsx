@@ -21,8 +21,9 @@
 //   - everything else → generic inline error with error code
 
 import { useEffect, useState } from 'react'
-import { X } from 'lucide-react'
+import { X, FolderOpen } from 'lucide-react'
 import { authFetch } from '../auth'
+import { DirectoryPicker } from './DirectoryPicker'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,6 +56,7 @@ export function NewSessionDialog({
   const [initialPrompt, setInitialPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pickerOpen, setPickerOpen] = useState(false)
 
   // Reset state when dialog opens.
   useEffect(() => {
@@ -62,6 +64,7 @@ export function NewSessionDialog({
       setWorkingDir('')
       setInitialPrompt('')
       setError(null)
+      setPickerOpen(false)
     }
   }, [open])
 
@@ -135,6 +138,34 @@ export function NewSessionDialog({
     ? `Defaults to: ${effortWorkingDir}`
     : 'Defaults to project root'
 
+  // Directory picker modal — z-60 so it sits above this dialog when open.
+  if (pickerOpen) {
+    return (
+      <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
+        <div className="bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl max-w-2xl w-full flex flex-col" style={{ maxHeight: '80vh' }}>
+          <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between shrink-0">
+            <h2 className="text-sm font-semibold text-zinc-100">Pick a working directory</h2>
+            <button
+              type="button"
+              onClick={() => setPickerOpen(false)}
+              className="text-zinc-500 hover:text-zinc-200 transition"
+              aria-label="close picker"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="px-6 py-5 overflow-y-auto">
+            <DirectoryPicker
+              initialPath={effortWorkingDir ?? undefined}
+              onPick={(p) => { setWorkingDir(p); setPickerOpen(false) }}
+              onCancel={() => setPickerOpen(false)}
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div
       className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-6"
@@ -172,14 +203,25 @@ export function NewSessionDialog({
             >
               Working directory <span className="normal-case text-zinc-600">(optional)</span>
             </label>
-            <input
-              id="new-session-working-dir"
-              type="text"
-              value={workingDir}
-              onChange={(e) => setWorkingDir(e.target.value)}
-              placeholder={workingDirPlaceholder}
-              className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 transition font-mono"
-            />
+            <div className="flex gap-2">
+              <input
+                id="new-session-working-dir"
+                type="text"
+                value={workingDir}
+                onChange={(e) => setWorkingDir(e.target.value)}
+                placeholder={workingDirPlaceholder}
+                className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 transition font-mono"
+              />
+              <button
+                type="button"
+                onClick={() => setPickerOpen(true)}
+                className="shrink-0 inline-flex items-center gap-1 px-3 py-2 text-xs rounded border border-zinc-700 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
+                title="Browse for a directory"
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                Browse
+              </button>
+            </div>
           </div>
 
           {/* initial_prompt (optional) */}

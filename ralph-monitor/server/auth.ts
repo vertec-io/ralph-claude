@@ -134,8 +134,14 @@ export function bearerMiddleware(): MiddlewareHandler {
 
     if (!token) {
       const path = new URL(c.req.url).pathname
-      const isEvents = path === '/events' || path.startsWith('/events/')
-      if (isEvents) {
+      // EventSource can't set custom headers, so SSE endpoints must accept a
+      // ?token= fallback. Apply it to /events* and to any /api/.../stream
+      // endpoint (e.g. /api/sessions/:id/transcript/stream).
+      const isSse =
+        path === '/events' ||
+        path.startsWith('/events/') ||
+        (path.startsWith('/api/') && path.endsWith('/stream'))
+      if (isSse) {
         const q = c.req.query('token')
         if (q && q.length > 0) {
           maybeWarnQueryToken(q)

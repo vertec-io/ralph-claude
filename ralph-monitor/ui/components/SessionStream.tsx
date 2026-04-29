@@ -68,120 +68,118 @@ export function SessionStream({ sessionId, status, authWebSocket }: SessionStrea
     const container = containerRef.current
     if (!container) return
 
-    const term = new Terminal({
-      cursorBlink: true,
-      fontFamily: '"Fira Code", monospace',
-      fontSize: 13,
-      theme: { background: '#0f1419' },
-    })
-    const fit = new FitAddon()
-    term.loadAddon(fit)
-    term.open(container)
-    fit.fit()
+    // Defer xterm creation until the container has real dimensions. xterm
+    // 5.x's internal Viewport refresh crashes ("Cannot read 'dimensions' of
+    // undefined") if it runs before the render service has measured the
+    // canvas, which only happens once the host element is sized and
+    // attached. So we wait via ResizeObserver, then create the Terminal.
+    let term: Terminal | null = null
+    let fit: FitAddon | null = null
+    let ws: WebSocket | null = null
+    let inputDispose: { dispose: () => void } | null = null
+    let onResize: (() => void) | null = null
+    let disposed = false
 
-    termRef.current = term
-    fitRef.current = fit
+    const init = () => {
+      if (disposed || term) return
+      const rect = container.getBoundingClientRect()
+      if (rect.width < 10 || rect.height < 10) return // wait for real size
 
-    // Window resize -> fit + send resize to PTY.
-    const onResize = () => {
-      try {
-        fit.fit()
-        const cols = term.cols
-        const rows = term.rows
-        wsRef.current?.send(JSON.stringify({ type: 'resize', cols, rows }))
-      } catch {
-        // best-effort; resize before WS open is harmless to drop
-      }
-    }
-    window.addEventListener('resize', onResize)
+      term = new Terminal({
+        cursorBlink: true,
+        fontFamily: '"Fira Code", monospace',
+        fontSize: 13,
+        theme: { background: '#0f1419' },
+      })
+      fit = new FitAddon()
+      term.loadAddon(fit)
+      term.open(container)
+      try { fit.fit() } catch {}
 
-    // Open WebSocket.
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const url = `${proto}://${window.location.host}/ws/sessions/${sessionId}`
-    const ws = authWebSocket(url)
-    ws.binaryType = 'arraybuffer'
-    wsRef.current = ws
+      termRef.current = term
+      fitRef.current = fit
 
-    let expectingReplayBinary = false
+      // Wire WebSocket now that the terminal exists.
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      const url = `${proto}://${window.location.host}/ws/sessions/${sessionId}`
+      ws = authWebSocket(url)
+      ws.binaryType = 'arraybuffer'
+      wsRef.current = ws
 
-    ws.onopen = () => {
-      // Send initial resize so the PTY's cols/rows match the terminal we
-      // just laid out. The server is free to ignore if it has its own
-      // policy; we still want to ask.
-      try {
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
-      } catch {
-        // ignore
-      }
-    }
+      let expectingReplayBinary = false
 
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        // Control frame: replay envelope, exit, error.
-        let parsed: unknown
+      ws.onopen = () => {
         try {
-          parsed = JSON.parse(ev.data)
-        } catch {
+          ws?.send(JSON.stringify({ type: 'resize', cols: term!.cols, rows: term!.rows }))
+        } catch {}
+      }
+
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === 'string') {
+          let parsed: unknown
+          try { parsed = JSON.parse(ev.data) } catch { return }
+          if (parsed && typeof parsed === 'object') {
+            const obj = parsed as Record<string, unknown>
+            if (obj.type === 'replay' && typeof obj.size === 'number') {
+              expectingReplayBinary = true
+              return
+            }
+            if (obj.type === 'exit') {
+              try { term?.write(`\r\n[PTY exited with code ${String(obj.code ?? '?')}]\r\n`) } catch {}
+              return
+            }
+            if (obj.type === 'error') {
+              try { term?.write(`\r\n[Error: ${String(obj.error ?? 'unknown')}]\r\n`) } catch {}
+              return
+            }
+          }
           return
         }
-        if (parsed && typeof parsed === 'object') {
-          const obj = parsed as Record<string, unknown>
-          if (obj.type === 'replay' && typeof obj.size === 'number') {
-            expectingReplayBinary = true
-            return
-          }
-          if (obj.type === 'exit') {
-            term.write(`\r\n[PTY exited with code ${String(obj.code ?? '?')}]\r\n`)
-            return
-          }
-          if (obj.type === 'error') {
-            term.write(`\r\n[Error: ${String(obj.error ?? 'unknown')}]\r\n`)
-            return
-          }
-        }
-        return
+        const data = ev.data
+        if (!(data instanceof ArrayBuffer)) return
+        const buf = new Uint8Array(data)
+        if (expectingReplayBinary) expectingReplayBinary = false
+        try { term?.write(buf) } catch {}
       }
-      // Binary frame.
-      const data = ev.data
-      let buf: Uint8Array
-      if (data instanceof ArrayBuffer) {
-        buf = new Uint8Array(data)
+
+      ws.onclose = () => { try { term?.write('\r\n[Connection closed]\r\n') } catch {} }
+
+      inputDispose = term.onData((data: string) => {
+        try { ws?.send(JSON.stringify({ type: 'input', data })) } catch {}
+      })
+
+      onResize = () => {
+        try { fit?.fit() } catch {}
+        try {
+          if (term) ws?.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+        } catch {}
+      }
+      window.addEventListener('resize', onResize)
+    }
+
+    // ResizeObserver triggers init when container becomes non-zero, AND
+    // refits when size changes after init.
+    const ro = new ResizeObserver(() => {
+      if (!term) {
+        init()
       } else {
-        // We forced `arraybuffer` above; this branch is defensive only.
-        // Ignore unrecognized frame shapes rather than crashing the term.
-        return
-      }
-      if (expectingReplayBinary) {
-        // First binary frame after a replay envelope IS the replay buffer.
-        // We write it to the terminal exactly like a live frame so the
-        // session is "redrawn" before live data appends.
-        expectingReplayBinary = false
-      }
-      term.write(buf)
-    }
-
-    ws.onclose = () => {
-      term.write('\r\n[Connection closed]\r\n')
-    }
-
-    // Term input -> WS.
-    const inputDispose = term.onData((data: string) => {
-      try {
-        ws.send(JSON.stringify({ type: 'input', data }))
-      } catch {
-        // ignore — most likely the socket closed mid-keystroke
+        try { fit?.fit() } catch {}
+        try {
+          ws?.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }))
+        } catch {}
       }
     })
+    ro.observe(container)
+    // Try once immediately in case the container is already sized.
+    init()
 
     return () => {
-      window.removeEventListener('resize', onResize)
-      try {
-        ws.close()
-      } catch {
-        // ignore
-      }
-      inputDispose.dispose()
-      term.dispose()
+      disposed = true
+      ro.disconnect()
+      if (onResize) window.removeEventListener('resize', onResize)
+      try { ws?.close() } catch {}
+      try { inputDispose?.dispose() } catch {}
+      try { term?.dispose() } catch {}
       termRef.current = null
       fitRef.current = null
       wsRef.current = null

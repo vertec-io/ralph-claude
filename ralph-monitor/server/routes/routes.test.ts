@@ -1002,7 +1002,7 @@ describe('POST /api/sessions/:id/resume', () => {
     expect((await res.json()).error).toBe('session_not_found')
   })
 
-  test('jsonl missing on disk -> 404 jsonl_missing', async () => {
+  test('jsonl missing on disk -> falls back to fresh spawn (200)', async () => {
     const { effortId } = await makeProjectAndEffort('Resume-JsonlMissing')
     const sessionId = crypto.randomUUID()
     createSession(getDb(), {
@@ -1017,8 +1017,9 @@ describe('POST /api/sessions/:id/resume', () => {
         method: 'POST',
       }),
     )
-    expect(res.status).toBe(404)
-    expect((await res.json()).error).toBe('jsonl_missing')
+    expect(res.status).toBe(200)
+    const body = await res.json() as { id: string }
+    expect(body.id).toBe(sessionId)
 
     // Row preserved.
     expect(getSessionById(getDb(), sessionId)).not.toBeNull()

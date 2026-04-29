@@ -11,6 +11,7 @@ export default defineConfig({
     proxy: {
       '/api':    { target: 'http://127.0.0.1:7777', changeOrigin: true },
       '/events': { target: 'http://127.0.0.1:7777', changeOrigin: true, ws: false },
+      '/ws':     { target: 'ws://127.0.0.1:7777', ws: true, changeOrigin: true },
     },
   },
   build: {

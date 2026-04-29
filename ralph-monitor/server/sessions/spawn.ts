@@ -780,13 +780,12 @@ export async function resumeSession(
     )
   }
 
-  // 3. JSONL must still be on disk. AC's 404 trigger; sync existsSync per
-  // the constraint (no async stat).
-  if (!existsSync(session.jsonl_path)) {
-    throw new JsonlMissingError(
-      `jsonl no longer present at ${session.jsonl_path}`,
-    )
-  }
+  // 3. JSONL presence: if claude already wrote a transcript, we'll
+  // `--resume` it. If not (session was created but never had a turn before
+  // the server died), we fall back to a fresh spawn under the same uuid via
+  // `--session-id`. Decision is made downstream in resumeSessionInner; here
+  // we just record the flag.
+  const hasJsonl = existsSync(session.jsonl_path)
 
   // 4. Resolve cwd. Reuses prepareSpawn's chain — session.working_dir
   // (override) wins, then effort.working_dir, then project.root_dir.
@@ -831,6 +830,7 @@ export async function resumeSession(
       session,
       resolvedCwd,
       projectRootDir,
+      hasJsonl,
     }),
   )
 }
@@ -840,8 +840,9 @@ async function resumeSessionInner(args: {
   session: { id: string; effort_id: string; jsonl_path: string }
   resolvedCwd: string
   projectRootDir: string
+  hasJsonl: boolean
 }): Promise<ResumeSessionResult> {
-  const { spawner, session, resolvedCwd, projectRootDir } = args
+  const { spawner, session, resolvedCwd, projectRootDir, hasJsonl } = args
   const db = getDb()
 
   // 5. One-live-per-effort re-check. The session we're resuming is dormant
@@ -858,15 +859,22 @@ async function resumeSessionInner(args: {
     )
   }
 
-  // 6. Argv. claude --resume reuses the existing session id, so NO
-  // --session-id and NO --name (the existing session already has its name
-  // baked into the JSONL).
-  const argv: string[] = [
-    'claude',
-    '--resume',
-    session.id,
-    '--dangerously-skip-permissions',
-  ]
+  // 6. Argv. If a JSONL transcript already exists, --resume re-opens it
+  // (claude reads the prior turns into context). If not (session was
+  // created but the server died before any turn was exchanged), --resume
+  // would fail, so we fall back to --session-id which spawns fresh under
+  // the same uuid. Either way the session id and DB row stay stable.
+  const effort = getEffortById(db, session.effort_id)
+  const argv: string[] = hasJsonl
+    ? ['claude', '--resume', session.id, '--dangerously-skip-permissions']
+    : [
+        'claude',
+        '--session-id',
+        session.id,
+        '--dangerously-skip-permissions',
+        '--name',
+        `${effort?.name ?? 'session'}:${session.id.slice(0, 8)}`,
+      ]
   if (resolvedCwd !== projectRootDir) {
     argv.push('--add-dir', projectRootDir)
   }
