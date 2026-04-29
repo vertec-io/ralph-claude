@@ -824,3 +824,137 @@ describe('POST /api/sessions', () => {
     expect(rec.calls[0]!.cwd).toBe(require('node:fs').realpathSync.native(sub))
   })
 })
+
+// ---------------------------------------------------------------------------
+// POST /api/sessions/:id/resume  (US-007)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/resume', () => {
+  let rec: RecordingSpawner
+
+  beforeEach(() => {
+    registryTest.clear()
+    clearWorktreeCacheForTests()
+    rec = recordingSpawner()
+    setTestSpawner(rec.spawner)
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '0'
+  })
+
+  afterEach(() => {
+    setTestSpawner(null)
+    registryTest.clear()
+    delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+  })
+
+  // Helper: project + effort + dormant session row + on-disk JSONL.
+  async function seedDormantViaApi(name: string): Promise<{
+    sessionId: string
+    jsonlPath: string
+  }> {
+    const { effortId } = await makeProjectAndEffort(name)
+    const sessionId = crypto.randomUUID()
+    const jsonlDir = mkdtempSync(join(tmpdir(), 'ralph-monitor-resume-jsonl-'))
+    tempDirs.push(jsonlDir)
+    const jsonlPath = join(jsonlDir, 'session.jsonl')
+    writeFileSync(jsonlPath, '{"a":1}\n')
+    createSession(getDb(), {
+      id: sessionId,
+      effort_id: effortId,
+      mode: 'autonomous',
+      jsonl_path: jsonlPath,
+    })
+    return { sessionId, jsonlPath }
+  }
+
+  test('happy path: 200 + { id, jsonl_path, ws_url }; argv has --resume <id>', async () => {
+    const seed = await seedDormantViaApi('Resume-Happy')
+    const cap = captureEvents()
+    try {
+      const res = await app.fetch(
+        new Request(`http://test/api/sessions/${seed.sessionId}/resume`, {
+          method: 'POST',
+        }),
+      )
+      expect(res.status).toBe(200)
+      const body = await res.json()
+      expect(body.id).toBe(seed.sessionId)
+      expect(body.jsonl_path).toBe(seed.jsonlPath)
+      expect(body.ws_url).toBe(`/ws/sessions/${seed.sessionId}`)
+
+      // Spawner was invoked with --resume <id> --dangerously-skip-permissions.
+      expect(rec.calls.length).toBe(1)
+      expect(rec.calls[0]!.file).toBe('claude')
+      expect(rec.calls[0]!.args[0]).toBe('--resume')
+      expect(rec.calls[0]!.args[1]).toBe(seed.sessionId)
+      expect(rec.calls[0]!.args[2]).toBe('--dangerously-skip-permissions')
+      // No --session-id, no --name.
+      expect(rec.calls[0]!.args).not.toContain('--session-id')
+      expect(rec.calls[0]!.args).not.toContain('--name')
+
+      // session.updated event recorded.
+      const evt = cap.events.find(
+        (e: any) => e.type === 'session.updated' && e.session?.id === seed.sessionId,
+      )
+      expect(evt).toBeDefined()
+    } finally {
+      cap.stop()
+    }
+  })
+
+  test('non-existent session -> 404 session_not_found', async () => {
+    const res = await app.fetch(
+      new Request('http://test/api/sessions/00000000-0000-4000-8000-000000000000/resume', {
+        method: 'POST',
+      }),
+    )
+    expect(res.status).toBe(404)
+    expect((await res.json()).error).toBe('session_not_found')
+  })
+
+  test('jsonl missing on disk -> 404 jsonl_missing', async () => {
+    const { effortId } = await makeProjectAndEffort('Resume-JsonlMissing')
+    const sessionId = crypto.randomUUID()
+    createSession(getDb(), {
+      id: sessionId,
+      effort_id: effortId,
+      mode: 'autonomous',
+      jsonl_path: '/tmp/definitely-not-there-resume-route.jsonl',
+    })
+
+    const res = await app.fetch(
+      new Request(`http://test/api/sessions/${sessionId}/resume`, {
+        method: 'POST',
+      }),
+    )
+    expect(res.status).toBe(404)
+    expect((await res.json()).error).toBe('jsonl_missing')
+
+    // Row preserved.
+    expect(getSessionById(getDb(), sessionId)).not.toBeNull()
+  })
+
+  test('already-live (live-orphaned via row pid) -> 409 session_already_live', async () => {
+    const { effortId } = await makeProjectAndEffort('Resume-AlreadyLive')
+    const sessionId = crypto.randomUUID()
+    const jsonlDir = mkdtempSync(join(tmpdir(), 'ralph-monitor-resume-jsonl-'))
+    tempDirs.push(jsonlDir)
+    const jsonlPath = join(jsonlDir, 'session.jsonl')
+    writeFileSync(jsonlPath, '{}\n')
+    createSession(getDb(), {
+      id: sessionId,
+      effort_id: effortId,
+      mode: 'autonomous',
+      jsonl_path: jsonlPath,
+      process_pid: 99999,
+      process_started_at: Date.now(),
+    })
+
+    const res = await app.fetch(
+      new Request(`http://test/api/sessions/${sessionId}/resume`, {
+        method: 'POST',
+      }),
+    )
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toBe('session_already_live')
+  })
+})

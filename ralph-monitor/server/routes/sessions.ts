@@ -35,10 +35,15 @@ import {
 import { store } from '../store'
 import {
   spawnSession,
+  resumeSession,
   getSpawner,
   EffortNotFoundError,
   CwdResolutionError,
   OneLiveSessionPerEffortPrepError,
+  SessionNotFoundError,
+  SessionAlreadyLiveError,
+  SessionInGraceWindowError,
+  JsonlMissingError,
 } from '../sessions/spawn'
 import { computeSessionStatus } from '../sessions/status'
 import { isPathInProjectOrWorktree } from '../git/worktrees'
@@ -175,6 +180,56 @@ sessionsRouter.get('/api/sessions/:id', (c) => {
     live: status === 'live-attached' || status === 'live-orphaned',
     attached: status === 'live-attached',
   })
+})
+
+// POST /api/sessions/:id/resume — US-007
+//
+// Re-spawn `claude --resume <id>` for a dormant session. The row already
+// exists; resumeSession reuses the same uuid (which is also the on-disk
+// JSONL filename). Failures here NEVER hard-delete the row, because the
+// row is the user's chat history and they may want to retry.
+sessionsRouter.post('/api/sessions/:id/resume', async (c) => {
+  const id = c.req.param('id')
+  try {
+    const result = await resumeSession({ session_id: id }, { spawner: getSpawner() })
+    return c.json(
+      {
+        id: result.id,
+        jsonl_path: result.jsonlPath,
+        ws_url: `/ws/sessions/${result.id}`,
+      },
+      200,
+    )
+  } catch (err) {
+    if (err instanceof SessionNotFoundError) {
+      return c.json({ error: 'session_not_found', details: { id } }, 404)
+    }
+    if (err instanceof JsonlMissingError) {
+      return c.json({ error: 'jsonl_missing', details: { id } }, 404)
+    }
+    if (err instanceof SessionAlreadyLiveError) {
+      return c.json({ error: 'session_already_live', details: { id } }, 409)
+    }
+    if (err instanceof SessionInGraceWindowError) {
+      return c.json({ error: 'session_in_grace_window', details: { id } }, 409)
+    }
+    if (err instanceof OneLiveSessionPerEffortPrepError) {
+      return c.json(
+        { error: 'one_live_session_per_effort', details: { id } },
+        409,
+      )
+    }
+    if (err instanceof CwdResolutionError) {
+      return c.json(
+        { error: 'cwd_resolution_failed', details: { message: err.message } },
+        422,
+      )
+    }
+    return c.json(
+      { error: 'spawn_failed', details: { message: (err as Error).message } },
+      500,
+    )
+  }
 })
 
 // GET /api/efforts/:id/sessions

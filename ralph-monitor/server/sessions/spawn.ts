@@ -52,7 +52,7 @@
 // some other path between pre-check and insert (it shouldn't, but if), the
 // catch surfaces it as the same typed error.
 
-import { mkdirSync, realpathSync } from 'node:fs'
+import { existsSync, mkdirSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
@@ -75,6 +75,7 @@ import { store } from '../store'
 import { register, unregister, type PtyHandle } from './registry'
 import { RingBuffer } from './ringBuffer'
 import { withEffortLock } from './spawnMutex'
+import { computeSessionStatus } from './status'
 
 // Default ring-buffer capacity (bytes) for PTY output replay. 256 KiB is
 // enough to capture a few screens of dense terminal output; configurable via
@@ -126,6 +127,20 @@ export class CwdResolutionError extends Error {
 // constraint error.
 export class OneLiveSessionPerEffortPrepError extends Error {
   override readonly name = 'OneLiveSessionPerEffortPrepError'
+}
+
+// US-007 typed errors for resumeSession.
+export class SessionNotFoundError extends Error {
+  override readonly name = 'SessionNotFoundError'
+}
+export class SessionAlreadyLiveError extends Error {
+  override readonly name = 'SessionAlreadyLiveError'
+}
+export class SessionInGraceWindowError extends Error {
+  override readonly name = 'SessionInGraceWindowError'
+}
+export class JsonlMissingError extends Error {
+  override readonly name = 'JsonlMissingError'
 }
 
 export interface PrepareSpawnInput {
@@ -691,3 +706,304 @@ export async function spawnSession(
     pid: child.pid,
   }
 }
+
+// ---------------------------------------------------------------------------
+// resumeSession — US-007
+// ---------------------------------------------------------------------------
+//
+// `claude --resume <uuid>` re-opens an existing on-disk JSONL transcript and
+// continues the conversation. The session row already exists (it's the user's
+// chat history); resumeSession reuses the same uuid and updates the row in
+// place rather than creating a new one. Failures during registration do NOT
+// hard-delete the row — that history is the user's, and we let them retry the
+// resume rather than wipe it.
+//
+// Validation chain (all run before the per-effort lock is taken so cheap
+// rejections don't block other efforts):
+//   1. Row exists                       -> SessionNotFoundError (404)
+//   2. Computed status is dormant       -> SessionAlreadyLiveError (409) for
+//                                          live-attached / live-orphaned
+//                                          SessionInGraceWindowError (409) for
+//                                          exited (in grace)
+//   3. JSONL still on disk              -> JsonlMissingError (404)
+//   4. cwd resolves                     -> CwdResolutionError (422)
+//
+// Then under withEffortLock(effort_id):
+//   5. No OTHER live session in this effort (the one-per-effort invariant)
+//      -> OneLiveSessionPerEffortPrepError (409)
+//   6. Spawn `claude --resume <uuid> --dangerously-skip-permissions
+//      [--add-dir <projectRootDir>]` with RALPH_MONITOR_SESSION=<uuid>.
+//   7. Synchronously register the new handle; on collision SIGTERM + 5s
+//      grace + SIGKILL but DO NOT hard-delete the row.
+//   8. Stamp process_pid + process_started_at + last_activity_at.
+//   9. Wire onExit auto-cleanup (same pattern as spawnSession).
+//   10. Emit `session.updated` so any subscribed UI refreshes the row.
+
+export interface ResumeSessionInput {
+  session_id: string
+}
+
+export interface ResumeSessionOptions {
+  spawner?: PtySpawner
+}
+
+export interface ResumeSessionResult {
+  id: string
+  jsonlPath: string
+  pid: number
+}
+
+export async function resumeSession(
+  input: ResumeSessionInput,
+  opts: ResumeSessionOptions = {},
+): Promise<ResumeSessionResult> {
+  const spawner = opts.spawner ?? defaultSpawner
+  const db = getDb()
+
+  // 1. Lookup the session row.
+  const session = getSessionById(db, input.session_id)
+  if (!session) {
+    throw new SessionNotFoundError(`session not found: ${input.session_id}`)
+  }
+
+  // 2. Status gate. live-attached / live-orphaned -> already-live; exited (in
+  // grace) -> grace-window. Only `dormant` is resumable.
+  const status = computeSessionStatus(session)
+  if (status === 'live-attached' || status === 'live-orphaned') {
+    throw new SessionAlreadyLiveError(
+      `session ${session.id} is already live (${status})`,
+    )
+  }
+  if (status === 'exited') {
+    // The grace-period handle is incompatible with --resume because the old
+    // handle still holds the registry slot for this uuid. The user must wait
+    // for grace to expire OR explicitly kill (US-016c).
+    throw new SessionInGraceWindowError(
+      `session ${session.id} is in the post-exit grace window; wait for grace to expire or kill explicitly`,
+    )
+  }
+
+  // 3. JSONL must still be on disk. AC's 404 trigger; sync existsSync per
+  // the constraint (no async stat).
+  if (!existsSync(session.jsonl_path)) {
+    throw new JsonlMissingError(
+      `jsonl no longer present at ${session.jsonl_path}`,
+    )
+  }
+
+  // 4. Resolve cwd. Reuses prepareSpawn's chain — session.working_dir
+  // (override) wins, then effort.working_dir, then project.root_dir.
+  const effort = getEffortById(db, session.effort_id)
+  if (!effort) {
+    // Schema-wise the FK should have cascaded the row; if it ever happens
+    // surface as SessionNotFound from the caller's perspective.
+    throw new SessionNotFoundError(
+      `effort ${session.effort_id} for session ${session.id} not found`,
+    )
+  }
+  const project = getProjectById(db, effort.project_id)
+  if (!project) {
+    throw new SessionNotFoundError(
+      `project ${effort.project_id} for session ${session.id} not found`,
+    )
+  }
+  const candidate =
+    session.working_dir ?? effort.working_dir ?? project.root_dir
+  let resolvedCwd: string
+  try {
+    resolvedCwd = realpathSync.native(candidate)
+  } catch (err) {
+    throw new CwdResolutionError(
+      `cannot resolve working_dir ${candidate}: ${(err as Error).message}`,
+    )
+  }
+  if (resolvedCwd.length > 1 && resolvedCwd.endsWith('/')) {
+    resolvedCwd = resolvedCwd.slice(0, -1)
+  }
+  let projectRootDir = project.root_dir
+  if (projectRootDir.length > 1 && projectRootDir.endsWith('/')) {
+    projectRootDir = projectRootDir.slice(0, -1)
+  }
+
+  // 5..10 happen under the per-effort lock. The lock guarantees the
+  // re-check below is atomic w.r.t. any other spawn/resume targeting the
+  // same effort.
+  return withEffortLock(session.effort_id, () =>
+    resumeSessionInner({
+      spawner,
+      session,
+      resolvedCwd,
+      projectRootDir,
+    }),
+  )
+}
+
+async function resumeSessionInner(args: {
+  spawner: PtySpawner
+  session: { id: string; effort_id: string; jsonl_path: string }
+  resolvedCwd: string
+  projectRootDir: string
+}): Promise<ResumeSessionResult> {
+  const { spawner, session, resolvedCwd, projectRootDir } = args
+  const db = getDb()
+
+  // 5. One-live-per-effort re-check. The session we're resuming is dormant
+  // by definition (status gate above), but a DIFFERENT session in the same
+  // effort might be live and would block us per the partial unique index.
+  // We check before spawn so a refusal doesn't leak a live PTY.
+  const siblings = listSessionsByEffort(db, session.effort_id)
+  const liveSibling = siblings.find(
+    (s) => s.process_pid !== null && s.id !== session.id,
+  )
+  if (liveSibling) {
+    throw new OneLiveSessionPerEffortPrepError(
+      `effort ${session.effort_id} already has a live session: ${liveSibling.id}`,
+    )
+  }
+
+  // 6. Argv. claude --resume reuses the existing session id, so NO
+  // --session-id and NO --name (the existing session already has its name
+  // baked into the JSONL).
+  const argv: string[] = [
+    'claude',
+    '--resume',
+    session.id,
+    '--dangerously-skip-permissions',
+  ]
+  if (resolvedCwd !== projectRootDir) {
+    argv.push('--add-dir', projectRootDir)
+  }
+  const file = argv[0]!
+  const spawnArgs = argv.slice(1)
+
+  // Env. RALPH_MONITOR_SESSION is the marker downstream consumers look for
+  // to identify our sessions.
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    RALPH_MONITOR_SESSION: session.id,
+  }
+  if (!env.TERM) env.TERM = 'xterm-256color'
+
+  // 7. Spawn. Synchronous failures (binary not found, cwd-invalid, etc.)
+  // are propagated as-is; we do NOT touch the row on spawn failure (the
+  // user's history stays intact for retry).
+  let child: SpawnerChild
+  try {
+    child = spawner(file, spawnArgs, {
+      name: 'xterm-256color',
+      cols: 80,
+      rows: 24,
+      cwd: resolvedCwd,
+      env,
+    })
+  } catch (err) {
+    // Re-throw without row mutation. resumeSession differs from spawnSession
+    // here: spawnSession hard-deletes the freshly-inserted row, but we
+    // preserve the row because it's the user's chat history.
+    throw err
+  }
+
+  // 8. Build PtyHandle (reuses spawnSession's buildPtyHandle helper) and
+  // register synchronously. Fresh ring buffer per the AC: "ring buffer is
+  // fresh".
+  const buffer = new RingBuffer(readBufferBytesEnv())
+  const handle = buildPtyHandle({
+    child,
+    sessionId: session.id,
+    effortId: session.effort_id,
+    buffer,
+  })
+
+  try {
+    register(handle)
+  } catch (err) {
+    // SIGTERM -> 5s grace -> SIGKILL. Same pattern as spawnSession's
+    // registration-failure rollback, but WITHOUT hard-deleting the row.
+    try { child.kill('SIGTERM') } catch {}
+    try {
+      const result = await Promise.race<'exited' | 'timeout'>([
+        new Promise<'exited'>((resolve) => {
+          const sub = child.onExit(() => {
+            try { sub.dispose() } catch {}
+            resolve('exited')
+          })
+        }),
+        new Promise<'timeout'>((resolve) =>
+          setTimeout(() => resolve('timeout'), 5000),
+        ),
+      ])
+      if (result === 'timeout') {
+        try { child.kill('SIGKILL') } catch {}
+      }
+    } catch {}
+    throw err
+  }
+
+  // 9. Stamp the live pid + start time. If the UPDATE fails we roll back
+  // the registration + signal the child but still preserve the row.
+  const startedAt = Date.now()
+  try {
+    updateSession(db, session.id, {
+      process_pid: child.pid,
+      process_started_at: startedAt,
+      last_activity_at: startedAt,
+    })
+  } catch (err) {
+    unregister(session.id)
+    try { child.kill('SIGTERM') } catch {}
+    throw err
+  }
+
+  // 10. onExit auto-cleanup. Mirrors spawnSession step 9 verbatim — clear
+  // pid columns, emit `session.exited`, schedule grace-period unregister.
+  handle.onExit((exit) => {
+    try {
+      updateSession(db, session.id, {
+        process_pid: null,
+        process_started_at: null,
+        last_activity_at: Date.now(),
+      })
+    } catch {
+      // Row may have been hard-deleted by an explicit cleanup path that
+      // raced with the exit; ignore.
+    }
+    store.recordEvent({
+      type: 'session.exited',
+      ts: Date.now(),
+      id: session.id,
+      exit_code: exit.exitCode,
+    })
+    const graceMs = readGraceMsEnv()
+    if (graceMs <= 0) {
+      handle.buffer.clear()
+      unregister(session.id)
+      return
+    }
+    const t = setTimeout(() => {
+      handle.buffer.clear()
+      unregister(session.id)
+    }, graceMs)
+    if (typeof t.unref === 'function') t.unref()
+  })
+
+  // 11. Emit session.updated so subscribed UIs refresh the row's pid +
+  // started-at columns. (We chose `session.updated` over a new
+  // `session.resumed` event to avoid widening the AppEvent union for an
+  // event consumers can already model as a row update; the new pid is what
+  // matters and that's already in the payload.)
+  const updated = getSessionById(db, session.id)
+  if (updated) {
+    store.recordEvent({
+      type: 'session.updated',
+      ts: Date.now(),
+      session: updated,
+    })
+  }
+
+  return {
+    id: session.id,
+    jsonlPath: session.jsonl_path,
+    pid: child.pid,
+  }
+}
+
