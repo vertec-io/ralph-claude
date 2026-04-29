@@ -1438,15 +1438,15 @@
         },
         {
           "description": "API verification: GET /api/sessions returns correct status for each scenario",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Document the recovery flow in ralph-monitor/README.md with sections: 'Restarting ralph-monitor', 'Resuming a session', 'What happens to autonomous runs on restart'",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Using Playwright MCP, walk through scenarios A and B end-to-end and capture screenshots: sidebar populated post-restart, dormant chat view, resumed-session input active, exited autonomous session with Resume button visible",
