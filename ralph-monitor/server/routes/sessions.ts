@@ -21,6 +21,7 @@
 // what matters.
 
 import { Hono } from 'hono'
+import { streamSSE } from 'hono/streaming'
 import { unlink } from 'node:fs/promises'
 import {
   getDb,
@@ -47,6 +48,7 @@ import {
 } from '../sessions/spawn'
 import { computeSessionStatus } from '../sessions/status'
 import { isPathInProjectOrWorktree } from '../git/worktrees'
+import { attachTailer } from '../jsonl/tailer'
 
 export const sessionsRouter = new Hono()
 
@@ -179,6 +181,69 @@ sessionsRouter.get('/api/sessions/:id', (c) => {
     status,
     live: status === 'live-attached' || status === 'live-orphaned',
     attached: status === 'live-attached',
+  })
+})
+
+// GET /api/sessions/:id/transcript/stream — US-010
+//
+// Per-session SSE channel for live JSONL tail. Distinct from /events (which
+// is the app-wide lifecycle/PRD broadcast). On connect we emit a `snapshot`
+// with the current turns; subsequent `turn` events arrive as Claude flushes
+// new records to the .jsonl. On JSONL deletion we emit `gone` and close; on
+// truncation we emit a fresh `snapshot`.
+//
+// One chokidar watcher per session id is shared across SSE clients (see
+// server/jsonl/tailer.ts). Each client has its own per-subscriber byte-offset
+// so two clients on the same session see the same `change` event but each
+// resumes from the boundary it observed at attach.
+sessionsRouter.get('/api/sessions/:id/transcript/stream', async (c) => {
+  const id = c.req.param('id')
+  const session = getSessionById(getDb(), id)
+  if (!session) {
+    return c.json({ error: 'session_not_found', details: { id } }, 404)
+  }
+  const jsonlPath = session.jsonl_path
+  if (!jsonlPath) {
+    // Session row exists but has no on-disk path — nothing to tail.
+    return c.json({ error: 'jsonl_missing', details: { id } }, 404)
+  }
+
+  return streamSSE(c, async (stream) => {
+    let detach: (() => void) | null = null
+    let goneClosed = false
+
+    detach = await attachTailer(jsonlPath, id, async (event) => {
+      if (stream.aborted) return
+      try {
+        await stream.writeSSE({
+          event: event.type,
+          data: JSON.stringify(event),
+        })
+      } catch {
+        // Client likely went away mid-write; the abort handler will clean up.
+      }
+      if (event.type === 'gone' && !goneClosed) {
+        goneClosed = true
+        try {
+          await stream.close()
+        } catch {}
+      }
+    })
+
+    // Hold the handler open until the client disconnects (or the file goes
+    // away). Hono's streamSSE closes the response when this callback returns.
+    await new Promise<void>((resolve) => {
+      stream.onAbort(() => {
+        if (detach) {
+          detach()
+          detach = null
+        }
+        resolve()
+      })
+      // If we already emitted `gone` and closed, abort fires synchronously
+      // after this awaits — handled by the onAbort listener above. No extra
+      // wiring needed.
+    })
   })
 })
 
