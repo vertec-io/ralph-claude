@@ -155,6 +155,9 @@ export function App() {
             sessionId: id,
           })
         }}
+        onSessionCreated={(projectId, effortId, sessionId) => {
+          setSelection({ projectId, effortId, sessionId })
+        }}
       />
       {selected ? <PRDDetail prd={selected} /> : <EmptyDetail />}
       <EventFeed
@@ -184,6 +187,7 @@ function PRDList({
   onSelectEffort,
   selectedSessionId,
   onSelectSession,
+  onSessionCreated,
 }: {
   prds: PRDRecord[]
   unmanaged: UnmanagedPRDItem[]
@@ -201,6 +205,7 @@ function PRDList({
   onSelectEffort: (id: string) => void
   selectedSessionId: string | null
   onSelectSession: (id: string) => void
+  onSessionCreated?: (projectId: string, effortId: string, sessionId: string) => void
 }) {
   const [adoptItem, setAdoptItem] = useState<UnmanagedPRDItem | null>(null)
 
@@ -280,6 +285,7 @@ function PRDList({
         onSelectSession={onSelectSession}
         unmanagedPrds={unmanagedPrdsSlot}
         onRefresh={onRefresh}
+        onSessionCreated={onSessionCreated}
       />
 
       {adoptItem && (

@@ -37,6 +37,7 @@ import { ContextMenu, useContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
 import { NewProjectDialog } from './NewProjectDialog'
 import { NewEffortDialog } from './NewEffortDialog'
+import { NewSessionDialog } from './NewSessionDialog'
 
 export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
 
@@ -55,6 +56,8 @@ export interface SidebarProps {
   unmanagedPrds?: React.ReactNode
   // Called after a mutation so the parent can re-fetch projects/efforts/sessions.
   onRefresh?: () => void
+  // Called after a new session is created so the parent can navigate to it.
+  onSessionCreated?: (projectId: string, effortId: string, sessionId: string) => void
 }
 
 export interface BucketedProjects {
@@ -700,6 +703,7 @@ export function Sidebar({
   onSelectSession,
   unmanagedPrds,
   onRefresh,
+  onSessionCreated,
 }: SidebarProps) {
   const [activeOpen, setActiveOpen] = useState(true)
   const [recentOpen, setRecentOpen] = useState(true)
@@ -728,6 +732,14 @@ export function Sidebar({
     projectId: string
     rootDir: string
     initialPickedPath?: string
+  } | null>(null)
+
+  // New Session dialog state — stores effort info when open, null when closed.
+  const [newSessionTarget, setNewSessionTarget] = useState<{
+    projectId: string
+    effortId: string
+    effortName: string
+    effortWorkingDir: string | null
   } | null>(null)
 
   // Per-project expansion state (shared across sections via a single set)
@@ -871,6 +883,18 @@ export function Sidebar({
     e.preventDefault()
     const items: MenuItem[] = [
       {
+        label: 'New Session',
+        onClick: () => {
+          setNewSessionTarget({
+            projectId: effort.project_id,
+            effortId: effort.id,
+            effortName: effort.name,
+            effortWorkingDir: effort.working_dir,
+          })
+        },
+      },
+      {
+        separator: true,
         label: effort.status === 'archived' ? 'Unarchive' : 'Archive',
         onClick: async () => {
           await patchEffort(effort.id, {
@@ -1104,6 +1128,23 @@ export function Sidebar({
           onCreated={() => {
             setNewEffortTarget(null)
             onRefresh?.()
+          }}
+        />
+      )}
+
+      {/* New Session dialog */}
+      {newSessionTarget && (
+        <NewSessionDialog
+          open={true}
+          effortId={newSessionTarget.effortId}
+          effortName={newSessionTarget.effortName}
+          effortWorkingDir={newSessionTarget.effortWorkingDir}
+          onClose={() => setNewSessionTarget(null)}
+          onCreated={(session) => {
+            const { projectId, effortId } = newSessionTarget
+            setNewSessionTarget(null)
+            onRefresh?.()
+            onSessionCreated?.(projectId, effortId, session.id)
           }}
         />
       )}
