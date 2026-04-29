@@ -6,7 +6,13 @@ import { resolve, isAbsolute } from 'node:path'
 import { store } from './store'
 import { startWatchers } from './watchers'
 import { agents } from './agents'
+import { getDb } from './db'
 import type { AppEvent } from './types'
+
+// Initialize sqlite + apply migrations on startup. Lazy inside getDb(), but we
+// invoke once eagerly so any schema problem fails loudly at boot rather than
+// at the first request that touches the DB.
+getDb()
 
 const app = new Hono()
 
