@@ -110,6 +110,22 @@ export function clearWorktreeCacheForTests(): void {
   cache.clear()
 }
 
+// Production cache-eviction hook. Call this when a project is deleted so that
+// subsequent worktree lookups for the same root_dir go back to disk rather than
+// returning stale (now-meaningless) entries for a project that no longer exists.
+export function evictWorktreeCacheForProject(rootDir: string): void {
+  cache.delete(rootDir)
+  // Also evict any realpath'd variant (callers may have looked up with either
+  // the raw or the resolved path).
+  try {
+    const real = realpathSync.native(rootDir)
+    if (real !== rootDir) cache.delete(real)
+  } catch {
+    // rootDir no longer exists on disk after the delete — that's fine; it
+    // won't be in the cache under the resolved path anyway.
+  }
+}
+
 function realpathOrNull(p: string): string | null {
   try {
     return realpathSync.native(p)

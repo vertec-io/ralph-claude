@@ -27,6 +27,7 @@ import {
   type ListProjectsFilter,
 } from '../db'
 import { store } from '../store'
+import { evictWorktreeCacheForProject } from '../git/worktrees'
 
 const RECENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -191,6 +192,7 @@ projectsRouter.delete('/api/projects/:id', (c) => {
   }
 
   hardDeleteProject(db, id)
+  evictWorktreeCacheForProject(existing.root_dir)
   store.recordEvent({ type: 'project.deleted', ts: Date.now(), id })
 
   return c.body(null, 204)

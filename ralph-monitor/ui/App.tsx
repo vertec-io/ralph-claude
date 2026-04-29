@@ -1,16 +1,65 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { marked } from 'marked'
 import { useServerStream } from './sse'
 import { authFetch } from './auth'
 import type { PRDRecord, UserStory, AppEvent, CommitRow } from '../server/types'
+import type { UnmanagedPRDItem } from '../server/routes/unmanaged'
+import type { Project } from '../server/db'
 import { PrdSnapshotPanels } from './components/PrdSnapshotPanels'
+import { AdoptPrdDialog } from './components/AdoptPrdDialog'
 
 marked.setOptions({ gfm: true, breaks: false })
+
+// Hook: fetch /api/unmanaged-prds and re-fetch on demand (or when SSE fires
+// effort.created / effort.deleted which changes the left-anti-join result).
+function useUnmanagedPrds(triggerVersion: number): {
+  unmanaged: UnmanagedPRDItem[]
+  projects: Project[]
+  refresh: () => void
+} {
+  const [unmanaged, setUnmanaged] = useState<UnmanagedPRDItem[]>([])
+  const [projects, setProjects] = useState<Project[]>([])
+  const versionRef = useRef(triggerVersion)
+  versionRef.current = triggerVersion
+
+  const fetch_ = useCallback(() => {
+    authFetch('/api/unmanaged-prds')
+      .then((r) => r.json())
+      .then((body: any) => { if (Array.isArray(body?.unmanaged)) setUnmanaged(body.unmanaged) })
+      .catch(() => {})
+    authFetch('/api/projects')
+      .then((r) => r.json())
+      .then((body: any) => { if (Array.isArray(body?.projects)) setProjects(body.projects) })
+      .catch(() => {})
+  }, [])
+
+  // Re-fetch whenever the trigger version increments (SSE event) or on mount.
+  useEffect(() => { fetch_() }, [fetch_, triggerVersion])
+
+  return { unmanaged, projects, refresh: fetch_ }
+}
 
 export function App() {
   const { snapshot, connected } = useServerStream()
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null)
   const [showAllEvents, setShowAllEvents] = useState(false)
+
+  // Increment to force an unmanaged re-fetch after effort mutations.
+  const [unmanagedVersion, setUnmanagedVersion] = useState(0)
+  const bumpUnmanaged = useCallback(() => setUnmanagedVersion((v) => v + 1), [])
+
+  // Re-fetch unmanaged when effort.created or effort.deleted fires over SSE.
+  useEffect(() => {
+    if (!snapshot) return
+    const last = snapshot.events[0]
+    if (!last) return
+    if (last.type === 'effort.created' || last.type === 'effort.deleted') {
+      bumpUnmanaged()
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot?.events[0]])
+
+  const { unmanaged, projects, refresh: refreshUnmanaged } = useUnmanagedPrds(unmanagedVersion)
 
   if (!snapshot) {
     return (
@@ -29,9 +78,12 @@ export function App() {
     <div className="grid grid-cols-[300px_1fr_360px] h-screen">
       <PRDList
         prds={snapshot.prds}
+        unmanaged={unmanaged}
+        projects={projects}
         selectedUnit={selected?.unitName ?? null}
         onSelect={setSelectedUnit}
         connected={connected}
+        onAdopted={refreshUnmanaged}
       />
       {selected ? <PRDDetail prd={selected} /> : <EmptyDetail />}
       <EventFeed
@@ -44,19 +96,24 @@ export function App() {
   )
 }
 
-function PRDList({ prds, selectedUnit, onSelect, connected }: {
+function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected, onAdopted }: {
   prds: PRDRecord[]
+  unmanaged: UnmanagedPRDItem[]
+  projects: Project[]
   selectedUnit: string | null
   onSelect: (u: string) => void
   connected: boolean
+  onAdopted: () => void
 }) {
+  const [adoptItem, setAdoptItem] = useState<UnmanagedPRDItem | null>(null)
+
   return (
     <aside className="border-r border-zinc-800 overflow-y-auto bg-zinc-950">
       <div className="px-4 py-3 border-b border-zinc-800 flex items-center justify-between">
         <h1 className="text-sm font-semibold tracking-tight">ralph-monitor</h1>
         <span className={`size-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-zinc-600'}`} />
       </div>
-      {prds.length === 0 && (
+      {prds.length === 0 && unmanaged.length === 0 && (
         <div className="px-4 py-6 text-sm text-zinc-500">
           no PRDs registered. install a watchdog via{' '}
           <code className="text-zinc-300">install-watchdog.sh</code> to see it here.
@@ -72,6 +129,52 @@ function PRDList({ prds, selectedUnit, onSelect, connected }: {
           />
         ))}
       </ul>
+
+      {unmanaged.length > 0 && (
+        <div>
+          <div className="px-4 pt-4 pb-1 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold">
+            Unmanaged PRDs
+          </div>
+          <ul>
+            {unmanaged.map((item) => (
+              <li key={item.unitName}>
+                <button
+                  onClick={() => setAdoptItem(item)}
+                  className="w-full text-left px-4 py-2.5 border-b border-zinc-900 hover:bg-zinc-900/50 transition"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="size-2 rounded-full bg-zinc-600 shrink-0" title="unmanaged" />
+                    <span className="text-sm text-zinc-300 truncate">
+                      {item.unitName.replace(/^ralph-pilot-native-/, '')}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-zinc-500 truncate font-mono">
+                    {item.taskDir}
+                  </div>
+                  {item.suggestedProjectId && (
+                    <div className="mt-0.5 text-[10px] text-emerald-500">
+                      worktree match{item.suggestedBranch ? ` · ${item.suggestedBranch}` : ''}
+                    </div>
+                  )}
+                  <div className="mt-1 text-[10px] text-zinc-600 italic">click to adopt</div>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {adoptItem && (
+        <AdoptPrdDialog
+          item={adoptItem}
+          projects={projects}
+          onClose={() => setAdoptItem(null)}
+          onAdopted={() => {
+            setAdoptItem(null)
+            onAdopted()
+          }}
+        />
+      )}
     </aside>
   )
 }

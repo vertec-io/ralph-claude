@@ -11,6 +11,7 @@ import { getDb } from './db'
 import { projectsRouter } from './routes/projects'
 import { effortsRouter } from './routes/efforts'
 import { sessionsRouter } from './routes/sessions'
+import { unmanagedRouter } from './routes/unmanaged'
 import { buildLifecycleSnapshot } from './routes/lifecycle'
 import { reconcileSessionsOnStartup } from './sessions/reconcile'
 import { watchEffortPrd } from './effortWatchers'
@@ -118,6 +119,7 @@ app.use('/events/*', auth)
 app.route('/', projectsRouter)
 app.route('/', effortsRouter)
 app.route('/', sessionsRouter)
+app.route('/', unmanagedRouter)
 
 app.get('/api/state', (c) => c.json(store.snapshot()))
 
