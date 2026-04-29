@@ -6,10 +6,12 @@
 //
 // Design notes:
 //
-//   - Streaming/offset semantics (resume from a byte offset, partial last line,
-//     `is_partial`) are intentionally out of scope here — US-008b extends this
-//     same module with that machinery. The `isPartial?: boolean` field on
-//     UserTurn/AssistantTurn is reserved for that follow-up.
+//   - `parseTranscript(path)` is the bulk-load entry point used on initial
+//     render. `parseStream(path, fromOffset)` is the streaming variant used by
+//     the live-tail in US-010: it reads from a byte offset, never emits a
+//     buffered partial line, and yields a `byteOffset` envelope per record so
+//     callers can resume past it on the next call. See parseStream below for
+//     the full invariant.
 //
 //   - Top-level record types observed in real Claude transcripts:
 //       user, assistant, system,
@@ -40,7 +42,7 @@
 //     have a Claude-assigned uuid. The synthesized id is only there so the
 //     `BaseTurn` shape is uniform.
 
-import { readFile } from 'node:fs/promises'
+import { open, readFile } from 'node:fs/promises'
 
 export type Turn =
   | UserTurn
@@ -138,7 +140,7 @@ export async function parseTranscript(path: string): Promise<Turn[]> {
       record = JSON.parse(line)
     } catch {
       // Malformed lines are skipped silently — partial last-line writes are
-      // expected in a live-tailed transcript and US-008b handles them more
+      // expected in a live-tailed transcript and parseStream handles them more
       // carefully via byte-offset resume.
       continue
     }
@@ -147,6 +149,108 @@ export async function parseTranscript(path: string): Promise<Turn[]> {
     if (turn) turns.push(turn)
   }
   return turns
+}
+
+export interface StreamYield {
+  turn: Turn
+  // Byte offset IMMEDIATELY AFTER this record's terminating newline. Pass this
+  // value back as `fromOffset` on the next `parseStream` call to resume past
+  // this turn. The offset is therefore always > 0 once a turn has been yielded.
+  byteOffset: number
+}
+
+// Streaming variant of `parseTranscript` for the live-tail in US-010.
+//
+// Contract:
+//   - Reads `path` starting at `fromOffset` and yields one `StreamYield` per
+//     complete JSONL record (terminated by `\n`).
+//   - Never yields a turn for a buffered partial record — i.e. text after the
+//     last `\n` in the file is held back until a future call sees the full
+//     terminating newline.
+//   - The `byteOffset` accompanying each turn is the byte offset just past the
+//     record's terminating `\n`. Callers MUST resume by passing the byteOffset
+//     of the LAST received turn back as `fromOffset`. The first-call form is
+//     `parseStream(path, 0)`.
+//   - Returns silently (no throw) on ENOENT and on `fromOffset >= file size`.
+//   - Malformed JSON lines and records that fail `parseRecord` are skipped,
+//     same as parseTranscript. The byteOffset still advances so the caller
+//     resumes past them.
+//
+// Implementation: scan raw bytes for the newline byte 0x0A and only decode
+// whole lines as UTF-8. This keeps multi-byte characters intact even when a
+// codepoint straddles a chunk boundary, because decoding is deferred until we
+// have the full line bytes. Decoding individual chunks would risk producing a
+// replacement char (U+FFFD) at the boundary.
+export async function* parseStream(
+  path: string,
+  fromOffset: number,
+): AsyncIterable<StreamYield> {
+  let fh: Awaited<ReturnType<typeof open>>
+  try {
+    fh = await open(path, 'r')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw err
+  }
+
+  try {
+    const stat = await fh.stat()
+    if (stat.size <= fromOffset) return
+
+    const CHUNK = 64 * 1024
+    const buf = Buffer.alloc(CHUNK)
+    // Bytes carried over from the previous chunk: everything after the last
+    // newline we saw, NOT yet decoded. Decoding is deferred to whole-line
+    // boundaries to preserve multi-byte UTF-8 codepoints split across chunks.
+    let pendingBytes: Buffer = Buffer.alloc(0)
+    let absoluteOffset = fromOffset
+
+    while (true) {
+      const { bytesRead } = await fh.read(buf, 0, CHUNK, absoluteOffset)
+      if (bytesRead === 0) break
+      // Copy out: `buf` is reused on the next read; subarray() would alias it.
+      const chunkBytes = Buffer.from(buf.subarray(0, bytesRead))
+      absoluteOffset += bytesRead
+
+      const combined = pendingBytes.length === 0
+        ? chunkBytes
+        : Buffer.concat([pendingBytes, chunkBytes])
+
+      let lineStart = 0
+      for (let cursor = 0; cursor < combined.length; cursor++) {
+        if (combined[cursor] !== 0x0A) continue  // newline byte
+        const lineBytes = combined.subarray(lineStart, cursor)
+        // Bytes still buffered after this newline (i.e. bytes in `combined`
+        // not yet flushed). The end of this newline in absolute file coords
+        // is therefore `absoluteOffset - (combined.length - (cursor + 1))`.
+        const newlineEndOffset = absoluteOffset - (combined.length - (cursor + 1))
+        lineStart = cursor + 1
+
+        if (lineBytes.length === 0) continue  // blank line
+        const line = lineBytes.toString('utf8').trim()
+        if (!line) continue
+
+        let record: unknown
+        try {
+          record = JSON.parse(line)
+        } catch {
+          continue
+        }
+        if (typeof record !== 'object' || record === null) continue
+        const turn = parseRecord(record as Record<string, unknown>)
+        if (turn) yield { turn, byteOffset: newlineEndOffset }
+      }
+      // Carry the partial tail (bytes after the last newline) to next iter.
+      pendingBytes = lineStart < combined.length
+        ? Buffer.from(combined.subarray(lineStart))
+        : Buffer.alloc(0)
+    }
+    // Anything left in pendingBytes lacks a terminating newline → partial,
+    // intentionally not yielded. It will be picked up on the next call when
+    // the writer flushes the rest of the line and the trailing '\n'.
+  } finally {
+    await fh.close()
+  }
 }
 
 function parseRecord(record: Record<string, unknown>): Turn | null {
