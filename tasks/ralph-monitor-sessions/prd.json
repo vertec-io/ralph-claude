@@ -1,0 +1,1462 @@
+{
+  "schemaVersion": "2.4",
+  "project": "ralph-monitor",
+  "taskDir": "tasks/ralph-monitor-sessions",
+  "branchName": "ralph/ralph-monitor-sessions",
+  "mergeTarget": "main",
+  "autoMerge": false,
+  "pauseBetweenStories": false,
+  "modelHintMode": false,
+  "cavemanMode": false,
+  "type": "feature",
+  "description": "Evolve ralph-monitor from a passive PRD watcher into a local Claude conversation manager. Sqlite-backed three-tier model (projects -> efforts -> sessions) with PTY+WebSocket bridge, JSONL chat rendering, restart recovery via 'claude --resume', sidebar lifecycle sections, and 127.0.0.1-only auth-gated server.",
+  "userStories": [
+    {
+      "id": "US-000a",
+      "title": "PTY library + encoder collapse spike (decision document)",
+      "description": "As a developer, before any spawn/PTY/WebSocket work, I need to validate that a PTY library actually works under Bun AND empirically confirm the JSONL directory-name encoding rule. Produces a decision document; downstream stories reference its outputs by name. Ralph proceeds to US-001 once the document exists (no user-ack gate).",
+      "acceptanceCriteria": [
+        {
+          "description": "PTY library validation: add node-pty to ralph-monitor/package.json and attempt to install + import under Bun; write a throwaway script ralph-monitor/scripts/pty-spike.ts that spawns 'bash -c \"echo hi; sleep 0.5\"' in a PTY, captures stdout, sends a resize event, and exits cleanly. Verify bidirectional bytes work (write to stdin, read from stdout)",
+          "passes": true
+        },
+        {
+          "description": "If node-pty fails under Bun, repeat with bun-pty (if it exists)",
+          "passes": true
+        },
+        {
+          "description": "No pty.js fallback - pty.js is unmaintained (last release 2015) and not viable under modern Bun. If both node-pty and bun-pty fail, the decision document records the failure and stops; no autoproceed to a non-viable shim",
+          "passes": true
+        },
+        {
+          "description": "Pin the PTY parent's /proc/<pid>/comm value by inspecting it during the spike (likely 'bun' or 'node' depending on how the PTY library spawns; this value is consumed by US-006's reconciliation logic)",
+          "passes": true
+        },
+        {
+          "description": "Encoder collapse empirical test: run mkdir -p '/tmp/ralph-encoder-test..foo'; (cd '/tmp/ralph-encoder-test..foo' && claude --session-id $(cat /proc/sys/kernel/random/uuid) --dangerously-skip-permissions --print 'hi' < /dev/null); then ls ~/.claude/projects/ | grep ralph-encoder-test. Document whether the resulting directory name is '-tmp-ralph-encoder-test--foo' (per-char) or '-tmp-ralph-encoder-test-foo' (collapsed). Expected and currently-spec'd answer is collapsed (+ in regex); if observation differs, the encoder spec in US-005a-1 and FR-6 must be updated to match before proceeding. Clean up the test directory and JSONL afterward",
+          "passes": true
+        },
+        {
+          "description": "Produce tasks/ralph-monitor-sessions/decisions/US-000a-DECIDE_pty-and-encoder.md containing: chosen PTY library + version, observed PTY-parent comm value, encoder regex (collapsed vs per-char), any platform constraints, and the empirical test command outputs as evidence",
+          "passes": true
+        },
+        {
+          "description": "Update US-005a-1 and FR-6 references to the empirically-confirmed encoder regex if it differs from the spec",
+          "passes": true
+        },
+        {
+          "description": "Delete the throwaway spike script; the decision document remains",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 1,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-001",
+      "title": "Sqlite schema and migrations",
+      "description": "As a developer, I need a sqlite database with projects, efforts, and sessions tables so all conversation state can be persisted across restarts.",
+      "acceptanceCriteria": [
+        {
+          "description": "bun:sqlite is wired into ralph-monitor/server/ and a migration runner applies schema on startup",
+          "passes": true
+        },
+        {
+          "description": "DB file lives at ~/.config/ralph-monitor/ralph-monitor.db (path configurable via RALPH_MONITOR_DB); parent dir created with 0700",
+          "passes": true
+        },
+        {
+          "description": "Schema implements three tables: projects(id TEXT PK, name TEXT NOT NULL, root_dir TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL, last_opened_at INTEGER, archived INTEGER NOT NULL DEFAULT 0, pinned INTEGER NOT NULL DEFAULT 0)",
+          "passes": true
+        },
+        {
+          "description": "efforts(id TEXT PK, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE, name TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('prd','task','general')), prd_path TEXT, working_dir TEXT, status TEXT NOT NULL CHECK (status IN ('active','done','archived')) DEFAULT 'active', created_at INTEGER NOT NULL, completed_at INTEGER, CHECK (kind != 'prd' OR (prd_path IS NOT NULL AND length(prd_path) > 0)))",
+          "passes": true
+        },
+        {
+          "description": "sessions(id TEXT PK, effort_id TEXT NOT NULL REFERENCES efforts(id) ON DELETE CASCADE, working_dir TEXT, jsonl_path TEXT NOT NULL, title TEXT, mode TEXT NOT NULL CHECK (mode IN ('interactive','autonomous')), process_pid INTEGER, process_started_at INTEGER, last_activity_at INTEGER, created_at INTEGER NOT NULL)",
+          "passes": true
+        },
+        {
+          "description": "sessions.working_dir is nullable; resolution order at spawn/resolve time is session.working_dir ?? effort.working_dir ?? project.root_dir",
+          "passes": true
+        },
+        {
+          "description": "projects.root_dir is normalized via realpath + trailing-slash strip before insert; case is preserved",
+          "passes": true
+        },
+        {
+          "description": "All foreign keys cascade on delete; no nullable FK columns",
+          "passes": true
+        },
+        {
+          "description": "Indexes: idx_projects_archived ON projects(archived), idx_efforts_project ON efforts(project_id), idx_efforts_status ON efforts(status), idx_sessions_effort ON sessions(effort_id), idx_sessions_last_activity ON sessions(last_activity_at), partial idx_sessions_live ON sessions(process_pid) WHERE process_pid IS NOT NULL, partial unique idx_sessions_one_live_per_effort ON sessions(effort_id) WHERE process_pid IS NOT NULL",
+          "passes": true
+        },
+        {
+          "description": "On project creation, an auto-generated 'general' effort is inserted in the same transaction",
+          "passes": true
+        },
+        {
+          "description": "PRAGMA user_version = 1 is set after first migration; runner reads user_version and applies only newer migrations",
+          "passes": true
+        },
+        {
+          "description": "Migration runner is idempotent (running twice is a no-op)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 2,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Persistence layer (CRUD operations)",
+      "description": "As a developer, I need typed CRUD operations for projects/efforts/sessions so server endpoints have a clean data layer to call into.",
+      "acceptanceCriteria": [
+        {
+          "description": "server/db/projects.ts, server/db/efforts.ts, server/db/sessions.ts expose typed create/read/update/delete/list functions",
+          "passes": true
+        },
+        {
+          "description": "All write operations use prepared statements",
+          "passes": true
+        },
+        {
+          "description": "List operations support filtering (archived, pinned) and ordering (last_opened_at DESC default)",
+          "passes": true
+        },
+        {
+          "description": "Soft-delete via archived flag for projects/efforts; hard-delete is a separate explicit function",
+          "passes": true
+        },
+        {
+          "description": "createSession({ effort_id, mode, working_dir?, title? }) requires a pre-allocated UUID passed in (caller-allocated, never auto-generated by the DB layer); rejects collisions with a typed error",
+          "passes": true
+        },
+        {
+          "description": "getProjectByRootDir(path) normalizes path via realpath before lookup",
+          "passes": true
+        },
+        {
+          "description": "Unit tests cover create, list-with-filter, archive, hard-delete, AND the one-live-session-per-effort uniqueness violation (insert two sessions with same effort_id and non-null process_pid -> second INSERT fails with the partial unique index error)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 3,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Server API endpoints + AppEvent union extension + lifecycle snapshot",
+      "description": "As a frontend developer, I need REST endpoints AND a cleanly-extended event channel so the UI can manage the project hierarchy.",
+      "acceptanceCriteria": [
+        {
+          "description": "Extend AppEvent['type'] union in server/types.ts to include: project.created, project.updated, project.deleted, effort.created, effort.updated, effort.deleted, session.created, session.updated, session.deleted, session.exited, lifecycle.snapshot",
+          "passes": true
+        },
+        {
+          "description": "GET /api/projects?status=active|recent|archived&pinned=true|false returns filtered list",
+          "passes": true
+        },
+        {
+          "description": "POST /api/projects body { name, root_dir } realpath-normalizes root_dir server-side, creates project + auto-'general' effort, returns full record",
+          "passes": true
+        },
+        {
+          "description": "PATCH /api/projects/:id updates name, archived, pinned",
+          "passes": true
+        },
+        {
+          "description": "DELETE /api/projects/:id?confirm_name=<typed> requires confirm_name matching project.name exactly; cascades to efforts and sessions; returns 422 on mismatch",
+          "passes": true
+        },
+        {
+          "description": "GET /api/projects/:id/efforts, POST /api/projects/:id/efforts, PATCH /api/efforts/:id, DELETE /api/efforts/:id (no typed-name requirement on effort delete)",
+          "passes": true
+        },
+        {
+          "description": "GET /api/efforts/:id/sessions, PATCH /api/sessions/:id, DELETE /api/sessions/:id (and ?purge_jsonl=true for atomic JSONL+row removal)",
+          "passes": true
+        },
+        {
+          "description": "Lifecycle snapshot on connect: /events SSE endpoint emits a lifecycle.snapshot event on every new client connection containing { projects: [...], efforts: [...], live_session_ids: [...] } BEFORE any subsequent lifecycle events. This eliminates the fetch-then-subscribe race window",
+          "passes": true
+        },
+        {
+          "description": "All mutation endpoints emit the corresponding scoped event via store.recordEvent",
+          "passes": true
+        },
+        {
+          "description": "Endpoint errors return JSON { error, details } with appropriate HTTP status codes",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 4,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Auth token, localhost-only binding, dev-token endpoint, WebSocket auth",
+      "description": "As the operator, I need refuse-to-start on non-loopback bind, a bearer token gating all API/SSE/WebSocket access, and visible error reporting under systemd.",
+      "acceptanceCriteria": [
+        {
+          "description": "Server binds to 127.0.0.1 by default",
+          "passes": true
+        },
+        {
+          "description": "If RALPH_MONITOR_BIND is set to anything other than 127.0.0.1, the server refuses to start: writes the reason to ~/.config/ralph-monitor/last-error.txt (atomic write, overwrites), prints to stderr, and exits non-zero. Error message: 'ralph-monitor refuses to bind to non-loopback address. Set RALPH_MONITOR_BIND=127.0.0.1 or unset it. Network exposure is not supported in v1.'",
+          "passes": true
+        },
+        {
+          "description": "On first start, generate a 32-byte random token (crypto.randomBytes(32).toString('hex')), write to ~/.config/ralph-monitor/token with 0600 perms; if the file exists, reuse it",
+          "passes": true
+        },
+        {
+          "description": "All /api/* and /events routes require Authorization: Bearer <token> header OR ?token=<token> query param (latter for SSE only; logs a warning about access-log leakage)",
+          "passes": true
+        },
+        {
+          "description": "WebSocket auth uses Sec-WebSocket-Protocol: bearer.<token> subprotocol - NOT a query-string token. The server validates the subprotocol on upgrade and echoes it back on success per RFC 6455; rejects with HTTP 401 on missing/invalid subprotocol",
+          "passes": true
+        },
+        {
+          "description": "Static asset routes (/, /index.html, JS/CSS bundle) remain unauthenticated",
+          "passes": true
+        },
+        {
+          "description": "GET /api/dev-token returns { token } ONLY when the actual listening socket address is loopback (inspected at request time, not from env). Returns 404 on non-loopback (and per refuse-to-start, this case shouldn't happen anyway - belt-and-suspenders)",
+          "passes": true
+        },
+        {
+          "description": "The dev index.html fetches /api/dev-token on load, caches the token in memory for fetches/SSE/WS",
+          "passes": true
+        },
+        {
+          "description": "Manual verification: curl http://127.0.0.1:PORT/api/projects returns 401; with bearer header returns the list; setting RALPH_MONITOR_BIND=0.0.0.0 and starting prints the refusal message AND populates last-error.txt",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 5,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005a-1",
+      "title": "Spawn primitive \u2014 registry, mutex, encoder, DB row",
+      "description": "As a developer, I need the foundational pieces of the spawn primitive: a session registry (in-memory Map<sessionId, PtyHandle>), per-effort spawn mutex, the encoder helper, and DB-row-before-spawn semantics \u2014 without yet calling the actual claude binary.",
+      "acceptanceCriteria": [
+        {
+          "description": "server/sessions/registry.ts exports an in-memory Map<sessionId, PtyHandle> with register/unregister/get methods. Registry is the single source of truth for live PTY handles; downstream stories (US-005b WebSocket, US-005c ring buffer, US-016 status badge) attach to it",
+          "passes": true
+        },
+        {
+          "description": "server/sessions/spawnMutex.ts exports a per-effort async mutex: withEffortLock(effortId, fn). Concurrent spawn requests for the same effort serialize through this lock; the lock releases on success or error",
+          "passes": true
+        },
+        {
+          "description": "server/jsonl/paths.ts exports encodeClaudeProjectDir(absPath: string): string implementing the regex absPath.replace(/[^A-Za-z0-9]/g, '-') (per-character replacement \u2014 NO + collapse \u2014 per US-000a empirical confirmation: '/tmp/ralph-encoder-test..foo' encodes to '-tmp-ralph-encoder-test--foo', preserving consecutive dashes for consecutive non-alnums). If absPath is empty or not absolute, throws a typed error",
+          "passes": true
+        },
+        {
+          "description": "Encoder unit tests cover: leading slash, dots, underscores, hyphens, consecutive non-alnums (/foo..bar -> -foo--bar; note the doubled dash \u2014 per-char, not collapsed), trailing-slash-after-realpath (verified to be neutralized), Unicode characters (one code unit -> one -; documented as a known limitation if Claude differs)",
+          "passes": true
+        },
+        {
+          "description": "server/sessions/spawn.ts exports prepareSpawn({ effort_id, mode, working_dir?, title? }): validates effort exists, resolves working_dir via session.working_dir ?? effort.working_dir ?? project.root_dir, calls realpath on the resolved path (typed error on failure), generates a fresh UUID via crypto.randomUUID(), computes jsonl_path via encodeClaudeProjectDir(resolved-cwd) + '/' + uuid + '.jsonl', INSERTs the session row with process_pid = NULL. If the partial-unique-index check fires (effort already has a live session), surfaces a 409 typed error and rolls back. Returns { uuid, jsonlPath, resolvedCwd, projectRootDir }",
+          "passes": true
+        },
+        {
+          "description": "prepareSpawn is wrapped in withEffortLock(effort_id, ...) so concurrent calls serialize",
+          "passes": true
+        },
+        {
+          "description": "Unit tests cover: encoder edge cases, working-dir resolution chain, missing-cwd error path, one-live-session-per-effort 409",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 6,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005a-2",
+      "title": "Spawn primitive \u2014 actual claude invocation + registry registration",
+      "description": "As a developer, I need to actually spawn the claude process via the chosen PTY library, register the handle in the registry, and roll back the DB row if registration fails.",
+      "acceptanceCriteria": [
+        {
+          "description": "server/sessions/spawn.ts exports spawnSession({ effort_id, mode, working_dir?, initial_prompt? }): calls prepareSpawn (US-005a-1), then spawns the PTY child",
+          "passes": true
+        },
+        {
+          "description": "PTY spawn command: claude --session-id <uuid> --dangerously-skip-permissions --name <effort-name>:<uuid-prefix> in the resolved cwd, with env RALPH_MONITOR_SESSION=<uuid>",
+          "passes": true
+        },
+        {
+          "description": "When resolvedCwd !== projectRootDir, the spawn command includes --add-dir <projectRootDir>",
+          "passes": true
+        },
+        {
+          "description": "Synchronous registration invariant: immediately after spawn, the spawn function calls registry.register(uuid, ptyHandle). If registration throws (map collision, type mismatch, etc.), the function sends SIGTERM to the child, waits up to 5s for exit (escalating to SIGKILL), and hard-deletes the DB row. No 'live row, unreachable PTY' half-state is ever persisted",
+          "passes": true
+        },
+        {
+          "description": "On successful spawn + registration: UPDATE sessions SET process_pid = ..., process_started_at = ...; emit session.created via store.recordEvent",
+          "passes": true
+        },
+        {
+          "description": "On spawn failure (binary not found, working dir invalid, permission denied): hard-delete the DB row; surface the underlying error",
+          "passes": true
+        },
+        {
+          "description": "PTY library and the parent process's comm value come from US-000a's decision document",
+          "passes": true
+        },
+        {
+          "description": "Integration test: spawn a tiny PTY child (bash -c 'sleep 5' rather than claude for test speed), verify registry.get returns the handle within the function's return; force a registration failure (mock) and verify the SIGTERM-then-rollback path",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 7,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005a-3",
+      "title": "Mode-conditional initial prompt handling",
+      "description": "As a user, when I create an autonomous session with an initial prompt, that prompt should be written to the PTY stdin so the agent starts working immediately. For interactive sessions, no auto-write happens.",
+      "acceptanceCriteria": [
+        {
+          "description": "In spawnSession, if mode === 'autonomous' AND initial_prompt is provided: after the PTY is registered, write initial_prompt + '\\r' to PTY stdin",
+          "passes": true
+        },
+        {
+          "description": "If mode === 'interactive': PTY stdin remains open but no auto-write happens; the user's first input arrives via WebSocket",
+          "passes": true
+        },
+        {
+          "description": "If mode === 'autonomous' but no initial_prompt is provided: spawn proceeds, no auto-write \u2014 caller's choice",
+          "passes": true
+        },
+        {
+          "description": "Unit/integration test: mock-spawn an autonomous session with an initial prompt, verify a stdin write occurs synchronously after registration; mock-spawn an interactive session, verify NO stdin write happens",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 8,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005b",
+      "title": "WebSocket PTY bridge (resize + exit handling)",
+      "description": "As a user, I need bidirectional bytes between the browser and the spawned PTY.",
+      "acceptanceCriteria": [
+        {
+          "description": "WebSocket /ws/sessions/:id accepts authenticated upgrade per US-004 (subprotocol auth)",
+          "passes": true
+        },
+        {
+          "description": "Hono+Bun WebSocket nuance: subprotocol negotiation goes through Bun.serve's websocket handler. The implementation reads Sec-WebSocket-Protocol from the upgrade request, validates bearer.<token>, and echoes the matched protocol in the upgrade response",
+          "passes": true
+        },
+        {
+          "description": "WS handler attaches/detaches against the registry from US-005a-1",
+          "passes": true
+        },
+        {
+          "description": "PTY -> WS: every PTY chunk emits a {type:'data', bytes} message (binary frame)",
+          "passes": true
+        },
+        {
+          "description": "WS -> PTY: incoming {type:'input', data} messages are written to PTY stdin",
+          "passes": true
+        },
+        {
+          "description": "{type:'resize', rows, cols} control messages call pty.resize(cols, rows)",
+          "passes": true
+        },
+        {
+          "description": "On PTY exit: server emits {type:'exit', code} to all attached clients, closes WS connections, updates sessions.process_pid = NULL + process_started_at = NULL + last_activity_at = now(), calls registry.unregister(sessionId), emits session.exited via store.recordEvent",
+          "passes": true
+        },
+        {
+          "description": "Integration test: spawn 'bash -c \"echo hi\"', open WS, verify data arrives, verify exit with code 0, verify registry entry is gone",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 9,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005c",
+      "title": "Server-side ring buffer for late-attaching clients",
+      "description": "As a user opening the session view AFTER the PTY has been emitting bytes, I want to see the recent history.",
+      "acceptanceCriteria": [
+        {
+          "description": "Each PtyHandle in the registry carries a ring buffer (default 256 KB; configurable via RALPH_MONITOR_PTY_BUFFER_BYTES)",
+          "passes": true
+        },
+        {
+          "description": "Every PTY -> WS data chunk also appends to the ring buffer; oldest bytes drop on overflow",
+          "passes": true
+        },
+        {
+          "description": "On new WS attach: server sends a {type:'replay', bytes} frame with the buffer contents BEFORE any subsequent data frames",
+          "passes": true
+        },
+        {
+          "description": "Multiple concurrent WS clients each receive replay independently",
+          "passes": true
+        },
+        {
+          "description": "On PTY exit, the buffer is preserved in the (now-detached) handle for 60s (configurable) so a client that attaches right after exit still sees the final output, then GC'd",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 10,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-005d",
+      "title": "Spawn endpoint",
+      "description": "As a frontend developer, I need a POST /api/sessions endpoint that wraps spawnSession.",
+      "acceptanceCriteria": [
+        {
+          "description": "POST /api/sessions body { effort_id, mode, working_dir?, initial_prompt? } calls spawnSession, returns { id, jsonl_path, ws_url }",
+          "passes": true
+        },
+        {
+          "description": "Returns 409 on the one-live-session-per-effort violation",
+          "passes": true
+        },
+        {
+          "description": "Returns 404 if effort_id doesn't exist",
+          "passes": true
+        },
+        {
+          "description": "Returns 422 if working_dir resolves outside the project's root_dir AND its known worktrees (uses server/git/worktrees.ts:listWorktrees(projectRootDir) shared helper)",
+          "passes": true
+        },
+        {
+          "description": "Argv assertion test: when resolved cwd != project.root_dir, the spawn command includes --add-dir <project.root_dir>",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 11,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Startup process reconciliation (greenfield)",
+      "description": "As ralph-monitor, on startup I need to figure out which DB-tracked sessions still have live processes. The current liveness.ts matches by /proc/<pid>/comm + /proc/<pid>/cwd only; this story adds /proc/<pid>/environ reading and RALPH_MONITOR_SESSION env-tag detection as net-new code.",
+      "acceptanceCriteria": [
+        {
+          "description": "New server/sessions/reconcile.ts exports reconcileSessionsOnStartup(): Promise<ReconcileResult>",
+          "passes": true
+        },
+        {
+          "description": "For each DB session with non-null process_pid: read /proc/<pid>/comm AND /proc/<pid>/environ (null-byte-separated)",
+          "passes": true
+        },
+        {
+          "description": "Match requires both conditions (logical AND, not OR \u2014 protects against PID reuse): comm == <PTY-parent-comm-from-US-000a> AND environ contains RALPH_MONITOR_SESSION=<session-uuid>",
+          "passes": true
+        },
+        {
+          "description": "If matched: mark as live-orphaned (alive but ralph-monitor's PTY parent died, so we cannot reattach). API exposes { status: 'live-orphaned', live: true, attached: false }",
+          "passes": true
+        },
+        {
+          "description": "If not matched: mark as dormant (UPDATE sessions SET process_pid = NULL, process_started_at = NULL)",
+          "passes": true
+        },
+        {
+          "description": "GET /api/sessions/:id returns computed status: 'dormant' | 'live-attached' | 'live-orphaned' | 'exited' (where live-attached = registry has an entry; reconciliation runs only at startup)",
+          "passes": true
+        },
+        {
+          "description": "v1 reachability note (preserved in code comment): live-orphaned is logically reachable but practically zero in v1 because owned processes die with ralph-monitor (no setsid); the code path is kept live so v2 setsid work doesn't need a rewrite",
+          "passes": true
+        },
+        {
+          "description": "Linux-only; on macOS/other, the reconciler logs a warning and marks all PID-bearing rows as dormant",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 12,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Resume dormant session",
+      "description": "As a user, 'Resume' on a dormant session should spawn 'claude --resume <id>' and reattach.",
+      "acceptanceCriteria": [
+        {
+          "description": "POST /api/sessions/:id/resume spawns claude --resume <session-id> --dangerously-skip-permissions in the session's resolved cwd with RALPH_MONITOR_SESSION=<id> env tag, registers in the registry per US-005a-2 invariants",
+          "passes": true
+        },
+        {
+          "description": "DB row updates process_pid and process_started_at",
+          "passes": true
+        },
+        {
+          "description": "Returns 409 if status is live-attached or live-orphaned",
+          "passes": true
+        },
+        {
+          "description": "Returns 404 if the JSONL no longer exists at jsonl_path",
+          "passes": true
+        },
+        {
+          "description": "Returns 409 if a different session in the same effort is currently live (one-live-session-per-effort)",
+          "passes": true
+        },
+        {
+          "description": "WebSocket reconnect to /ws/sessions/:id attaches to the new PTY; ring buffer is fresh",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP: pkill -f 'ralph-monitor', restart server, navigate to a session whose chat view shows prior turns, click Resume, verify the input box becomes active and a new user turn lands in the JSONL",
+          "passes": true
+        }
+      ],
+      "priority": 13,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008a",
+      "title": "JSONL parser \u2014 record types, segment union, parseTranscript",
+      "description": "As a developer, I need a complete parser that converts Claude's JSONL into a typed turn model.",
+      "acceptanceCriteria": [
+        {
+          "description": "server/jsonl/parser.ts exports parseTranscript(path: string): Promise<Turn[]>",
+          "passes": true
+        },
+        {
+          "description": "Turn discriminated union covers ALL observed top-level type values: user, assistant, system, queue-operation, attachment, ai-title, last-prompt, file-history-snapshot, permission-mode. Non-renderable types map to { kind: 'meta', type, raw }",
+          "passes": true
+        },
+        {
+          "description": "user/assistant records expose: parentUuid, isSidechain, cwd, gitBranch, sessionId, timestamp (parsed to ms), requestId, uuid, and message.content[] parsed into typed segments: {type:'text', text} | {type:'tool_use', id, name, input} | {type:'tool_result', tool_use_id, content}",
+          "passes": true
+        },
+        {
+          "description": "Unknown record types are preserved as { kind: 'raw', type, content: <obj> } and logged once per unique type at WARN level",
+          "passes": true
+        },
+        {
+          "description": "Unit tests: fresh single-turn transcript, transcript with tool uses + results, transcript with all observed type values, parent transcript containing an Agent tool_use call",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 14,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-008b",
+      "title": "JSONL streaming parser \u2014 offset tracking, is_partial, isSidechain",
+      "description": "As a developer, I need a streaming parser variant that handles incremental file growth, partial-record safety, and partial-message replacement.",
+      "acceptanceCriteria": [
+        {
+          "description": "server/jsonl/parser.ts exports parseStream(path: string, fromOffset: number): AsyncIterable<{ turn: Turn, byteOffset: number }>",
+          "passes": true
+        },
+        {
+          "description": "Parser tracks the byte offset of the last *complete* newline; never emits a turn from a buffered partial record. parseStream resumes from the caller-supplied offset and only yields new turns past it",
+          "passes": true
+        },
+        {
+          "description": "Records with is_partial: true are tagged so consumers can replace-in-place by uuid rather than appending",
+          "passes": true
+        },
+        {
+          "description": "Records with isSidechain: true are emitted with the flag preserved (defense-in-depth \u2014 parent JSONLs do not normally contain sidechain records, but the parser doesn't strip them; the renderer in US-009 filters them on the client side)",
+          "passes": true
+        },
+        {
+          "description": "Unit tests: transcript with a partial trailing record (no newline at EOF) \u2014 verify the parser stops at the last complete newline; transcript with is_partial: true followed by the final non-partial \u2014 verify both yield with the offset advancing; transcript with isSidechain: true records \u2014 verify the flag round-trips",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 15,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Chat-style session renderer with Agent-tool affordance",
+      "description": "As a user, I see the conversation rendered as readable chat with turns, tool calls, and tool results inline \u2014 including Agent invocation affordances.",
+      "acceptanceCriteria": [
+        {
+          "description": "ui/components/SessionTranscript.tsx accepts { sessionId, turns: Turn[] } and renders parsed turns",
+          "passes": true
+        },
+        {
+          "description": "Renderer skips turns where isSidechain === true (defense-in-depth filter; parent JSONLs do not normally contain sidechain records, but the renderer is the load-bearing filter)",
+          "passes": true
+        },
+        {
+          "description": "User turns / assistant turns / system turns render with distinct styling; meta-kind turns are not rendered",
+          "passes": true
+        },
+        {
+          "description": "Tool uses render as collapsible '\u25b6 <tool-name>(<short-input>)'; tool results below them, also collapsible (collapsed by default if output > 10 lines)",
+          "passes": true
+        },
+        {
+          "description": "Agent tool calls (tool_use.name === 'Agent') render with explicit affordance: header '\u25b6 Agent: <input.description>' + subagent_type shown as a pill; body shows subagent_type and prompt when expanded; the corresponding tool_result renders as a collapsible 'Final answer' block; a small dimmed footnote reads 'Sub-agent trace not surfaced in v1 \u2014 see PRD non-goals'",
+          "passes": true
+        },
+        {
+          "description": "Code blocks (``` fences) render with monospace font and a single accent background \u2014 no language-aware tokenization",
+          "passes": true
+        },
+        {
+          "description": "Sticky-bottom: auto-scroll on new turns UNLESS the user has scrolled up",
+          "passes": true
+        },
+        {
+          "description": "Empty state for sessions whose JSONL is empty/missing",
+          "passes": true
+        },
+        {
+          "description": "is_partial: true updates replace the matching prior partial record by uuid",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, start 'bun run dev' in ralph-monitor/ (kill by port if needed; never pkill node), navigate to a session URL with at least one Agent tool call in its JSONL, verify: user/assistant turns visible, Agent tool block with 'Agent: <description>' label and subagent_type pill, tool result expanded shows final answer text, code block monospace",
+          "passes": true
+        }
+      ],
+      "priority": 16,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Live JSONL tail (chokidar-based per-session SSE)",
+      "description": "As a user, when a session is active, the chat view updates in real time as new turns land.",
+      "acceptanceCriteria": [
+        {
+          "description": "Server endpoint GET /api/sessions/:id/transcript/stream streams turns over a per-session SSE channel (separate from /events)",
+          "passes": true
+        },
+        {
+          "description": "Watch library: chokidar (with awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 }) \u2014 consistent with the rest of ralph-monitor/server/watchers.ts. Do NOT use raw node:fs.watch",
+          "passes": true
+        },
+        {
+          "description": "On connect: emits snapshot event with all current turns (via parseTranscript from US-008a)",
+          "passes": true
+        },
+        {
+          "description": "Subsequently emits turn events as new turns land, using parseStream from US-008b with per-client offset tracking",
+          "passes": true
+        },
+        {
+          "description": "Multiple concurrent clients on the same session each track their own offset; one chokidar watcher per session id is shared across clients",
+          "passes": true
+        },
+        {
+          "description": "Partial records (is_partial: true) are emitted with the flag set",
+          "passes": true
+        },
+        {
+          "description": "On JSONL deletion: emits {type:'gone'} and closes",
+          "passes": true
+        },
+        {
+          "description": "On JSONL truncation (size shrunk): emits a fresh snapshot event (treat as recreated)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Manual verification (in US-018): open session, run 'claude --resume <id>' in another terminal, type a message, watch the new turn appear without refresh",
+          "passes": true
+        }
+      ],
+      "priority": 17,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Raw PTY stream toggle (xterm.js)",
+      "description": "As a user watching an autonomous run, I want a 'raw stream' view showing live byte-level PTY output.",
+      "acceptanceCriteria": [
+        {
+          "description": "Add xterm + xterm-addon-fit to ralph-monitor/package.json (and xterm-addon-attach if the chosen integration shape needs it)",
+          "passes": true
+        },
+        {
+          "description": "Session detail view (US-016a) has a view-mode toggle: 'Chat' (default) and 'Stream'",
+          "passes": true
+        },
+        {
+          "description": "Stream mode mounts xterm.js connected to the WebSocket from US-005b; receives the replay frame on connect (US-005c) before live data frames",
+          "passes": true
+        },
+        {
+          "description": "Stream mode is disabled (button greyed with tooltip) when status is dormant, live-orphaned, or exited \u2014 chat mode remains available",
+          "passes": true
+        },
+        {
+          "description": "xterm.js handles ANSI/cursor sequences natively; no custom escape filtering",
+          "passes": true
+        },
+        {
+          "description": "Switching Chat <-> Stream does not disconnect the WebSocket; each view mounts/unmounts independently",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, start a session with active PTY, switch to Stream mode, verify xterm container is visible and browser_console_messages shows no errors",
+          "passes": true
+        }
+      ],
+      "priority": 18,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-012a",
+      "title": "Refactor snapshot.ts to a wider path-keyed entry point",
+      "description": "As a developer, I need snapshot.ts to support reading a snapshot for an arbitrary prdPath (plus optional context fields) so it can serve effort-attached PRDs without losing systemd-discovered functionality.",
+      "acceptanceCriteria": [
+        {
+          "description": "server/snapshot.ts exports new function: getSnapshotForPath(input: { prdPath: string; workingDir: string; sessionId?: string; unitName?: string }): Promise<SnapshotData>",
+          "passes": true
+        },
+        {
+          "description": "The wider input lets effort-attached callers (US-012c) supply prdPath + workingDir (with sessionId and unitName undefined), while systemd-attached callers (existing refreshSnapshot) supply all four",
+          "passes": true
+        },
+        {
+          "description": "SnapshotData shape is unchanged from what refreshSnapshot currently returns; fields whose values depend on absent inputs (e.g., agents depends on unitName/sessionId) gracefully degrade to empty arrays/null",
+          "passes": true
+        },
+        {
+          "description": "Existing refreshSnapshot(prd: PRDRecord) is rewritten as a thin caller: getSnapshotForPath({ prdPath: join(prd.taskDir, 'prd.json'), workingDir: prd.worktreeDir, sessionId: prd.sessionId, unitName: prd.unitName })",
+          "passes": true
+        },
+        {
+          "description": "If prdPath doesn't exist on disk, returns { status: 'pending' } shape \u2014 caller-friendly, never throws",
+          "passes": true
+        },
+        {
+          "description": "Unit tests cover: existing refreshSnapshot output is unchanged for a discovered PRD; getSnapshotForPath with effort-attached inputs returns the same shape but with agents: [] and other unit-dependent fields empty; missing-file returns { status: 'pending' }",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 19,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-012b",
+      "title": "Decouple decisions/agents/tasks UI panels from PRDRecord",
+      "description": "As a developer, I need the UI panels to accept a generic snapshot prop so they render for both systemd- and effort-attached PRDs.",
+      "acceptanceCriteria": [
+        {
+          "description": "Extract panels from ui/App.tsx into ui/components/PrdSnapshotPanels.tsx exposing <PrdSnapshotPanels snapshot={SnapshotData} />",
+          "passes": true
+        },
+        {
+          "description": "The component takes only the snapshot data as a prop \u2014 no global PRDRecord reach",
+          "passes": true
+        },
+        {
+          "description": "Empty/null fields (e.g., snapshot.agents.processes = [] for an effort-attached PRD without a live session) render gracefully \u2014 no crashes, no error styling, just an empty state ('No agent processes')",
+          "passes": true
+        },
+        {
+          "description": "App.tsx updated to render <PrdSnapshotPanels snapshot={prd}> for the existing systemd case with no behavior change",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Playwright MCP: navigate to the existing PRD detail view, verify decisions/agents/tasks panels render unchanged",
+          "passes": true
+        }
+      ],
+      "priority": 20,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-012c",
+      "title": "Wire Effort.prd_path into the snapshot panels",
+      "description": "As a user, opening an Effort with kind='prd' shows the same decisions/agents/tasks panels driven by effort.prd_path.",
+      "acceptanceCriteria": [
+        {
+          "description": "New endpoint GET /api/efforts/:id/snapshot returns the snapshot via getSnapshotForPath({ prdPath: effort.prd_path, workingDir: effort.working_dir ?? project.root_dir }). Returns { status: 'pending' } when the file is missing; 404 for non-PRD efforts",
+          "passes": true
+        },
+        {
+          "description": "Per-effort scoped event effort.<id>.snapshot.updated fires when the underlying file watcher (chokidar on effort.prd_path) detects changes",
+          "passes": true
+        },
+        {
+          "description": "Effort detail view renders <PrdSnapshotPanels /> with the result of /api/efforts/:id/snapshot",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, navigate to a PRD effort detail view, verify decisions/agents panels render",
+          "passes": true
+        }
+      ],
+      "priority": 21,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Unmanaged PRDs section + adopt + discovery collision handling",
+      "description": "As an existing ralph-monitor user, PRDs from systemd-unit discovery appear in an 'Unmanaged' section, get adopted into projects on demand, and never double-up with effort-attached ones.",
+      "acceptanceCriteria": [
+        {
+          "description": "Existing discovery.ts continues walking systemd units producing PRD records",
+          "passes": true
+        },
+        {
+          "description": "GET /api/unmanaged-prds returns the discovered list MINUS any whose taskDir + '/prd.json' matches an effort's prd_path (left-anti-join). The join key is explicit: effort.prd_path === path.join(record.taskDir, 'prd.json')",
+          "passes": true
+        },
+        {
+          "description": "Sidebar has a top-level 'Unmanaged PRDs' section, rendered when non-empty",
+          "passes": true
+        },
+        {
+          "description": "Clicking an unmanaged PRD opens an 'Adopt into project' dialog: pick existing project (autocomplete by root_dir) OR create new project; on submit, creates an effort with kind='prd', prd_path = join(taskDir, 'prd.json'), working_dir = record.worktreeDir if present",
+          "passes": true
+        },
+        {
+          "description": "When a discovered PRD's worktreeDir matches a worktree of an existing project's root_dir (via shared server/git/worktrees.ts:listWorktrees(projectRootDir) helper, cached for 30s, evicted on project delete), suggest that project as the default in the dialog",
+          "passes": true
+        },
+        {
+          "description": "After adoption, the unmanaged item disappears from the list (left-anti-join)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, with at least one PRD on disk, verify 'Unmanaged PRDs' section appears, click adopt, complete dialog, verify the PRD now appears under a project AND no longer appears in Unmanaged",
+          "passes": true
+        }
+      ],
+      "priority": 22,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-014a",
+      "title": "Sidebar shell with lifecycle sections and project nodes",
+      "description": "As a user, I need the sidebar with three collapsible lifecycle sections and project rows.",
+      "acceptanceCriteria": [
+        {
+          "description": "ui/components/Sidebar.tsx renders three collapsible sections: Active, Recent (last_opened_at within 30d AND no live session), Archived (collapsed by default)",
+          "passes": true
+        },
+        {
+          "description": "'Active' includes any project with at least one live session (live-attached or live-orphaned) plus any pinned project",
+          "passes": true
+        },
+        {
+          "description": "Section counts shown in headers ('Active (3)')",
+          "passes": true
+        },
+        {
+          "description": "Project rows display: name, status dot, last-activity time",
+          "passes": true
+        },
+        {
+          "description": "Boundary: a project with no last_opened_at (never opened) appears in 'Active' if newly created OR pinned, else in 'Recent' with '\u2014' for time",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, with seeded data spanning all three sections, verify sections render with correct counts",
+          "passes": true
+        }
+      ],
+      "priority": 23,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-014b",
+      "title": "Effort and session nesting under project nodes (depends on US-006 reconciler)",
+      "description": "As a user, I expand a project to see efforts, expand an effort to see sessions, with status indicators that reflect reconciler output.",
+      "blockedBy": [
+        "US-006"
+      ],
+      "acceptanceCriteria": [
+        {
+          "description": "Each project node expands to its efforts (excluding archived efforts unless a per-project 'show archived' toggle is on)",
+          "passes": true
+        },
+        {
+          "description": "Each effort expands to its sessions, showing for each: title, status icon, last-activity timestamp",
+          "passes": true
+        },
+        {
+          "description": "Status icon set (lucide-react names, pinned to avoid divergence): Circle (filled green) for live-attached, CircleAlert (yellow) for live-orphaned, CircleSlash (grey) for dormant, CircleOff (faded grey) for exited. The lucide-react package is added to ralph-monitor/package.json if not present",
+          "passes": true
+        },
+        {
+          "description": "Session row's status icon updates live via /events SSE (session.updated, session.exited)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, expand a project, expand an effort, verify session list with at least 2 distinct status icons rendered",
+          "passes": true
+        }
+      ],
+      "priority": 24,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-014c",
+      "title": "Right-click context menus and URL-based selection persistence",
+      "description": "As a user, I need actions on each node and the ability to deep-link.",
+      "acceptanceCriteria": [
+        {
+          "description": "Right-click on project -> menu: Pin/Unpin, Archive/Unarchive, Rename, Delete",
+          "passes": true
+        },
+        {
+          "description": "Right-click on effort -> menu: Archive/Unarchive, Rename, Delete",
+          "passes": true
+        },
+        {
+          "description": "Right-click on session -> menu: Kill (only when status is live-attached or live-orphaned), Delete (with purge_jsonl checkbox in confirm dialog)",
+          "passes": true
+        },
+        {
+          "description": "Selection persists across reload via URL: /p/:projectId, /p/:projectId/e/:effortId, /p/:projectId/e/:effortId/s/:sessionId",
+          "passes": true
+        },
+        {
+          "description": "Direct navigation expands the relevant tree path on mount",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, right-click a project and verify menu items; navigate to a session URL directly and verify the tree auto-expands",
+          "passes": true
+        }
+      ],
+      "priority": 25,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-015a",
+      "title": "/api/fs/list with realpath-then-allowlist",
+      "description": "As a frontend developer, I need a server endpoint to list directory contents safely.",
+      "acceptanceCriteria": [
+        {
+          "description": "GET /api/fs/list?path=<absolute-path> (auth-required) returns { entries: [{ name, isDir, isSymlink }], normalizedPath }",
+          "passes": true
+        },
+        {
+          "description": "Server calls realpath(path) first; if it fails, returns 404",
+          "passes": true
+        },
+        {
+          "description": "After realpath, checks the resolved path starts with one of the realpath'd allowed roots from RALPH_MONITOR_PROJECT_ROOTS (default $HOME); else 403 with { error: 'path_outside_allowlist', allowed: [...] }",
+          "passes": true
+        },
+        {
+          "description": "Endpoint filters dotfiles by default; ?show_hidden=true toggles",
+          "passes": true
+        },
+        {
+          "description": "Unit tests: traversal attempt (/home/user/../../etc/passwd -> 403 after realpath), symlink pointing outside allowlist (403), missing path (404), happy-path listing",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        }
+      ],
+      "priority": 26,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-015b",
+      "title": "New Project flow with worktree detection (uses shared git helper)",
+      "description": "As a user, 'New Project' picks a directory and creates a project \u2014 and warns me if the picked directory is a worktree of an existing project.",
+      "acceptanceCriteria": [
+        {
+          "description": "Sidebar header has a '+' menu with 'New Project'",
+          "passes": true
+        },
+        {
+          "description": "Dialog opens a directory picker that calls /api/fs/list; user navigates from $HOME (or first allowed root) downward",
+          "passes": true
+        },
+        {
+          "description": "Name field defaulted to basename(picked-path); user can override",
+          "passes": true
+        },
+        {
+          "description": "Worktree detection uses shared helper server/git/worktrees.ts:checkIsWorktreeOfProject(pickedPath, projects[]). Endpoint GET /api/projects/check-worktree?path=<picked-path> returns { matched: true, projectId, branch } if 'git -C <picked> rev-parse --git-common-dir' matches an existing project's .git common dir",
+          "passes": true
+        },
+        {
+          "description": "If matched, dialog shows: 'This looks like a worktree of Project X (branch: Y). Add as a new effort under X instead?' with two actions: (a) 'Add as effort under X' (creates effort with working_dir = picked-path; never duplicates project), (b) 'Create new project anyway'; default focus on (a)",
+          "passes": true
+        },
+        {
+          "description": "On project create, server realpaths and trims trailing slash before insert (per US-001)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, new-project from a non-worktree path -> verify project appears; from a worktree path -> verify the detection dialog appears",
+          "passes": true
+        }
+      ],
+      "priority": 27,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-015c",
+      "title": "New Effort flow",
+      "description": "As a user, within a project context, I create a new effort.",
+      "acceptanceCriteria": [
+        {
+          "description": "Right-click on project (or '+' in project header) -> 'New Effort' dialog",
+          "passes": true
+        },
+        {
+          "description": "Fields: name, kind (PRD/Task/General), prd_path (only for PRD; reuses the directory picker, validated within project.root_dir or a known worktree using the shared listWorktrees helper), optional working_dir",
+          "passes": true
+        },
+        {
+          "description": "On submit, POST /api/projects/:id/efforts; new effort appears in sidebar",
+          "passes": true
+        },
+        {
+          "description": "Validation: kind=PRD requires non-empty prd_path (matches schema CHECK); UI surfaces server-side errors clearly",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, right-click project, choose 'New Effort', fill PRD fields, submit, verify effort appears",
+          "passes": true
+        }
+      ],
+      "priority": 28,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-015d",
+      "title": "New Session flow",
+      "description": "As a user, within an effort context, I spawn a new Claude session.",
+      "acceptanceCriteria": [
+        {
+          "description": "Right-click on effort -> 'New Session' dialog",
+          "passes": true
+        },
+        {
+          "description": "Fields: mode (Interactive default, Autonomous opt-in), optional working_dir override (defaults to effort.working_dir), optional initial_prompt",
+          "passes": true
+        },
+        {
+          "description": "On submit, POST /api/sessions; navigates to session detail view (US-016a); WebSocket attaches automatically",
+          "passes": true
+        },
+        {
+          "description": "409 surfaced clearly when one-live-session-per-effort fires",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, right-click effort, choose 'New Session', submit, verify the session detail view loads and the chat or stream shows the spawned claude greeting",
+          "passes": true
+        }
+      ],
+      "priority": 29,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-016a",
+      "title": "Session detail shell \u2014 header, breadcrumb, view-mode toggle, chat input",
+      "description": "As a user, opening a session shows me the conversation, breadcrumb context, and lets me type new messages.",
+      "blockedBy": [
+        "US-009",
+        "US-010",
+        "US-011",
+        "US-014c",
+        "US-015d"
+      ],
+      "acceptanceCriteria": [
+        {
+          "description": "ui/components/SessionDetail.tsx renders: header (effort/project breadcrumb, session title, status badge slot, view-mode toggle), main pane (chat OR stream depending on mode), footer (input box + send button)",
+          "passes": true
+        },
+        {
+          "description": "When session's resolved cwd differs from effort.working_dir, header shows a 'Working on: <basename of effort.working_dir>' chip distinct from a 'cwd: <basename>' chip",
+          "passes": true
+        },
+        {
+          "description": "Input box sends to WebSocket as {type:'input', data: <text> + '\\r'} for live sessions",
+          "passes": true
+        },
+        {
+          "description": "Keyboard: Enter sends, Shift+Enter inserts newline (sent on next Enter)",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, open an active session, type 'hello', press Enter, wait for assistant turn via browser_wait_for against [data-testid=\"turn-assistant\"] with 30s timeout, verify a user turn lands in the chat view; click view-mode toggle, verify stream mode renders",
+          "passes": true
+        }
+      ],
+      "priority": 30,
+      "modelHint": "opus",
+      "passes": true,
+      "notes": ""
+    },
+    {
+      "id": "US-016b",
+      "title": "Status badge live updates and exit/Resume affordance",
+      "description": "As a user, the session status badge updates live, and on exit I see the exit code and a Resume button.",
+      "acceptanceCriteria": [
+        {
+          "description": "Status badge live-updates from dormant | live-attached | live-orphaned | exited via SSE (/events session.* events)",
+          "passes": true
+        },
+        {
+          "description": "On exited: input is replaced with 'Exit code: N' + a 'Resume' button that POSTs /api/sessions/:id/resume",
+          "passes": true
+        },
+        {
+          "description": "On dormant (no PTY): input is disabled with a 'Resume' button",
+          "passes": true
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": true
+        },
+        {
+          "description": "Using Playwright MCP, induce a session exit (e.g., by sending 'exit' to a bash-spawned test session), verify badge transitions to exited, exit-code displayed, Resume button present",
+          "passes": false
+        }
+      ],
+      "priority": 31,
+      "modelHint": "opus",
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016c",
+      "title": "Kill endpoint + live-orphaned UX",
+      "description": "As a user, I need to kill an unreachable orphaned session and replace it with a fresh attached one.",
+      "acceptanceCriteria": [
+        {
+          "description": "New endpoint POST /api/sessions/:id/kill: sends SIGTERM to process_pid if alive, waits 5s for exit, escalates to SIGKILL. Returns 204 on success, 404 if session doesn't exist, 409 if status is dormant or exited (nothing to kill)",
+          "passes": false
+        },
+        {
+          "description": "On kill: updates DB row (process_pid = NULL, process_started_at = NULL), unregisters from registry if attached, emits session.exited SSE event",
+          "passes": false
+        },
+        {
+          "description": "JSONL file is preserved (not deleted) \u2014 kill is a process action, not a data action",
+          "passes": false
+        },
+        {
+          "description": "Idempotent: calling Kill on an already-exited session returns 409 (clear contract \u2014 user can retry safely without surprise)",
+          "passes": false
+        },
+        {
+          "description": "In SessionDetail.tsx, when status is live-orphaned: input is disabled with tooltip 'PTY unreachable; kill and resume to regain control'; a 'Kill & Resume' button is shown that calls Kill then Resume in sequence",
+          "passes": false
+        },
+        {
+          "description": "UX prose (in code comment near the button): 'Kill is destructive \u2014 the last in-flight turn is lost. Use this when the orphaned PTY is unrecoverable, not as a routine restart.'",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": false
+        },
+        {
+          "description": "Using Playwright MCP, simulate a live-orphaned session (manually mark a row as such for the test fixture), verify the Kill & Resume button appears, click it, verify the kill+resume sequence completes and status transitions to live-attached",
+          "passes": false
+        }
+      ],
+      "priority": 32,
+      "modelHint": "opus",
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017a",
+      "title": "Archive, pin, rename",
+      "description": "As a user, I organize my sidebar without destructive actions.",
+      "acceptanceCriteria": [
+        {
+          "description": "Archive moves a project/effort out of Active/Recent into Archived without deleting data",
+          "passes": false
+        },
+        {
+          "description": "Pin keeps a project at the top of Active; unpin returns it to normal lifecycle ordering",
+          "passes": false
+        },
+        {
+          "description": "Rename updates name; reflects immediately in sidebar and any open detail views",
+          "passes": false
+        },
+        {
+          "description": "Archiving a project also archives all its efforts (UI confirms first if any effort has a live session, blocked with 'Stop the live session first')",
+          "passes": false
+        },
+        {
+          "description": "Archiving an effort with a live session is blocked with a clear error",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": false
+        },
+        {
+          "description": "Using Playwright MCP, archive a project -> moves to Archived; pin another -> sticks to top; rename a third -> name updates everywhere",
+          "passes": false
+        }
+      ],
+      "priority": 33,
+      "modelHint": "opus",
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017b",
+      "title": "Safe-delete with cascade rules and JSONL purge option",
+      "description": "As a user, I can delete projects/efforts/sessions with explicit safety rails proportional to blast radius.",
+      "acceptanceCriteria": [
+        {
+          "description": "Delete project requires typed-name confirmation matching project.name exactly; UI dialog explicitly states cascade ('This will delete N efforts and M sessions. JSONL files are NOT deleted unless you also tick \"purge JSONLs\".')",
+          "passes": false
+        },
+        {
+          "description": "Delete effort requires single-button confirmation (no typed name); cascade warning shown; live-session block enforced",
+          "passes": false
+        },
+        {
+          "description": "Delete session offers a purge_jsonl checkbox (default unchecked); on confirm calls DELETE /api/sessions/:id?purge_jsonl=<bool>",
+          "passes": false
+        },
+        {
+          "description": "Endpoints reject deletes when a child row has a live session; UI surfaces the error",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": false
+        },
+        {
+          "description": "Using Playwright MCP, attempt to delete a project without typing the name -> blocked; type the name -> succeeds; delete a session with purge_jsonl ticked -> JSONL is removed from disk",
+          "passes": false
+        }
+      ],
+      "priority": 34,
+      "modelHint": "opus",
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "End-to-end multi-project restart-recovery validation (deterministic)",
+      "description": "Validate the workflow end-to-end: actively work on multiple PRDs, restart, recover, continue. All outcomes pinned.",
+      "acceptanceCriteria": [
+        {
+          "description": "Scenario A (interactive sessions): create 2 projects each with a PRD effort and 1 interactive session; in each, exchange at least 2 turns via Playwright MCP typing into the input box, waiting for assistant turns via browser_wait_for against [data-testid=\"turn-assistant\"] with 30s timeout. Stop ralph-monitor via 'pkill -f ralph-monitor' (NOT Ctrl+C \u2014 must be reproducible from a script). Restart. Verify: both sessions appear in their respective project trees; both show as dormant; chat view renders prior turns from JSONL; click Resume -> status transitions to live-attached -> input box becomes active -> type a new message -> new user turn appears in chat (wait via the same selector strategy)",
+          "passes": false
+        },
+        {
+          "description": "Scenario B (autonomous mid-flight): create 1 project + PRD effort + 1 autonomous session; spawn /ralph-pilot-native against a PRD that runs at least 3 stories. While the run is mid-flight (verified by tail of JSONL showing turn writes), pkill -f 'ralph-monitor'. Restart. Verify: session shows as exited (per Non-Goal \u2014 owned processes die with ralph-monitor; live-orphaned is reserved for v2 setsid work). JSONL contents are intact and parseable (no truncated final record per US-008b's offset semantics). Click Resume -> claude --resume <id> continues the run from where it left off",
+          "passes": false
+        },
+        {
+          "description": "Scenario C (sub-agent transcripts on disk): during scenario B, verify that <encoded-cwd>/<session-uuid>/subagents/agent-*.jsonl files were written. Confirm the chat view does NOT attempt to render them as separate sessions (per v1 non-goal); the parent's chat view shows Agent tool calls as expandable blocks per US-009",
+          "passes": false
+        },
+        {
+          "description": "API verification: GET /api/sessions returns correct status for each scenario",
+          "passes": false
+        },
+        {
+          "description": "Document the recovery flow in ralph-monitor/README.md with sections: 'Restarting ralph-monitor', 'Resuming a session', 'What happens to autonomous runs on restart'",
+          "passes": false
+        },
+        {
+          "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
+          "passes": false
+        },
+        {
+          "description": "Using Playwright MCP, walk through scenarios A and B end-to-end and capture screenshots: sidebar populated post-restart, dormant chat view, resumed-session input active, exited autonomous session with Resume button visible",
+          "passes": false
+        }
+      ],
+      "priority": 35,
+      "modelHint": "opus",
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

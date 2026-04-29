@@ -1,4 +1,4 @@
-// Session detail shell (US-016a).
+// Session detail shell (US-016a / US-016b).
 //
 // Renders the full detail view for a selected session: header with
 // effort/project breadcrumb + status badge + view-mode toggle; main pane
@@ -11,14 +11,18 @@
 //   On status transitions (e.g. session goes dormant mid-view) the effect
 //   cleanup closes the socket and wsRef is nulled. Re-mounting (new sessionId)
 //   tears down the previous socket via the same cleanup. If the session
-//   transitions back to live-attached (e.g. after Resume in US-016b), the
-//   effect re-runs and opens a fresh socket — this story does not poll for
-//   status updates; US-016b will add the live-status SSE subscription.
+//   transitions back to live-attached (e.g. after Resume), the effect re-runs
+//   and opens a fresh socket.
+//
+// Live status updates (US-016b):
+//   A second SSE subscription to the global /events endpoint listens for
+//   session.updated and session.exited events matching the current sessionId.
+//   On match the local session state is updated immediately, which drives the
+//   status badge and the input-area state machine (see InputArea below).
 //
 // Resume:
-//   A basic resume button is rendered in the footer for non-live sessions so
-//   the detail is functional without US-016b. US-016b will expand this with a
-//   live-status subscription and richer UX.
+//   A Resume button is rendered in the footer for all non-live-attached states.
+//   POSTs /api/sessions/:id/resume and updates local state from the response.
 //
 // Kill button:
 //   Not wired here — US-016c handles it.
@@ -35,6 +39,7 @@ import { SessionStream } from './SessionStream'
 import { ViewModeToggle, type ViewMode } from './ViewModeToggle'
 import type { Session, Project, Effort } from '../../server/db/index'
 import type { Turn } from '../../server/jsonl/parser'
+import type { LifecycleAppEvent } from '../../server/types'
 
 // The GET /api/sessions/:id response extends the DB row with computed fields.
 type SessionWithStatus = Session & {
@@ -52,6 +57,9 @@ export interface SessionDetailProps {
 
 export function SessionDetail({ sessionId, project, effort }: SessionDetailProps) {
   const [session, setSession] = useState<SessionWithStatus | null>(null)
+  // exit_code is tracked separately: the GET /api/sessions/:id response does
+  // not include it (it's not a DB field), but the SSE session.exited event does.
+  const [exitCode, setExitCode] = useState<number | undefined>(undefined)
   const [turns, setTurns] = useState<Turn[]>([])
   const [mode, setMode] = useState<ViewMode>('chat')
   const [input, setInput] = useState('')
@@ -63,6 +71,7 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
   useEffect(() => {
     let cancelled = false
     setSession(null)
+    setExitCode(undefined)
     setResumeError(null)
     ;(async () => {
       try {
@@ -121,6 +130,48 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
 
     es.addEventListener('gone', () => {
       setTurns([])
+    })
+
+    return () => es.close()
+  }, [sessionId])
+
+  // Subscribe to the global /events SSE to receive live session status updates
+  // (US-016b). Listens for session.updated and session.exited events that
+  // match the current sessionId and updates local state accordingly.
+  useEffect(() => {
+    if (!sessionId) return
+
+    let es: EventSource
+    try {
+      es = authEventSource('/events')
+    } catch {
+      // Token not yet loaded — skip. Will connect on next render that triggers
+      // the token load (e.g. when the session fetch completes).
+      return
+    }
+
+    es.addEventListener('update', (ev) => {
+      try {
+        const evt = JSON.parse((ev as MessageEvent).data) as LifecycleAppEvent
+        if (evt.type === 'session.updated' && evt.session.id === sessionId) {
+          // session.updated carries a DB Session row; we need to re-compute
+          // status. The simplest approach: re-fetch the full enriched session
+          // from GET /api/sessions/:id so we get the computed status fields.
+          authFetch(`/api/sessions/${sessionId}`)
+            .then(r => r.ok ? r.json() : null)
+            .then(data => {
+              if (data) setSession(data as SessionWithStatus)
+            })
+            .catch(() => {})
+        } else if (evt.type === 'session.exited' && evt.id === sessionId) {
+          setSession(prev =>
+            prev ? { ...prev, status: 'exited' as const, live: false, attached: false } : null
+          )
+          setExitCode(evt.exit_code)
+        }
+      } catch {
+        // Malformed event — ignore.
+      }
     })
 
     return () => es.close()
@@ -187,7 +238,8 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
         setResumeError(body.error ?? `resume failed (${res.status})`)
         return
       }
-      // Re-fetch session to pick up new status; US-016b will do this via SSE.
+      // Re-fetch session to pick up new status. The SSE session.updated event
+      // will also arrive shortly and reconcile, but this gives an instant update.
       const updated = await authFetch(`/api/sessions/${sessionId}`)
       if (updated.ok) {
         setSession(await updated.json() as SessionWithStatus)
@@ -232,8 +284,6 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
   // When stream mode becomes disabled, fall back to chat to avoid showing a
   // broken/stale stream pane.
   const effectiveMode: ViewMode = streamDisabled && mode === 'stream' ? 'chat' : mode
-
-  const isLive = session.status === 'live-attached'
 
   return (
     <div className="flex flex-col h-full">
@@ -286,47 +336,23 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
         )}
       </main>
 
-      {/* Footer */}
+      {/* Footer — state machine driven by session.status */}
       <footer className="border-t border-zinc-700/40 p-2 shrink-0">
         {resumeError && (
           <div className="mb-2 text-xs text-rose-400 px-1">
             Resume failed: {resumeError}
           </div>
         )}
-        <div className="flex gap-2 items-end">
-          <textarea
-            data-testid="session-input"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={onKeyDown}
-            placeholder={
-              isLive
-                ? 'Type a message — Enter to send, Shift+Enter for newline'
-                : 'Resume to send'
-            }
-            disabled={!isLive}
-            className="flex-1 min-h-[2.5rem] max-h-32 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm font-mono resize-none disabled:opacity-50 disabled:cursor-not-allowed"
-            rows={1}
-          />
-          <button
-            onClick={sendInput}
-            disabled={!isLive || !input.trim()}
-            data-testid="session-send"
-            className="px-3 py-1 bg-blue-600 disabled:bg-zinc-700 rounded text-sm self-end h-[2.5rem]"
-          >
-            Send
-          </button>
-          {!isLive && (
-            <button
-              onClick={handleResume}
-              disabled={resuming}
-              data-testid="session-resume"
-              className="px-3 py-1 bg-emerald-700 disabled:opacity-50 rounded text-sm self-end h-[2.5rem] whitespace-nowrap"
-            >
-              {resuming ? 'Resuming…' : 'Resume'}
-            </button>
-          )}
-        </div>
+        <InputArea
+          status={session.status}
+          exitCode={exitCode}
+          input={input}
+          setInput={setInput}
+          onKeyDown={onKeyDown}
+          onSend={sendInput}
+          onResume={handleResume}
+          resuming={resuming}
+        />
       </footer>
     </div>
   )
@@ -365,6 +391,95 @@ function Chip({
     >
       {children}
     </span>
+  )
+}
+
+// InputArea — status-driven footer input state machine (US-016b).
+//
+// live-attached  → textarea + Send button (full interaction)
+// live-orphaned  → textarea disabled + helper text + Resume button
+// dormant        → textarea disabled + helper text + Resume button
+// exited         → no textarea, shows exit code + Resume button
+interface InputAreaProps {
+  status: 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
+  exitCode: number | undefined
+  input: string
+  setInput: (v: string) => void
+  onKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void
+  onSend: () => void
+  onResume: () => void
+  resuming: boolean
+}
+
+function ResumeButton({ onResume, resuming }: { onResume: () => void; resuming: boolean }) {
+  return (
+    <button
+      onClick={onResume}
+      disabled={resuming}
+      data-testid="session-resume"
+      className="px-3 py-1 bg-emerald-700 disabled:opacity-50 rounded text-sm self-end h-[2.5rem] whitespace-nowrap"
+    >
+      {resuming ? 'Resuming…' : 'Resume'}
+    </button>
+  )
+}
+
+function InputArea({
+  status,
+  exitCode,
+  input,
+  setInput,
+  onKeyDown,
+  onSend,
+  onResume,
+  resuming,
+}: InputAreaProps) {
+  if (status === 'exited') {
+    return (
+      <div className="flex gap-2 items-center">
+        <span
+          className="flex-1 text-sm text-zinc-400 px-1"
+          data-testid="session-exit-code"
+        >
+          Exit code: {exitCode ?? 'unknown'}
+        </span>
+        <ResumeButton onResume={onResume} resuming={resuming} />
+      </div>
+    )
+  }
+
+  const isLive = status === 'live-attached'
+  const placeholder =
+    status === 'live-orphaned'
+      ? 'Session is orphaned (PID gone). Waiting for reaper or click Resume.'
+      : status === 'dormant'
+        ? 'Session is dormant. Click Resume to restart.'
+        : 'Type a message — Enter to send, Shift+Enter for newline'
+
+  return (
+    <div className="flex gap-2 items-end">
+      <textarea
+        data-testid="session-input"
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={onKeyDown}
+        placeholder={placeholder}
+        disabled={!isLive}
+        className="flex-1 min-h-[2.5rem] max-h-32 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm font-mono resize-none disabled:opacity-50 disabled:cursor-not-allowed"
+        rows={1}
+      />
+      {isLive && (
+        <button
+          onClick={onSend}
+          disabled={!input.trim()}
+          data-testid="session-send"
+          className="px-3 py-1 bg-blue-600 disabled:bg-zinc-700 rounded text-sm self-end h-[2.5rem]"
+        >
+          Send
+        </button>
+      )}
+      {!isLive && <ResumeButton onResume={onResume} resuming={resuming} />}
+    </div>
   )
 }
 
