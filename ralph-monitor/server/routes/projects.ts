@@ -27,7 +27,7 @@ import {
   type ListProjectsFilter,
 } from '../db'
 import { store } from '../store'
-import { evictWorktreeCacheForProject } from '../git/worktrees'
+import { evictWorktreeCacheForProject, checkIsWorktreeOfProject } from '../git/worktrees'
 
 const RECENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -164,6 +164,28 @@ projectsRouter.patch('/api/projects/:id', async (c) => {
   store.recordEvent({ type: 'project.updated', ts: Date.now(), project: updated })
 
   return c.json(updated)
+})
+
+// GET /api/projects/check-worktree?path=<picked-path>
+//
+// Returns { matched: true, projectId, branch } if the given path resolves (via
+// realpathSync) to either the root_dir or a known git worktree of an existing
+// project. Returns { matched: false } otherwise.
+//
+// Used by the New Project dialog (US-015b) to detect when the user picks a
+// path that already belongs to an existing project and offer them the choice
+// of adding an effort under that project instead of creating a duplicate.
+projectsRouter.get('/api/projects/check-worktree', (c) => {
+  const pickedPath = c.req.query('path')
+  if (!pickedPath || typeof pickedPath !== 'string') {
+    return c.json({ error: 'path_required' }, 400)
+  }
+  const allProjects = listProjects(getDb(), {})
+  const result = checkIsWorktreeOfProject(
+    pickedPath,
+    allProjects.map((p) => ({ id: p.id, root_dir: p.root_dir })),
+  )
+  return c.json(result)
 })
 
 // DELETE /api/projects/:id?confirm_name=<typed>

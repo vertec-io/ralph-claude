@@ -1116,3 +1116,63 @@ describe('effort prd watcher', () => {
     }
   })
 })
+
+// ---------------------------------------------------------------------------
+// GET /api/projects/check-worktree  (US-015b)
+// ---------------------------------------------------------------------------
+//
+// We test:
+//   1. Missing path param -> 400 path_required
+//   2. Path that is NOT a worktree of any project -> { matched: false }
+//   3. Path that exactly equals an existing project root_dir -> { matched: true, projectId }
+//
+// The positive git-worktree case (where listWorktrees() picks up a real git
+// worktree via `git worktree list --porcelain`) requires an actual git repo on
+// disk with a registered worktree, which is heavy to set up in a unit test. It
+// is covered by the shared checkIsWorktreeOfProject logic in worktrees.test.ts
+// and is therefore skipped here.
+
+describe('GET /api/projects/check-worktree', () => {
+  test('missing path param -> 400 path_required', async () => {
+    const res = await app.fetch(new Request('http://test/api/projects/check-worktree'))
+    expect(res.status).toBe(400)
+    const body = await res.json()
+    expect(body.error).toBe('path_required')
+  })
+
+  test('path not matching any project -> { matched: false }', async () => {
+    // Use a random temp dir that we did NOT register as a project root.
+    const orphan = tmpProjectDir()
+    const res = await app.fetch(
+      new Request(`http://test/api/projects/check-worktree?path=${encodeURIComponent(orphan)}`),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.matched).toBe(false)
+  })
+
+  test('path equals existing project root_dir -> { matched: true, projectId }', async () => {
+    const dir = tmpProjectDir()
+    // Create a project whose root_dir IS `dir`.
+    const pr = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'CheckWT-Match', root_dir: dir }),
+      }),
+    )
+    expect(pr.status).toBe(201)
+    const proj = await pr.json()
+
+    // Now check-worktree for that same path.
+    const res = await app.fetch(
+      new Request(`http://test/api/projects/check-worktree?path=${encodeURIComponent(dir)}`),
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.matched).toBe(true)
+    expect(body.projectId).toBe(proj.id)
+    // branch is null for the project root itself (no git repo → no branch data)
+    expect(body.branch).toBeNull()
+  })
+})

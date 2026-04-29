@@ -27,14 +27,15 @@
 //   - Auto-expand: when selection changes (e.g. on page load with a deep link),
 //     expand the relevant project + effort so the selected node is visible.
 
-import { useEffect, useState } from 'react'
-import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown, Plus } from 'lucide-react'
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
 import { authFetch } from '../auth'
 import { ContextMenu, useContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
+import { NewProjectDialog } from './NewProjectDialog'
 
 export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
 
@@ -703,6 +704,24 @@ export function Sidebar({
   const [recentOpen, setRecentOpen] = useState(true)
   const [archivedOpen, setArchivedOpen] = useState(false)
 
+  // "+" menu — opens a small popover with "New Project" (future: "New Effort").
+  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
+  const plusMenuRef = useRef<HTMLDivElement>(null)
+
+  // Close the "+" popover when clicking outside it.
+  useEffect(() => {
+    if (!plusMenuOpen) return
+    const handler = (e: MouseEvent) => {
+      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
+        setPlusMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [plusMenuOpen])
+
+  const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
+
   // Per-project expansion state (shared across sections via a single set)
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
   const toggleProject = (id: string) => {
@@ -935,6 +954,38 @@ export function Sidebar({
       data-testid="sidebar"
       className="w-64 border-r border-zinc-700/40 overflow-y-auto p-3 space-y-2"
     >
+      {/* Sidebar header with "+" menu */}
+      <div className="flex items-center justify-between px-1 pb-1">
+        <span className="text-[11px] uppercase tracking-widest text-zinc-500 font-semibold">
+          Projects
+        </span>
+        <div className="relative" ref={plusMenuRef}>
+          <button
+            type="button"
+            data-testid="sidebar-plus-button"
+            onClick={() => setPlusMenuOpen((o) => !o)}
+            className="flex items-center justify-center w-5 h-5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition"
+            aria-label="New project"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+          {plusMenuOpen && (
+            <div className="absolute right-0 top-full mt-1 z-[200] min-w-[140px] bg-zinc-900 border border-zinc-700 rounded shadow-xl py-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setPlusMenuOpen(false)
+                  setShowNewProjectDialog(true)
+                }}
+                className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
+              >
+                New Project
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
       {unmanagedPrds}
 
       <Section
@@ -987,6 +1038,22 @@ export function Sidebar({
           onCancel={() => setDeleteSessionTarget(null)}
         />
       )}
+
+      {/* New Project dialog */}
+      <NewProjectDialog
+        open={showNewProjectDialog}
+        onClose={() => setShowNewProjectDialog(false)}
+        onCreated={() => {
+          setShowNewProjectDialog(false)
+          onRefresh?.()
+        }}
+        onAddAsEffort={() => {
+          // US-015c will add the full effort-create flow; for now just close.
+          setShowNewProjectDialog(false)
+          onRefresh?.()
+        }}
+        projects={projects.map((p) => ({ id: p.id, name: p.name }))}
+      />
     </aside>
   )
 }
