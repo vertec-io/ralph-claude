@@ -38,7 +38,7 @@ export function App() {
   const selected = snapshot.prds.find(p => p.unitName === selectedUnit) ?? snapshot.prds[0]
   const filteredEvents = showAllEvents
     ? snapshot.events
-    : snapshot.events.filter(e => e.unitName === selected?.unitName)
+    : snapshot.events.filter(e => 'unitName' in e && e.unitName === selected?.unitName)
 
   return (
     <div className="grid grid-cols-[300px_1fr_360px] h-screen">
@@ -1063,12 +1063,12 @@ function EventFeed({ events, showAll, onToggleShowAll, scopeName }: {
               <span className={`font-mono ${eventColor(e.type)}`}>{e.type}</span>
               <span className="text-zinc-600 ml-auto tabular-nums">{timeAgo(e.ts)}</span>
             </div>
-            {showAll && e.unitName && (
+            {showAll && 'unitName' in e && e.unitName && (
               <div className="text-zinc-500 truncate">
                 {e.unitName.replace(/^ralph-pilot-native-/, '')}
               </div>
             )}
-            {e.detail && <div className="text-zinc-400 truncate font-mono">{e.detail}</div>}
+            {'detail' in e && e.detail && <div className="text-zinc-400 truncate font-mono">{e.detail}</div>}
           </li>
         ))}
       </ul>

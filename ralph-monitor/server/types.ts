@@ -1,5 +1,7 @@
 // Shared types between server and ui
 
+import type { Project, Effort, Session } from './db'
+
 export type PRDStatus = 'active' | 'idle' | 'crashed' | 'complete' | 'blocked'
 
 export interface AcceptanceCriterion {
@@ -105,7 +107,10 @@ export interface PRDRecord {
   agents?: AgentSnapshot
 }
 
-export interface AppEvent {
+// Original PRD/hook-flavored events. Carry an optional `unitName` (the
+// ralph-pilot-native unit) and a free-form `detail` string. Pre-existing
+// shape — kept as-is for backwards compatibility.
+export interface PRDAppEvent {
   ts: number                   // ms
   unitName?: string
   type:
@@ -125,6 +130,30 @@ export interface AppEvent {
     | 'hook.user_prompt'
   detail?: string
 }
+
+// Project/effort/session lifecycle events. Each variant carries a typed
+// payload; `ts` is the millisecond timestamp at recordEvent time. These are
+// emitted by the REST mutation endpoints and broadcast over SSE.
+export type LifecycleAppEvent =
+  | { type: 'project.created'; ts: number; project: Project }
+  | { type: 'project.updated'; ts: number; project: Project }
+  | { type: 'project.deleted'; ts: number; id: string }
+  | { type: 'effort.created'; ts: number; effort: Effort }
+  | { type: 'effort.updated'; ts: number; effort: Effort }
+  | { type: 'effort.deleted'; ts: number; id: string }
+  | { type: 'session.created'; ts: number; session: Session }
+  | { type: 'session.updated'; ts: number; session: Session }
+  | { type: 'session.deleted'; ts: number; id: string }
+  | { type: 'session.exited'; ts: number; id: string; exit_code?: number }
+  | {
+      type: 'lifecycle.snapshot'
+      ts: number
+      projects: Project[]
+      efforts: Effort[]
+      live_session_ids: string[]
+    }
+
+export type AppEvent = PRDAppEvent | LifecycleAppEvent
 
 export interface ServerSnapshot {
   prds: PRDRecord[]

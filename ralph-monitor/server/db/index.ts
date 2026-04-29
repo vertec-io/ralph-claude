@@ -74,6 +74,7 @@ export {
   createEffort,
   getEffortById,
   listEffortsByProject,
+  listAllEfforts,
   updateEffort,
   archiveEffort,
   unarchiveEffort,

@@ -7,6 +7,10 @@ import { store } from './store'
 import { startWatchers } from './watchers'
 import { agents } from './agents'
 import { getDb } from './db'
+import { projectsRouter } from './routes/projects'
+import { effortsRouter } from './routes/efforts'
+import { sessionsRouter } from './routes/sessions'
+import { buildLifecycleSnapshot } from './routes/lifecycle'
 import type { AppEvent } from './types'
 
 // Initialize sqlite + apply migrations on startup. Lazy inside getDb(), but we
@@ -18,6 +22,11 @@ const app = new Hono()
 
 app.use('/*', cors({ origin: ['http://localhost:5173', 'http://127.0.0.1:5173'] }))
 
+// Project hierarchy REST endpoints (US-003).
+app.route('/', projectsRouter)
+app.route('/', effortsRouter)
+app.route('/', sessionsRouter)
+
 app.get('/api/state', (c) => c.json(store.snapshot()))
 
 app.get('/events', (c) => {
@@ -25,7 +34,23 @@ app.get('/events', (c) => {
     let id: number | undefined
     stream.onAbort(() => { if (id !== undefined) store.unsubscribe(id) })
 
-    // Initial snapshot
+    // Lifecycle snapshot (US-003). MUST go out before subscribing this client
+    // to the broadcast channel — if we subscribed first, an in-flight event
+    // could interleave between this snapshot and the client receiving it,
+    // creating the very fetch-then-subscribe race window the snapshot exists
+    // to close.
+    //
+    // live_session_ids is `[]` here as a stub; US-005a-2 / US-006 wires the
+    // live-session registry into this builder.
+    const snapshot = buildLifecycleSnapshot(getDb(), [])
+    await stream.writeSSE({
+      event: 'lifecycle.snapshot',
+      data: JSON.stringify(snapshot),
+    })
+
+    // Initial state snapshot for the existing PRD-tracking surface. Kept after
+    // lifecycle.snapshot so older clients that consume both still parse the
+    // PRD/state event the same way they always did.
     await stream.writeSSE({
       event: 'state',
       data: JSON.stringify(store.snapshot()),

@@ -213,3 +213,13 @@ export function unarchiveEffort(db: Database, id: string): void {
 export function hardDeleteEffort(db: Database, id: string): void {
   db.prepare('DELETE FROM efforts WHERE id = ?').run(id)
 }
+
+// All efforts across all projects, newest first. Used by the lifecycle
+// snapshot emitted on /events SSE connect; clients reconcile the full effort
+// list against per-project event streams.
+export function listAllEfforts(db: Database): Effort[] {
+  const rows = db
+    .prepare('SELECT * FROM efforts ORDER BY created_at DESC')
+    .all() as EffortRow[]
+  return rows.map(rowToEffort)
+}
