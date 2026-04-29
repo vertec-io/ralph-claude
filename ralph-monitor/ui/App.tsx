@@ -10,6 +10,7 @@ import type { Session } from '../server/db/sessions'
 import { PrdSnapshotPanels } from './components/PrdSnapshotPanels'
 import { AdoptPrdDialog } from './components/AdoptPrdDialog'
 import { Sidebar } from './components/Sidebar'
+import { useSelection } from './router'
 
 marked.setOptions({ gfm: true, breaks: false })
 
@@ -45,9 +46,8 @@ function useUnmanagedPrds(triggerVersion: number): {
 export function App() {
   const { snapshot, connected } = useServerStream()
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null)
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
-  const [selectedEffortId, setSelectedEffortId] = useState<string | null>(null)
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
+  const [selection, setSelection] = useSelection()
+  const { projectId: selectedProjectId, effortId: selectedEffortId, sessionId: selectedSessionId } = selection
   const [showAllEvents, setShowAllEvents] = useState(false)
 
   // Efforts and sessions state — populated from lifecycle.snapshot (US-014b).
@@ -135,12 +135,26 @@ export function App() {
         onSelect={setSelectedUnit}
         connected={connected}
         onAdopted={refreshUnmanaged}
+        onRefresh={refreshUnmanaged}
         selectedProjectId={selectedProjectId}
-        onSelectProject={setSelectedProjectId}
+        onSelectProject={(id) => setSelection({ projectId: id, effortId: null, sessionId: null })}
         selectedEffortId={selectedEffortId}
-        onSelectEffort={setSelectedEffortId}
+        onSelectEffort={(id) => {
+          // Preserve projectId; find the project for the effort from the loaded efforts list.
+          const effort = efforts.find((e) => e.id === id)
+          setSelection({ projectId: effort?.project_id ?? selectedProjectId, effortId: id, sessionId: null })
+        }}
         selectedSessionId={selectedSessionId}
-        onSelectSession={setSelectedSessionId}
+        onSelectSession={(id) => {
+          // Preserve projectId + effortId; find effort for the session.
+          const session = sessions.find((s) => s.id === id)
+          const effort = session ? efforts.find((e) => e.id === session.effort_id) : null
+          setSelection({
+            projectId: effort?.project_id ?? selectedProjectId,
+            effortId: effort?.id ?? selectedEffortId,
+            sessionId: id,
+          })
+        }}
       />
       {selected ? <PRDDetail prd={selected} /> : <EmptyDetail />}
       <EventFeed
@@ -163,6 +177,7 @@ function PRDList({
   onSelect,
   connected,
   onAdopted,
+  onRefresh,
   selectedProjectId,
   onSelectProject,
   selectedEffortId,
@@ -179,6 +194,7 @@ function PRDList({
   onSelect: (u: string) => void
   connected: boolean
   onAdopted: () => void
+  onRefresh?: () => void
   selectedProjectId: string | null
   onSelectProject: (id: string) => void
   selectedEffortId: string | null
@@ -263,6 +279,7 @@ function PRDList({
         selectedSessionId={selectedSessionId}
         onSelectSession={onSelectSession}
         unmanagedPrds={unmanagedPrdsSlot}
+        onRefresh={onRefresh}
       />
 
       {adoptItem && (

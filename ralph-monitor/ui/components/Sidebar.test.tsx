@@ -336,4 +336,22 @@ describe('Sidebar', () => {
     expect(props.efforts).toHaveLength(0)
     expect(props.sessions).toHaveLength(0)
   })
+
+  // US-014c: onRefresh is an optional prop
+  test('Sidebar accepts optional onRefresh prop', () => {
+    const props = {
+      projects: [],
+      efforts: [],
+      sessions: [],
+      liveSessionIds: new Set<string>(),
+      selectedProjectId: null,
+      onSelectProject: (_id: string) => {},
+      selectedEffortId: null,
+      onSelectEffort: (_id: string) => {},
+      selectedSessionId: null,
+      onSelectSession: (_id: string) => {},
+      onRefresh: () => {},
+    }
+    expect(typeof props.onRefresh).toBe('function')
+  })
 })

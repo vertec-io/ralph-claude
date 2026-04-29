@@ -20,12 +20,21 @@
 //   Each project node expands to show its efforts (excluding archived ones unless
 //   the per-project 'show archived' toggle is on). Each effort expands to show
 //   sessions with status icon + title + last-activity timestamp.
+//
+// US-014c additions:
+//   - Right-click context menus on project / effort / session rows.
+//   - Selection encoded in URL hash via useSelection() (hoisted to App.tsx).
+//   - Auto-expand: when selection changes (e.g. on page load with a deep link),
+//     expand the relevant project + effort so the selected node is visible.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown } from 'lucide-react'
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
+import { authFetch } from '../auth'
+import { ContextMenu, useContextMenu } from './ContextMenu'
+import type { MenuItem } from './ContextMenu'
 
 export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
 
@@ -42,6 +51,8 @@ export interface SidebarProps {
   selectedSessionId: string | null
   onSelectSession: (id: string) => void
   unmanagedPrds?: React.ReactNode
+  // Called after a mutation so the parent can re-fetch projects/efforts/sessions.
+  onRefresh?: () => void
 }
 
 export interface BucketedProjects {
@@ -181,6 +192,51 @@ function timeAgo(ms: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// API mutation helpers
+// ---------------------------------------------------------------------------
+
+async function patchProject(id: string, patch: Record<string, unknown>): Promise<void> {
+  await authFetch(`/api/projects/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+}
+
+async function deleteProject(id: string, confirmName: string): Promise<void> {
+  await authFetch(`/api/projects/${id}?confirm_name=${encodeURIComponent(confirmName)}`, {
+    method: 'DELETE',
+  })
+}
+
+async function patchEffort(id: string, patch: Record<string, unknown>): Promise<void> {
+  await authFetch(`/api/efforts/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+}
+
+async function deleteEffort(id: string): Promise<void> {
+  await authFetch(`/api/efforts/${id}`, { method: 'DELETE' })
+}
+
+async function deleteSession(id: string, purgeJsonl: boolean): Promise<void> {
+  await authFetch(`/api/sessions/${id}?purge_jsonl=${purgeJsonl}`, { method: 'DELETE' })
+}
+
+// Kill: US-016c will add the actual endpoint. For now we POST to
+// /api/sessions/:id/kill and swallow 404/501 silently; a real error will be
+// surfaced as a console.error + alert so the user knows something went wrong.
+async function killSession(id: string): Promise<void> {
+  const r = await authFetch(`/api/sessions/${id}/kill`, { method: 'POST' })
+  if (!r.ok && r.status !== 404 && r.status !== 501) {
+    const body = await r.json().catch(() => ({}))
+    throw new Error((body as { error?: string }).error ?? `HTTP ${r.status}`)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SessionRow
 // ---------------------------------------------------------------------------
 
@@ -189,9 +245,10 @@ interface SessionRowProps {
   selected: boolean
   liveSessionIds: Set<string>
   onSelect: () => void
+  onContextMenu: (e: React.MouseEvent) => void
 }
 
-function SessionRow({ session, selected, liveSessionIds, onSelect }: SessionRowProps) {
+function SessionRow({ session, selected, liveSessionIds, onSelect, onContextMenu }: SessionRowProps) {
   const status = computeStatusClient(session, liveSessionIds)
   const lastActivity = session.last_activity_at ? timeAgo(session.last_activity_at) : '—'
   const title = session.title ?? session.id.slice(0, 8)
@@ -200,6 +257,7 @@ function SessionRow({ session, selected, liveSessionIds, onSelect }: SessionRowP
     <li>
       <button
         onClick={onSelect}
+        onContextMenu={onContextMenu}
         data-testid={`session-row-${session.id}`}
         className={`w-full text-left pl-10 pr-3 py-1.5 rounded transition ${
           selected
@@ -231,6 +289,8 @@ interface EffortRowProps {
   onToggle: () => void
   onSelect: () => void
   onSelectSession: (id: string) => void
+  onContextMenu: (e: React.MouseEvent) => void
+  onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
 }
 
 function EffortRow({
@@ -243,6 +303,8 @@ function EffortRow({
   onToggle,
   onSelect,
   onSelectSession,
+  onContextMenu,
+  onSessionContextMenu,
 }: EffortRowProps) {
   const hasLive = sessions.some(
     (s) => computeStatusClient(s, liveSessionIds) === 'live-attached' ||
@@ -252,11 +314,14 @@ function EffortRow({
   return (
     <>
       <li>
-        <div className={`flex items-center pl-5 pr-3 py-1.5 rounded transition ${
-          selected
-            ? 'bg-zinc-700/40 text-zinc-200'
-            : 'hover:bg-zinc-800/40 text-zinc-400'
-        }`}>
+        <div
+          onContextMenu={onContextMenu}
+          className={`flex items-center pl-5 pr-3 py-1.5 rounded transition ${
+            selected
+              ? 'bg-zinc-700/40 text-zinc-200'
+              : 'hover:bg-zinc-800/40 text-zinc-400'
+          }`}
+        >
           <button
             onClick={onToggle}
             className="shrink-0 mr-1 text-zinc-500 hover:text-zinc-300 transition"
@@ -293,6 +358,7 @@ function EffortRow({
               selected={s.id === selectedSessionId}
               liveSessionIds={liveSessionIds}
               onSelect={() => onSelectSession(s.id)}
+              onContextMenu={(e) => onSessionContextMenu(s, e)}
             />
           ))}
         </ul>
@@ -323,6 +389,9 @@ interface ProjectRowProps {
   onSelectSession: (id: string) => void
   onToggleEffort: (id: string) => void
   onToggleShowArchived: () => void
+  onContextMenu: (e: React.MouseEvent) => void
+  onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
+  onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
 }
 
 function ProjectRow({
@@ -343,6 +412,9 @@ function ProjectRow({
   onSelectSession,
   onToggleEffort,
   onToggleShowArchived,
+  onContextMenu,
+  onEffortContextMenu,
+  onSessionContextMenu,
 }: ProjectRowProps) {
   const dotColor = hasLiveSession
     ? 'bg-emerald-500'
@@ -364,11 +436,14 @@ function ProjectRow({
   return (
     <>
       <li>
-        <div className={`flex items-start rounded transition ${
-          selected
-            ? 'bg-zinc-700/60 text-zinc-100'
-            : 'hover:bg-zinc-800/60 text-zinc-300'
-        }`}>
+        <div
+          onContextMenu={onContextMenu}
+          className={`flex items-start rounded transition ${
+            selected
+              ? 'bg-zinc-700/60 text-zinc-100'
+              : 'hover:bg-zinc-800/60 text-zinc-300'
+          }`}
+        >
           <button
             onClick={onToggle}
             className="shrink-0 mt-2.5 ml-1 mr-0.5 text-zinc-500 hover:text-zinc-300 transition"
@@ -414,6 +489,8 @@ function ProjectRow({
               onToggle={() => onToggleEffort(e.id)}
               onSelect={() => onSelectEffort(e.id)}
               onSelectSession={onSelectSession}
+              onContextMenu={(ev) => onEffortContextMenu(e, ev)}
+              onSessionContextMenu={onSessionContextMenu}
             />
           ))}
           {archivedCount > 0 && (
@@ -461,6 +538,9 @@ interface SectionProps {
   onToggleEffort: (id: string) => void
   showArchivedByProject: Set<string>
   onToggleShowArchived: (id: string) => void
+  onProjectContextMenu: (project: Project, e: React.MouseEvent) => void
+  onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
+  onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
 }
 
 function Section({
@@ -484,6 +564,9 @@ function Section({
   onToggleEffort,
   showArchivedByProject,
   onToggleShowArchived,
+  onProjectContextMenu,
+  onEffortContextMenu,
+  onSessionContextMenu,
 }: SectionProps) {
   return (
     <div>
@@ -519,6 +602,9 @@ function Section({
               onSelectSession={onSelectSession}
               onToggleEffort={onToggleEffort}
               onToggleShowArchived={() => onToggleShowArchived(p.id)}
+              onContextMenu={(e) => onProjectContextMenu(p, e)}
+              onEffortContextMenu={onEffortContextMenu}
+              onSessionContextMenu={onSessionContextMenu}
             />
           ))}
         </ul>
@@ -528,6 +614,68 @@ function Section({
           none
         </div>
       )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// DeleteSessionDialog
+// ---------------------------------------------------------------------------
+
+interface DeleteSessionDialogProps {
+  session: Session
+  onConfirm: (purgeJsonl: boolean) => void
+  onCancel: () => void
+}
+
+function DeleteSessionDialog({ session, onConfirm, onCancel }: DeleteSessionDialogProps) {
+  const [purge, setPurge] = useState(false)
+  const title = session.title ?? session.id.slice(0, 8)
+
+  // ESC cancels
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onCancel() }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onCancel])
+
+  return (
+    <div
+      className="fixed inset-0 z-[10000] bg-black/60 flex items-center justify-center p-6"
+      onClick={onCancel}
+    >
+      <div
+        className="bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-6 max-w-sm w-full"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-base font-semibold text-zinc-100 mb-2">Delete session?</h2>
+        <p className="text-sm text-zinc-400 mb-4">
+          Session <span className="font-mono text-zinc-200">{title}</span> will be permanently deleted.
+        </p>
+        <label className="flex items-center gap-2 mb-5 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={purge}
+            onChange={(e) => setPurge(e.target.checked)}
+            className="accent-rose-500"
+          />
+          <span className="text-sm text-zinc-300">Also delete JSONL transcript from disk</span>
+        </label>
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onCancel}
+            className="px-4 py-1.5 rounded text-sm text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 transition"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onConfirm(purge)}
+            className="px-4 py-1.5 rounded text-sm bg-rose-700 text-white hover:bg-rose-600 transition"
+          >
+            Delete
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -549,6 +697,7 @@ export function Sidebar({
   selectedSessionId,
   onSelectSession,
   unmanagedPrds,
+  onRefresh,
 }: SidebarProps) {
   const [activeOpen, setActiveOpen] = useState(true)
   const [recentOpen, setRecentOpen] = useState(true)
@@ -587,9 +736,179 @@ export function Sidebar({
     })
   }
 
+  // ---------------------------------------------------------------------------
+  // Auto-expand on selection changes (US-014c)
+  //
+  // When the URL carries a deep link (e.g. #/p/abc/e/def/s/ghi) we need to
+  // expand the relevant project and effort so the selected node is visible.
+  //
+  // Edge case: if the selected project/effort isn't in the loaded data yet
+  // (data hasn't arrived from the server), the expansion is a no-op — neither
+  // set will contain the id, and the node won't be visible. Once the data
+  // arrives and the component re-renders, this effect re-runs and expands the
+  // correct nodes.
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (selectedProjectId) {
+      setExpandedProjects((prev) => {
+        if (prev.has(selectedProjectId)) return prev
+        const next = new Set(prev)
+        next.add(selectedProjectId)
+        return next
+      })
+    }
+    if (selectedEffortId) {
+      setExpandedEfforts((prev) => {
+        if (prev.has(selectedEffortId)) return prev
+        const next = new Set(prev)
+        next.add(selectedEffortId)
+        return next
+      })
+    }
+  }, [selectedProjectId, selectedEffortId])
+
   const buckets = bucketProjects(projects, liveSessionIds, effortsLiveByProject)
   const effortsByProject = groupEffortsByProject(efforts)
   const sessionsByEffort = groupSessionsByEffort(sessions)
+
+  // ---------------------------------------------------------------------------
+  // Context menu wiring
+  // ---------------------------------------------------------------------------
+
+  const menu = useContextMenu()
+
+  // Delete-session dialog state
+  const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null)
+
+  const handleProjectContextMenu = (project: Project, e: React.MouseEvent) => {
+    e.preventDefault()
+    const items: MenuItem[] = [
+      {
+        label: project.pinned ? 'Unpin' : 'Pin',
+        onClick: async () => {
+          await patchProject(project.id, { pinned: !project.pinned })
+          onRefresh?.()
+        },
+      },
+      {
+        label: project.archived ? 'Unarchive' : 'Archive',
+        onClick: async () => {
+          await patchProject(project.id, { archived: !project.archived })
+          onRefresh?.()
+        },
+      },
+      {
+        label: 'Rename',
+        onClick: async () => {
+          const name = window.prompt('New project name:', project.name)
+          if (!name || name.trim() === '' || name === project.name) return
+          await patchProject(project.id, { name: name.trim() })
+          onRefresh?.()
+        },
+      },
+      {
+        label: 'Delete',
+        destructive: true,
+        separator: true,
+        onClick: async () => {
+          const ok = window.confirm(
+            `Delete project "${project.name}"?\n\nThis will also delete all efforts and sessions. Type the project name to confirm.`,
+          )
+          if (!ok) return
+          // Typed-name confirmation (full dialog deferred to US-017b; for now
+          // we use a second prompt to get the typed name).
+          const typed = window.prompt(`Type "${project.name}" to confirm deletion:`)
+          if (typed !== project.name) {
+            if (typed !== null) window.alert('Name did not match — deletion cancelled.')
+            return
+          }
+          try {
+            await deleteProject(project.id, project.name)
+            onRefresh?.()
+          } catch (err) {
+            window.alert(`Delete failed: ${(err as Error)?.message ?? err}`)
+          }
+        },
+      },
+    ]
+    menu.open(e.clientX, e.clientY, items)
+  }
+
+  const handleEffortContextMenu = (effort: Effort, e: React.MouseEvent) => {
+    e.preventDefault()
+    const items: MenuItem[] = [
+      {
+        label: effort.status === 'archived' ? 'Unarchive' : 'Archive',
+        onClick: async () => {
+          await patchEffort(effort.id, {
+            status: effort.status === 'archived' ? 'active' : 'archived',
+          })
+          onRefresh?.()
+        },
+      },
+      {
+        label: 'Rename',
+        onClick: async () => {
+          const name = window.prompt('New effort name:', effort.name)
+          if (!name || name.trim() === '' || name === effort.name) return
+          await patchEffort(effort.id, { name: name.trim() })
+          onRefresh?.()
+        },
+      },
+      {
+        label: 'Delete',
+        destructive: true,
+        separator: true,
+        onClick: async () => {
+          const ok = window.confirm(`Delete effort "${effort.name}"?\n\nThis will also delete all sessions.`)
+          if (!ok) return
+          try {
+            await deleteEffort(effort.id)
+            onRefresh?.()
+          } catch (err) {
+            window.alert(`Delete failed: ${(err as Error)?.message ?? err}`)
+          }
+        },
+      },
+    ]
+    menu.open(e.clientX, e.clientY, items)
+  }
+
+  const handleSessionContextMenu = (session: Session, e: React.MouseEvent) => {
+    e.preventDefault()
+    const status = computeStatusClient(session, liveSessionIds)
+    const isLive = status === 'live-attached' || status === 'live-orphaned'
+
+    const items: MenuItem[] = []
+
+    if (isLive) {
+      items.push({
+        label: 'Kill',
+        destructive: true,
+        onClick: async () => {
+          try {
+            await killSession(session.id)
+            onRefresh?.()
+          } catch (err) {
+            // US-016c hasn't landed yet — 404 is expected. Log but don't alert.
+            console.error('[sidebar] kill session failed:', err)
+            window.alert(`Kill failed: ${(err as Error)?.message ?? err}`)
+          }
+        },
+      })
+    }
+
+    items.push({
+      label: 'Delete',
+      destructive: true,
+      separator: items.length > 0,
+      onClick: () => {
+        setDeleteSessionTarget(session)
+      },
+    })
+
+    menu.open(e.clientX, e.clientY, items)
+  }
 
   const sharedSectionProps = {
     liveSessionIds,
@@ -606,6 +925,9 @@ export function Sidebar({
     onToggleEffort: toggleEffort,
     showArchivedByProject,
     onToggleShowArchived: toggleShowArchived,
+    onProjectContextMenu: handleProjectContextMenu,
+    onEffortContextMenu: handleEffortContextMenu,
+    onSessionContextMenu: handleSessionContextMenu,
   }
 
   return (
@@ -644,6 +966,27 @@ export function Sidebar({
         onSelectProject={onSelectProject}
         {...sharedSectionProps}
       />
+
+      {/* Context menu portal — renders at fixed position over everything */}
+      <ContextMenu {...menu.state} onClose={menu.close} />
+
+      {/* Delete-session confirmation dialog */}
+      {deleteSessionTarget && (
+        <DeleteSessionDialog
+          session={deleteSessionTarget}
+          onConfirm={async (purge) => {
+            const target = deleteSessionTarget
+            setDeleteSessionTarget(null)
+            try {
+              await deleteSession(target.id, purge)
+              onRefresh?.()
+            } catch (err) {
+              window.alert(`Delete failed: ${(err as Error)?.message ?? err}`)
+            }
+          }}
+          onCancel={() => setDeleteSessionTarget(null)}
+        />
+      )}
     </aside>
   )
 }
