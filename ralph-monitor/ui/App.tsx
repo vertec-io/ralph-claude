@@ -7,6 +7,7 @@ import type { UnmanagedPRDItem } from '../server/routes/unmanaged'
 import type { Project } from '../server/db'
 import { PrdSnapshotPanels } from './components/PrdSnapshotPanels'
 import { AdoptPrdDialog } from './components/AdoptPrdDialog'
+import { Sidebar } from './components/Sidebar'
 
 marked.setOptions({ gfm: true, breaks: false })
 
@@ -42,6 +43,7 @@ function useUnmanagedPrds(triggerVersion: number): {
 export function App() {
   const { snapshot, connected } = useServerStream()
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null)
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
   const [showAllEvents, setShowAllEvents] = useState(false)
 
   // Increment to force an unmanaged re-fetch after effort mutations.
@@ -84,6 +86,8 @@ export function App() {
         onSelect={setSelectedUnit}
         connected={connected}
         onAdopted={refreshUnmanaged}
+        selectedProjectId={selectedProjectId}
+        onSelectProject={setSelectedProjectId}
       />
       {selected ? <PRDDetail prd={selected} /> : <EmptyDetail />}
       <EventFeed
@@ -96,7 +100,7 @@ export function App() {
   )
 }
 
-function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected, onAdopted }: {
+function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected, onAdopted, selectedProjectId, onSelectProject }: {
   prds: PRDRecord[]
   unmanaged: UnmanagedPRDItem[]
   projects: Project[]
@@ -104,8 +108,47 @@ function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected,
   onSelect: (u: string) => void
   connected: boolean
   onAdopted: () => void
+  selectedProjectId: string | null
+  onSelectProject: (id: string) => void
 }) {
   const [adoptItem, setAdoptItem] = useState<UnmanagedPRDItem | null>(null)
+
+  // Unmanaged PRDs section — passed as the unmanagedPrds slot of Sidebar so it
+  // stays adjacent to the project tree. Adopt dialog is rendered separately so
+  // the modal overlays correctly.
+  const unmanagedPrdsSlot = unmanaged.length > 0 ? (
+    <div>
+      <div className="px-4 pt-4 pb-1 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold">
+        Unmanaged PRDs
+      </div>
+      <ul>
+        {unmanaged.map((item) => (
+          <li key={item.unitName}>
+            <button
+              onClick={() => setAdoptItem(item)}
+              className="w-full text-left px-4 py-2.5 border-b border-zinc-900 hover:bg-zinc-900/50 transition"
+            >
+              <div className="flex items-center gap-2">
+                <span className="size-2 rounded-full bg-zinc-600 shrink-0" title="unmanaged" />
+                <span className="text-sm text-zinc-300 truncate">
+                  {item.unitName.replace(/^ralph-pilot-native-/, '')}
+                </span>
+              </div>
+              <div className="mt-0.5 text-[11px] text-zinc-500 truncate font-mono">
+                {item.taskDir}
+              </div>
+              {item.suggestedProjectId && (
+                <div className="mt-0.5 text-[10px] text-emerald-500">
+                  worktree match{item.suggestedBranch ? ` · ${item.suggestedBranch}` : ''}
+                </div>
+              )}
+              <div className="mt-1 text-[10px] text-zinc-600 italic">click to adopt</div>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  ) : undefined
 
   return (
     <aside className="border-r border-zinc-800 overflow-y-auto bg-zinc-950">
@@ -130,39 +173,16 @@ function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected,
         ))}
       </ul>
 
-      {unmanaged.length > 0 && (
-        <div>
-          <div className="px-4 pt-4 pb-1 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold">
-            Unmanaged PRDs
-          </div>
-          <ul>
-            {unmanaged.map((item) => (
-              <li key={item.unitName}>
-                <button
-                  onClick={() => setAdoptItem(item)}
-                  className="w-full text-left px-4 py-2.5 border-b border-zinc-900 hover:bg-zinc-900/50 transition"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="size-2 rounded-full bg-zinc-600 shrink-0" title="unmanaged" />
-                    <span className="text-sm text-zinc-300 truncate">
-                      {item.unitName.replace(/^ralph-pilot-native-/, '')}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 text-[11px] text-zinc-500 truncate font-mono">
-                    {item.taskDir}
-                  </div>
-                  {item.suggestedProjectId && (
-                    <div className="mt-0.5 text-[10px] text-emerald-500">
-                      worktree match{item.suggestedBranch ? ` · ${item.suggestedBranch}` : ''}
-                    </div>
-                  )}
-                  <div className="mt-1 text-[10px] text-zinc-600 italic">click to adopt</div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {/* Sidebar — lifecycle-bucketed project tree (US-014a).
+          Unmanaged PRDs section is passed via unmanagedPrds slot so it remains
+          visually adjacent to the project tree (preserves US-013 display). */}
+      <Sidebar
+        projects={projects}
+        liveSessionIds={new Set<string>()}
+        selectedProjectId={selectedProjectId}
+        onSelectProject={onSelectProject}
+        unmanagedPrds={unmanagedPrdsSlot}
+      />
 
       {adoptItem && (
         <AdoptPrdDialog
