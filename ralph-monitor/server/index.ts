@@ -12,8 +12,15 @@ import { projectsRouter } from './routes/projects'
 import { effortsRouter } from './routes/efforts'
 import { sessionsRouter } from './routes/sessions'
 import { buildLifecycleSnapshot } from './routes/lifecycle'
-import { bearerMiddleware, getOrCreateToken } from './auth'
+import { bearerMiddleware, getOrCreateToken, validateWebSocketSubprotocol } from './auth'
+import {
+  attachWsToSession,
+  detachWsFromSession,
+  handleWsMessage,
+  type WsBridgeData,
+} from './sessions/wsBridge'
 import type { AppEvent } from './types'
+import type { Server, ServerWebSocket } from 'bun'
 
 // US-004: refuse to bind to anything except 127.0.0.1. ralph-monitor's
 // security model assumes loopback-only — exposing the API on a routable
@@ -323,6 +330,62 @@ const port = Number(process.env.RALPH_MONITOR_PORT ?? 7777)
 console.log(`ralph-monitor server listening on http://127.0.0.1:${port}`)
 console.log(`UI dev: bun run dev:ui (then open http://localhost:5173)`)
 
+// WebSocket upgrade handling for /ws/sessions/:id (US-005b).
+//
+// Hono's upgradeWebSocket helper does NOT expose Sec-WebSocket-Protocol
+// negotiation, so we go straight at Bun.serve's primitives:
+//   1. fetch detects WS-upgrade requests on /ws/sessions/:id BEFORE Hono.
+//   2. We validate the bearer subprotocol via validateWebSocketSubprotocol.
+//   3. We call server.upgrade with `headers: { 'Sec-WebSocket-Protocol': matched }`
+//      so Bun emits the matched subprotocol in its handshake response.
+//      RFC 6455 §4.2.2 requires the server echo a subprotocol the client
+//      offered, otherwise the browser aborts the connection.
+//   4. The matched session id is stashed in `data` so the websocket handler
+//      can read it via `ws.data.sessionId`.
+//
+// Non-/ws/sessions/ requests fall through to Hono's app.fetch unchanged so
+// the existing API + /events SSE keep working without any reshape.
+async function fetch(
+  this: Server<WsBridgeData>,
+  req: Request,
+  server: Server<WsBridgeData>,
+): Promise<Response | undefined> {
+  const url = new URL(req.url)
+  if (url.pathname.startsWith('/ws/sessions/')) {
+    const sessionId = url.pathname.slice('/ws/sessions/'.length)
+    if (!sessionId || sessionId.includes('/')) {
+      return new Response('missing_session_id', { status: 400 })
+    }
+    const subprotocol = validateWebSocketSubprotocol(
+      req.headers.get('sec-websocket-protocol'),
+    )
+    if (subprotocol === null) {
+      return new Response('unauthorized', { status: 401 })
+    }
+    const upgraded = server.upgrade(req, {
+      headers: { 'Sec-WebSocket-Protocol': subprotocol },
+      data: { sessionId },
+    })
+    if (upgraded) return undefined
+    return new Response('upgrade_failed', { status: 500 })
+  }
+  // Hono's app.fetch is `(req, env?, executionCtx?) => Response | Promise<Response>`
+  // — its second arg shape is for Cloudflare Workers, not Bun. Pass req only.
+  return app.fetch(req)
+}
+
+const websocket = {
+  open(ws: ServerWebSocket<WsBridgeData>): void {
+    attachWsToSession(ws)
+  },
+  message(ws: ServerWebSocket<WsBridgeData>, data: string | Buffer): void {
+    handleWsMessage(ws, data)
+  },
+  close(ws: ServerWebSocket<WsBridgeData>, _code: number, _reason: string): void {
+    detachWsFromSession(ws)
+  },
+}
+
 export default {
   port,
   // Hard-coded loopback. The startup guard above already refuses to run if
@@ -330,6 +393,7 @@ export default {
   // env var here — what comes in via that var is only allowed to be the
   // value we'd hard-code anyway.
   hostname: '127.0.0.1',
-  fetch: app.fetch,
+  fetch,
+  websocket,
   idleTimeout: 0,  // SSE connections are long-lived
 }
