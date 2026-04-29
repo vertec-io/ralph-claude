@@ -14,6 +14,7 @@
     "bun-pty": "^0.4.8",
     "chokidar": "^4.0.3",
     "hono": "^4.7.0",
+    "lucide-react": "^1.14.0",
     "marked": "^15.0.0",
     "xterm": "^5.0.0",
     "xterm-addon-fit": "^0.8.0"

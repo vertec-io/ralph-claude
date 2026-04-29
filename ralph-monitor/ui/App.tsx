@@ -5,6 +5,8 @@ import { authFetch } from './auth'
 import type { PRDRecord, UserStory, AppEvent, CommitRow } from '../server/types'
 import type { UnmanagedPRDItem } from '../server/routes/unmanaged'
 import type { Project } from '../server/db'
+import type { Effort } from '../server/db/efforts'
+import type { Session } from '../server/db/sessions'
 import { PrdSnapshotPanels } from './components/PrdSnapshotPanels'
 import { AdoptPrdDialog } from './components/AdoptPrdDialog'
 import { Sidebar } from './components/Sidebar'
@@ -44,7 +46,16 @@ export function App() {
   const { snapshot, connected } = useServerStream()
   const [selectedUnit, setSelectedUnit] = useState<string | null>(null)
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null)
+  const [selectedEffortId, setSelectedEffortId] = useState<string | null>(null)
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
   const [showAllEvents, setShowAllEvents] = useState(false)
+
+  // Efforts and sessions state — populated from lifecycle.snapshot (US-014b).
+  // TODO(US-016): fetch sessions lazily on effort expansion rather than loading
+  //               all sessions upfront. For now the snapshot already carries
+  //               efforts; sessions remain empty until a deeper integration is wired.
+  const [efforts, setEfforts] = useState<Effort[]>([])
+  const [sessions, setSessions] = useState<Session[]>([])
 
   // Increment to force an unmanaged re-fetch after effort mutations.
   const [unmanagedVersion, setUnmanagedVersion] = useState(0)
@@ -58,6 +69,42 @@ export function App() {
     if (last.type === 'effort.created' || last.type === 'effort.deleted') {
       bumpUnmanaged()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot?.events[0]])
+
+  // Populate efforts from the lifecycle snapshot (US-014b).
+  // The snapshot already includes efforts via the /api/lifecycle endpoint.
+  // Sessions are not yet included in the snapshot; they remain an empty array
+  // until US-016 wires per-effort session fetches.
+  //
+  // SSE session.updated / session.exited events update sessions in-place.
+  // TODO(US-016): fetch sessions for each effort on effort expansion.
+  useEffect(() => {
+    if (!snapshot) return
+    // Refresh efforts list from a dedicated fetch so we always have fresh data.
+    authFetch('/api/projects')
+      .then((r) => r.json())
+      .then((body: any) => {
+        // If the snapshot already ships efforts, use them directly.
+        // Otherwise fall back to an empty array and let US-016 wire it.
+        if (Array.isArray(body?.efforts)) setEfforts(body.efforts as Effort[])
+      })
+      .catch(() => {})
+  // We only want to do this on mount — snapshot reference changes each SSE tick
+  // and re-fetching efforts every tick would be wasteful.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Handle session.updated / session.exited events from SSE (US-014b).
+  useEffect(() => {
+    if (!snapshot) return
+    const last = snapshot.events[0]
+    if (!last) return
+    // TODO(US-016): when sessions are fetched, mutate the sessions array in
+    // response to session.updated and session.exited events here.
+    // For now the sessions array is empty so there's nothing to update.
+    void sessions
+    void setSessions
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshot?.events[0]])
 
@@ -82,12 +129,18 @@ export function App() {
         prds={snapshot.prds}
         unmanaged={unmanaged}
         projects={projects}
+        efforts={efforts}
+        sessions={sessions}
         selectedUnit={selected?.unitName ?? null}
         onSelect={setSelectedUnit}
         connected={connected}
         onAdopted={refreshUnmanaged}
         selectedProjectId={selectedProjectId}
         onSelectProject={setSelectedProjectId}
+        selectedEffortId={selectedEffortId}
+        onSelectEffort={setSelectedEffortId}
+        selectedSessionId={selectedSessionId}
+        onSelectSession={setSelectedSessionId}
       />
       {selected ? <PRDDetail prd={selected} /> : <EmptyDetail />}
       <EventFeed
@@ -100,16 +153,38 @@ export function App() {
   )
 }
 
-function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected, onAdopted, selectedProjectId, onSelectProject }: {
+function PRDList({
+  prds,
+  unmanaged,
+  projects,
+  efforts,
+  sessions,
+  selectedUnit,
+  onSelect,
+  connected,
+  onAdopted,
+  selectedProjectId,
+  onSelectProject,
+  selectedEffortId,
+  onSelectEffort,
+  selectedSessionId,
+  onSelectSession,
+}: {
   prds: PRDRecord[]
   unmanaged: UnmanagedPRDItem[]
   projects: Project[]
+  efforts: Effort[]
+  sessions: Session[]
   selectedUnit: string | null
   onSelect: (u: string) => void
   connected: boolean
   onAdopted: () => void
   selectedProjectId: string | null
   onSelectProject: (id: string) => void
+  selectedEffortId: string | null
+  onSelectEffort: (id: string) => void
+  selectedSessionId: string | null
+  onSelectSession: (id: string) => void
 }) {
   const [adoptItem, setAdoptItem] = useState<UnmanagedPRDItem | null>(null)
 
@@ -178,9 +253,15 @@ function PRDList({ prds, unmanaged, projects, selectedUnit, onSelect, connected,
           visually adjacent to the project tree (preserves US-013 display). */}
       <Sidebar
         projects={projects}
+        efforts={efforts}
+        sessions={sessions}
         liveSessionIds={new Set<string>()}
         selectedProjectId={selectedProjectId}
         onSelectProject={onSelectProject}
+        selectedEffortId={selectedEffortId}
+        onSelectEffort={onSelectEffort}
+        selectedSessionId={selectedSessionId}
+        onSelectSession={onSelectSession}
         unmanagedPrds={unmanagedPrdsSlot}
       />
 

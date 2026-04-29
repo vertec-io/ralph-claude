@@ -15,16 +15,32 @@
 //   The 30-day threshold only matters for the never-opened boundary: a project
 //   that was never opened AND is freshly created (<30d) is promoted to Active.
 //   Otherwise it falls into Recent (shown with '—' time).
+//
+// US-014b additions:
+//   Each project node expands to show its efforts (excluding archived ones unless
+//   the per-project 'show archived' toggle is on). Each effort expands to show
+//   sessions with status icon + title + last-activity timestamp.
 
 import { useState } from 'react'
+import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown } from 'lucide-react'
 import type { Project } from '../../server/db/projects'
+import type { Effort } from '../../server/db/efforts'
+import type { Session } from '../../server/db/sessions'
+
+export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
 
 export interface SidebarProps {
   projects: Project[]
+  efforts: Effort[]
+  sessions: Session[]
   liveSessionIds: Set<string>
   effortsLiveByProject?: Map<string, boolean>
   selectedProjectId: string | null
   onSelectProject: (id: string) => void
+  selectedEffortId: string | null
+  onSelectEffort: (id: string) => void
+  selectedSessionId: string | null
+  onSelectSession: (id: string) => void
   unmanagedPrds?: React.ReactNode
 }
 
@@ -83,6 +99,73 @@ export function bucketProjects(
   return { active, recent, archived }
 }
 
+// Group efforts by project_id — exported for unit tests.
+export function groupEffortsByProject(efforts: Effort[]): Map<string, Effort[]> {
+  const map = new Map<string, Effort[]>()
+  for (const e of efforts) {
+    const list = map.get(e.project_id) ?? []
+    list.push(e)
+    map.set(e.project_id, list)
+  }
+  return map
+}
+
+// Group sessions by effort_id — exported for unit tests.
+export function groupSessionsByEffort(sessions: Session[]): Map<string, Session[]> {
+  const map = new Map<string, Session[]>()
+  for (const s of sessions) {
+    const list = map.get(s.effort_id) ?? []
+    list.push(s)
+    map.set(s.effort_id, list)
+  }
+  return map
+}
+
+// Client-side status approximation.
+//
+// The server's computeSessionStatus uses the PTY registry (in-memory handle with
+// `handle.exited` flag) which is not available in the client. The client only has
+// liveSessionIds — a set of session IDs that currently have a live, attached PTY
+// handle, broadcast via SSE. This means:
+//
+//   - 'exited' cannot be distinguished from 'dormant' on the client. The exited
+//     state is a transient grace window during which the PTY handle is still in
+//     the registry but handle.exited === true. From the client's perspective,
+//     once a session is no longer in liveSessionIds, we treat it as 'dormant'.
+//     The session detail view can show a more nuanced state via a direct API call.
+//
+//   - 'live-attached' vs 'live-orphaned': if a session ID is in liveSessionIds we
+//     know the server has an active PTY handle → 'live-attached'. If it's NOT in
+//     liveSessionIds but has a non-null process_pid, the process is orphaned.
+export function computeStatusClient(
+  session: Session,
+  liveSessionIds: Set<string>,
+): SessionStatus {
+  if (liveSessionIds.has(session.id) && session.process_pid != null) {
+    return 'live-attached'
+  }
+  if (!liveSessionIds.has(session.id) && session.process_pid != null) {
+    return 'live-orphaned'
+  }
+  // process_pid == null (or in liveSessionIds but pid is null, which shouldn't
+  // happen in practice) — treat as dormant.
+  return 'dormant'
+}
+
+// Status icon — maps a SessionStatus to a lucide-react icon.
+function StatusIcon({ status }: { status: SessionStatus }) {
+  switch (status) {
+    case 'live-attached':
+      return <Circle fill="currentColor" className="text-green-500 w-3 h-3 shrink-0" />
+    case 'live-orphaned':
+      return <CircleAlert className="text-yellow-500 w-3 h-3 shrink-0" />
+    case 'dormant':
+      return <CircleSlash className="text-zinc-400 w-3 h-3 shrink-0" />
+    case 'exited':
+      return <CircleOff className="text-zinc-300/50 w-3 h-3 shrink-0" />
+  }
+}
+
 // Small helper — same shape as timeAgo in App.tsx but lives here so Sidebar
 // has no cross-file dependency on App internals.
 function timeAgo(ms: number): string {
@@ -98,17 +181,169 @@ function timeAgo(ms: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// SessionRow
+// ---------------------------------------------------------------------------
+
+interface SessionRowProps {
+  session: Session
+  selected: boolean
+  liveSessionIds: Set<string>
+  onSelect: () => void
+}
+
+function SessionRow({ session, selected, liveSessionIds, onSelect }: SessionRowProps) {
+  const status = computeStatusClient(session, liveSessionIds)
+  const lastActivity = session.last_activity_at ? timeAgo(session.last_activity_at) : '—'
+  const title = session.title ?? session.id.slice(0, 8)
+
+  return (
+    <li>
+      <button
+        onClick={onSelect}
+        data-testid={`session-row-${session.id}`}
+        className={`w-full text-left pl-10 pr-3 py-1.5 rounded transition ${
+          selected
+            ? 'bg-zinc-700/60 text-zinc-100'
+            : 'hover:bg-zinc-800/60 text-zinc-400'
+        }`}
+      >
+        <div className="flex items-center gap-1.5 min-w-0">
+          <StatusIcon status={status} />
+          <span className="text-xs truncate flex-1">{title}</span>
+          <span className="text-[11px] text-zinc-600 tabular-nums shrink-0">{lastActivity}</span>
+        </div>
+      </button>
+    </li>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// EffortRow
+// ---------------------------------------------------------------------------
+
+interface EffortRowProps {
+  effort: Effort
+  sessions: Session[]
+  expanded: boolean
+  selected: boolean
+  selectedSessionId: string | null
+  liveSessionIds: Set<string>
+  onToggle: () => void
+  onSelect: () => void
+  onSelectSession: (id: string) => void
+}
+
+function EffortRow({
+  effort,
+  sessions,
+  expanded,
+  selected,
+  selectedSessionId,
+  liveSessionIds,
+  onToggle,
+  onSelect,
+  onSelectSession,
+}: EffortRowProps) {
+  const hasLive = sessions.some(
+    (s) => computeStatusClient(s, liveSessionIds) === 'live-attached' ||
+           computeStatusClient(s, liveSessionIds) === 'live-orphaned',
+  )
+
+  return (
+    <>
+      <li>
+        <div className={`flex items-center pl-5 pr-3 py-1.5 rounded transition ${
+          selected
+            ? 'bg-zinc-700/40 text-zinc-200'
+            : 'hover:bg-zinc-800/40 text-zinc-400'
+        }`}>
+          <button
+            onClick={onToggle}
+            className="shrink-0 mr-1 text-zinc-500 hover:text-zinc-300 transition"
+            aria-label={expanded ? 'collapse effort' : 'expand effort'}
+          >
+            {expanded
+              ? <ChevronDown className="w-3 h-3" />
+              : <ChevronRight className="w-3 h-3" />}
+          </button>
+          <button
+            onClick={onSelect}
+            data-testid={`effort-row-${effort.id}`}
+            className="flex items-center gap-2 min-w-0 flex-1 text-left"
+          >
+            <span className={`size-1.5 rounded-full shrink-0 ${
+              hasLive ? 'bg-emerald-500' : 'bg-zinc-600'
+            }`} />
+            <span className="text-xs truncate">{effort.name}</span>
+            {effort.status === 'done' && (
+              <span className="text-[10px] text-zinc-600 shrink-0">done</span>
+            )}
+          </button>
+        </div>
+      </li>
+      {expanded && (
+        <ul className="space-y-0.5">
+          {sessions.length === 0 && (
+            <li className="pl-10 pr-3 py-1 text-[11px] text-zinc-600 italic">no sessions</li>
+          )}
+          {sessions.map((s) => (
+            <SessionRow
+              key={s.id}
+              session={s}
+              selected={s.id === selectedSessionId}
+              liveSessionIds={liveSessionIds}
+              onSelect={() => onSelectSession(s.id)}
+            />
+          ))}
+        </ul>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // ProjectRow
 // ---------------------------------------------------------------------------
 
 interface ProjectRowProps {
   project: Project
+  efforts: Effort[]
+  sessionsByEffort: Map<string, Session[]>
+  expanded: boolean
   selected: boolean
   hasLiveSession: boolean
+  selectedEffortId: string | null
+  selectedSessionId: string | null
+  liveSessionIds: Set<string>
+  expandedEfforts: Set<string>
+  showArchivedEfforts: boolean
+  onToggle: () => void
   onSelect: () => void
+  onSelectEffort: (id: string) => void
+  onSelectSession: (id: string) => void
+  onToggleEffort: (id: string) => void
+  onToggleShowArchived: () => void
 }
 
-function ProjectRow({ project, selected, hasLiveSession, onSelect }: ProjectRowProps) {
+function ProjectRow({
+  project,
+  efforts,
+  sessionsByEffort,
+  expanded,
+  selected,
+  hasLiveSession,
+  selectedEffortId,
+  selectedSessionId,
+  liveSessionIds,
+  expandedEfforts,
+  showArchivedEfforts,
+  onToggle,
+  onSelect,
+  onSelectEffort,
+  onSelectSession,
+  onToggleEffort,
+  onToggleShowArchived,
+}: ProjectRowProps) {
   const dotColor = hasLiveSession
     ? 'bg-emerald-500'
     : project.pinned
@@ -119,26 +354,83 @@ function ProjectRow({ project, selected, hasLiveSession, onSelect }: ProjectRowP
     ? timeAgo(project.last_opened_at)
     : '—'
 
+  // Filter archived efforts based on the per-project toggle
+  const visibleEfforts = showArchivedEfforts
+    ? efforts
+    : efforts.filter((e) => e.status !== 'archived')
+
+  const archivedCount = efforts.filter((e) => e.status === 'archived').length
+
   return (
-    <li>
-      <button
-        onClick={onSelect}
-        data-testid={`project-row-${project.id}`}
-        className={`w-full text-left px-3 py-2 rounded transition ${
+    <>
+      <li>
+        <div className={`flex items-start rounded transition ${
           selected
             ? 'bg-zinc-700/60 text-zinc-100'
             : 'hover:bg-zinc-800/60 text-zinc-300'
-        }`}
-      >
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={`size-2 rounded-full shrink-0 ${dotColor}`} title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'} />
-          <span className="text-sm truncate flex-1">{project.name}</span>
+        }`}>
+          <button
+            onClick={onToggle}
+            className="shrink-0 mt-2.5 ml-1 mr-0.5 text-zinc-500 hover:text-zinc-300 transition"
+            aria-label={expanded ? 'collapse project' : 'expand project'}
+          >
+            {expanded
+              ? <ChevronDown className="w-3 h-3" />
+              : <ChevronRight className="w-3 h-3" />}
+          </button>
+          <button
+            onClick={onSelect}
+            data-testid={`project-row-${project.id}`}
+            className="flex-1 text-left px-2 py-2 min-w-0"
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <span
+                className={`size-2 rounded-full shrink-0 ${dotColor}`}
+                title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'}
+              />
+              <span className="text-sm truncate flex-1">{project.name}</span>
+            </div>
+            <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
+              {lastActivity}
+            </div>
+          </button>
         </div>
-        <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
-          {lastActivity}
-        </div>
-      </button>
-    </li>
+      </li>
+
+      {expanded && (
+        <ul className="space-y-0.5">
+          {visibleEfforts.length === 0 && archivedCount === 0 && (
+            <li className="pl-7 pr-3 py-1 text-[11px] text-zinc-600 italic">no efforts</li>
+          )}
+          {visibleEfforts.map((e) => (
+            <EffortRow
+              key={e.id}
+              effort={e}
+              sessions={sessionsByEffort.get(e.id) ?? []}
+              expanded={expandedEfforts.has(e.id)}
+              selected={e.id === selectedEffortId}
+              selectedSessionId={selectedSessionId}
+              liveSessionIds={liveSessionIds}
+              onToggle={() => onToggleEffort(e.id)}
+              onSelect={() => onSelectEffort(e.id)}
+              onSelectSession={onSelectSession}
+            />
+          ))}
+          {archivedCount > 0 && (
+            <li>
+              <button
+                onClick={onToggleShowArchived}
+                className="pl-7 pr-3 py-1 text-[11px] text-zinc-600 hover:text-zinc-400 transition italic"
+              >
+                {showArchivedEfforts
+                  ? `hide ${archivedCount} archived`
+                  : `show ${archivedCount} archived`}
+              </button>
+            </li>
+          )}
+        </ul>
+      )}
+    </>
   )
 }
 
@@ -151,10 +443,24 @@ interface SectionProps {
   projects: Project[]
   open: boolean
   onToggle: () => void
-  selectedId: string | null
+  selectedProjectId: string | null
   onSelectProject: (id: string) => void
   liveSessionIds: Set<string>
   effortsLiveByProject?: Map<string, boolean>
+  effortsByProject: Map<string, Effort[]>
+  sessionsByEffort: Map<string, Session[]>
+  selectedEffortId: string | null
+  onSelectEffort: (id: string) => void
+  selectedSessionId: string | null
+  onSelectSession: (id: string) => void
+  // Per-project expansion state — hoisted up to the Section so all projects
+  // within a section share the same maps (avoid losing state on re-render).
+  expandedProjects: Set<string>
+  onToggleProject: (id: string) => void
+  expandedEfforts: Set<string>
+  onToggleEffort: (id: string) => void
+  showArchivedByProject: Set<string>
+  onToggleShowArchived: (id: string) => void
 }
 
 function Section({
@@ -162,9 +468,22 @@ function Section({
   projects,
   open,
   onToggle,
-  selectedId,
+  selectedProjectId,
   onSelectProject,
   effortsLiveByProject,
+  effortsByProject,
+  sessionsByEffort,
+  selectedEffortId,
+  onSelectEffort,
+  selectedSessionId,
+  onSelectSession,
+  liveSessionIds,
+  expandedProjects,
+  onToggleProject,
+  expandedEfforts,
+  onToggleEffort,
+  showArchivedByProject,
+  onToggleShowArchived,
 }: SectionProps) {
   return (
     <div>
@@ -184,9 +503,22 @@ function Section({
             <ProjectRow
               key={p.id}
               project={p}
-              selected={p.id === selectedId}
+              efforts={effortsByProject.get(p.id) ?? []}
+              sessionsByEffort={sessionsByEffort}
+              expanded={expandedProjects.has(p.id)}
+              selected={p.id === selectedProjectId}
               hasLiveSession={effortsLiveByProject?.get(p.id) === true}
+              selectedEffortId={selectedEffortId}
+              selectedSessionId={selectedSessionId}
+              liveSessionIds={liveSessionIds}
+              expandedEfforts={expandedEfforts}
+              showArchivedEfforts={showArchivedByProject.has(p.id)}
+              onToggle={() => onToggleProject(p.id)}
               onSelect={() => onSelectProject(p.id)}
+              onSelectEffort={onSelectEffort}
+              onSelectSession={onSelectSession}
+              onToggleEffort={onToggleEffort}
+              onToggleShowArchived={() => onToggleShowArchived(p.id)}
             />
           ))}
         </ul>
@@ -206,17 +538,75 @@ function Section({
 
 export function Sidebar({
   projects,
+  efforts,
+  sessions,
   liveSessionIds,
   effortsLiveByProject,
   selectedProjectId,
   onSelectProject,
+  selectedEffortId,
+  onSelectEffort,
+  selectedSessionId,
+  onSelectSession,
   unmanagedPrds,
 }: SidebarProps) {
   const [activeOpen, setActiveOpen] = useState(true)
   const [recentOpen, setRecentOpen] = useState(true)
   const [archivedOpen, setArchivedOpen] = useState(false)
 
+  // Per-project expansion state (shared across sections via a single set)
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
+  const toggleProject = (id: string) => {
+    setExpandedProjects((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Per-effort expansion state
+  const [expandedEfforts, setExpandedEfforts] = useState<Set<string>>(new Set())
+  const toggleEffort = (id: string) => {
+    setExpandedEfforts((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Per-project "show archived efforts" toggle
+  const [showArchivedByProject, setShowArchivedByProject] = useState<Set<string>>(new Set())
+  const toggleShowArchived = (id: string) => {
+    setShowArchivedByProject((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
   const buckets = bucketProjects(projects, liveSessionIds, effortsLiveByProject)
+  const effortsByProject = groupEffortsByProject(efforts)
+  const sessionsByEffort = groupSessionsByEffort(sessions)
+
+  const sharedSectionProps = {
+    liveSessionIds,
+    effortsLiveByProject,
+    effortsByProject,
+    sessionsByEffort,
+    selectedEffortId,
+    onSelectEffort,
+    selectedSessionId,
+    onSelectSession,
+    expandedProjects,
+    onToggleProject: toggleProject,
+    expandedEfforts,
+    onToggleEffort: toggleEffort,
+    showArchivedByProject,
+    onToggleShowArchived: toggleShowArchived,
+  }
 
   return (
     <aside
@@ -230,10 +620,9 @@ export function Sidebar({
         projects={buckets.active}
         open={activeOpen}
         onToggle={() => setActiveOpen((o) => !o)}
-        selectedId={selectedProjectId}
+        selectedProjectId={selectedProjectId}
         onSelectProject={onSelectProject}
-        liveSessionIds={liveSessionIds}
-        effortsLiveByProject={effortsLiveByProject}
+        {...sharedSectionProps}
       />
 
       <Section
@@ -241,10 +630,9 @@ export function Sidebar({
         projects={buckets.recent}
         open={recentOpen}
         onToggle={() => setRecentOpen((o) => !o)}
-        selectedId={selectedProjectId}
+        selectedProjectId={selectedProjectId}
         onSelectProject={onSelectProject}
-        liveSessionIds={liveSessionIds}
-        effortsLiveByProject={effortsLiveByProject}
+        {...sharedSectionProps}
       />
 
       <Section
@@ -252,10 +640,9 @@ export function Sidebar({
         projects={buckets.archived}
         open={archivedOpen}
         onToggle={() => setArchivedOpen((o) => !o)}
-        selectedId={selectedProjectId}
+        selectedProjectId={selectedProjectId}
         onSelectProject={onSelectProject}
-        liveSessionIds={liveSessionIds}
-        effortsLiveByProject={effortsLiveByProject}
+        {...sharedSectionProps}
       />
     </aside>
   )
