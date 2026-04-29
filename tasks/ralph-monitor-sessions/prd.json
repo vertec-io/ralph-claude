@@ -1309,31 +1309,31 @@
       "acceptanceCriteria": [
         {
           "description": "New endpoint POST /api/sessions/:id/kill: sends SIGTERM to process_pid if alive, waits 5s for exit, escalates to SIGKILL. Returns 204 on success, 404 if session doesn't exist, 409 if status is dormant or exited (nothing to kill)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "On kill: updates DB row (process_pid = NULL, process_started_at = NULL), unregisters from registry if attached, emits session.exited SSE event",
-          "passes": false
+          "passes": true
         },
         {
           "description": "JSONL file is preserved (not deleted) \u2014 kill is a process action, not a data action",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Idempotent: calling Kill on an already-exited session returns 409 (clear contract \u2014 user can retry safely without surprise)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "In SessionDetail.tsx, when status is live-orphaned: input is disabled with tooltip 'PTY unreachable; kill and resume to regain control'; a 'Kill & Resume' button is shown that calls Kill then Resume in sequence",
-          "passes": false
+          "passes": true
         },
         {
           "description": "UX prose (in code comment near the button): 'Kill is destructive \u2014 the last in-flight turn is lost. Use this when the orphaned PTY is unrecoverable, not as a routine restart.'",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Using Playwright MCP, simulate a live-orphaned session (manually mark a row as such for the test fixture), verify the Kill & Resume button appears, click it, verify the kill+resume sequence completes and status transitions to live-attached",

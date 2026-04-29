@@ -65,6 +65,8 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
   const [input, setInput] = useState('')
   const [resuming, setResuming] = useState(false)
   const [resumeError, setResumeError] = useState<string | null>(null)
+  const [killing, setKilling] = useState(false)
+  const [killPhase, setKillPhase] = useState<'idle' | 'killing' | 'resuming'>('idle')
   const wsRef = useRef<WebSocket | null>(null)
 
   // Fetch the session row + computed status on mount (or sessionId change).
@@ -251,6 +253,41 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
     }
   }
 
+  async function handleKillAndResume() {
+    if (killing || resuming) return
+    setKilling(true)
+    setKillPhase('killing')
+    setResumeError(null)
+    try {
+      const killRes = await authFetch(`/api/sessions/${sessionId}/kill`, { method: 'POST' })
+      if (!killRes.ok && killRes.status !== 404 && killRes.status !== 409) {
+        // Unexpected kill error — surface it.
+        const body = await killRes.json().catch(() => ({})) as { error?: string }
+        setResumeError(body.error ?? `kill failed (${killRes.status})`)
+        return
+      }
+      // 404/409 from kill means the session already exited naturally between
+      // the user clicking and the request landing — fall through to resume.
+      setKillPhase('resuming')
+      const resumeRes = await authFetch(`/api/sessions/${sessionId}/resume`, { method: 'POST' })
+      if (!resumeRes.ok) {
+        const body = await resumeRes.json().catch(() => ({})) as { error?: string }
+        setResumeError(body.error ?? `resume failed (${resumeRes.status})`)
+        return
+      }
+      // Re-fetch session to pick up new status.
+      const updated = await authFetch(`/api/sessions/${sessionId}`)
+      if (updated.ok) {
+        setSession(await updated.json() as SessionWithStatus)
+      }
+    } catch (err) {
+      setResumeError(String((err as Error)?.message ?? err))
+    } finally {
+      setKilling(false)
+      setKillPhase('idle')
+    }
+  }
+
   if (!session) {
     return <div className="p-4 text-sm text-zinc-500">Loading session…</div>
   }
@@ -352,6 +389,9 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
           onSend={sendInput}
           onResume={handleResume}
           resuming={resuming}
+          onKillAndResume={handleKillAndResume}
+          killing={killing}
+          killPhase={killPhase}
         />
       </footer>
     </div>
@@ -394,10 +434,10 @@ function Chip({
   )
 }
 
-// InputArea — status-driven footer input state machine (US-016b).
+// InputArea — status-driven footer input state machine (US-016b / US-016c).
 //
 // live-attached  → textarea + Send button (full interaction)
-// live-orphaned  → textarea disabled + helper text + Resume button
+// live-orphaned  → textarea disabled (PTY unreachable tooltip) + Kill & Resume button (US-016c)
 // dormant        → textarea disabled + helper text + Resume button
 // exited         → no textarea, shows exit code + Resume button
 interface InputAreaProps {
@@ -409,6 +449,9 @@ interface InputAreaProps {
   onSend: () => void
   onResume: () => void
   resuming: boolean
+  onKillAndResume: () => void
+  killing: boolean
+  killPhase: 'idle' | 'killing' | 'resuming'
 }
 
 function ResumeButton({ onResume, resuming }: { onResume: () => void; resuming: boolean }) {
@@ -433,6 +476,9 @@ function InputArea({
   onSend,
   onResume,
   resuming,
+  onKillAndResume,
+  killing,
+  killPhase,
 }: InputAreaProps) {
   if (status === 'exited') {
     return (
@@ -448,13 +494,41 @@ function InputArea({
     )
   }
 
+  if (status === 'live-orphaned') {
+    // Kill is destructive — the last in-flight turn is lost. Use this when the
+    // orphaned PTY is unrecoverable, not as a routine restart.
+    const killLabel =
+      killPhase === 'killing' ? 'Killing…' : killPhase === 'resuming' ? 'Resuming…' : 'Kill & Resume'
+    return (
+      <div className="flex gap-2 items-end">
+        <textarea
+          data-testid="session-input"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Session is orphaned (PID gone). Kill & Resume to regain control."
+          disabled={true}
+          title="PTY unreachable; kill and resume to regain control"
+          className="flex-1 min-h-[2.5rem] max-h-32 bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-sm font-mono resize-none disabled:opacity-50 disabled:cursor-not-allowed"
+          rows={1}
+        />
+        <button
+          onClick={onKillAndResume}
+          disabled={killing}
+          data-testid="session-kill-and-resume"
+          className="px-3 py-1 bg-amber-700 disabled:opacity-50 rounded text-sm self-end h-[2.5rem] whitespace-nowrap"
+        >
+          {killLabel}
+        </button>
+      </div>
+    )
+  }
+
   const isLive = status === 'live-attached'
   const placeholder =
-    status === 'live-orphaned'
-      ? 'Session is orphaned (PID gone). Waiting for reaper or click Resume.'
-      : status === 'dormant'
-        ? 'Session is dormant. Click Resume to restart.'
-        : 'Type a message — Enter to send, Shift+Enter for newline'
+    status === 'dormant'
+      ? 'Session is dormant. Click Resume to restart.'
+      : 'Type a message — Enter to send, Shift+Enter for newline'
 
   return (
     <div className="flex gap-2 items-end">

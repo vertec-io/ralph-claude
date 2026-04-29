@@ -47,6 +47,7 @@ import {
   JsonlMissingError,
 } from '../sessions/spawn'
 import { computeSessionStatus } from '../sessions/status'
+import { get as registryGet, unregister as registryUnregister } from '../sessions/registry'
 import { isPathInProjectOrWorktree } from '../git/worktrees'
 import { attachTailer } from '../jsonl/tailer'
 
@@ -295,6 +296,105 @@ sessionsRouter.post('/api/sessions/:id/resume', async (c) => {
       500,
     )
   }
+})
+
+// POST /api/sessions/:id/kill — US-016c
+//
+// Sends SIGTERM to the session's process, waits up to 5 s for exit, then
+// escalates to SIGKILL. Behaviour differs between attached and orphaned:
+//
+//   live-attached:  registry holds a PtyHandle → call handle.kill(). The PTY's
+//                   existing onExit listener (in spawn.ts) will fire naturally
+//                   and clear process_pid / process_started_at in the DB plus
+//                   emit session.exited. We do NOT duplicate that cleanup here.
+//
+//   live-orphaned:  no registry entry (PTY parent died). We signal the OS PID
+//                   directly via process.kill(). Since there is no onExit
+//                   listener, this handler MUST clear the DB fields and emit
+//                   session.exited itself. exit_code is -1 (sentinel meaning
+//                   "killed by operator with no observed exit code — the PTY was
+//                   already orphaned so the natural exit path never fired").
+//
+//   dormant/exited: 409 — nothing to kill. Idempotent contract: caller can
+//                   retry without surprise but won't get a 204 after the first.
+//
+// The JSONL file is intentionally NOT deleted — kill is a process action, not
+// a data action. The transcript is preserved for inspection and future resume.
+sessionsRouter.post('/api/sessions/:id/kill', async (c) => {
+  const id = c.req.param('id')
+  const db = getDb()
+  const session = getSessionById(db, id)
+  if (!session) {
+    return c.json({ error: 'session_not_found', details: { id } }, 404)
+  }
+
+  const status = computeSessionStatus(session)
+
+  if (status === 'dormant' || status === 'exited') {
+    return c.json(
+      { error: 'session_not_killable', details: { id, status } },
+      409,
+    )
+  }
+
+  const handle = registryGet(id)
+
+  if (status === 'live-attached' && handle) {
+    // Attached path: delegate to the PTY handle. The existing onExit listener
+    // wired up in spawn.ts will clear DB fields and emit session.exited —
+    // we must NOT do it here or we'd double-emit.
+    try { handle.kill('SIGTERM') } catch {}
+    await Promise.race<'exited' | 'timeout'>([
+      new Promise<'exited'>((resolve) => {
+        const unsub = handle.onExit(() => {
+          try { unsub() } catch {}
+          resolve('exited')
+        })
+      }),
+      new Promise<'timeout'>((resolve) => setTimeout(() => resolve('timeout'), 5000)),
+    ]).then((result) => {
+      if (result === 'timeout') {
+        try { handle.kill('SIGKILL') } catch {}
+      }
+    })
+  } else {
+    // Orphaned path: registry has no handle (PTY parent died). Signal the OS
+    // PID directly. Poll kill(pid, 0) every 250 ms for up to 5 s to detect
+    // exit (ESRCH = process is gone). Because no onExit listener exists, we
+    // are responsible for clearing DB fields and emitting the event.
+    const pid = session.process_pid as number
+
+    try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
+
+    // Wait up to 5 s for the process to exit.
+    const deadline = Date.now() + 5000
+    let gone = false
+    while (Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 250))
+      try {
+        process.kill(pid, 0) // throws ESRCH when process is gone
+      } catch {
+        gone = true
+        break
+      }
+    }
+
+    if (!gone) {
+      // Escalate to SIGKILL after timeout.
+      try { process.kill(pid, 'SIGKILL') } catch { /* already gone */ }
+    }
+
+    // Clear DB fields — the natural exit path won't fire for orphaned sessions.
+    updateSession(db, id, { process_pid: null, process_started_at: null })
+    // Defensively unregister in case a stale entry somehow exists.
+    registryUnregister(id)
+    // Emit session.exited. exit_code -1 = operator-killed orphan (no PTY exit
+    // code observable; chosen as a sentinel that distinguishes "we killed it"
+    // from a natural 0/non-zero exit).
+    store.recordEvent({ type: 'session.exited', ts: Date.now(), id, exit_code: -1 })
+  }
+
+  return c.body(null, 204)
 })
 
 // GET /api/efforts/:id/sessions
