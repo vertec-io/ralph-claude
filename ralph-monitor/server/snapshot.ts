@@ -1,5 +1,5 @@
 import { readFile, readdir, stat } from 'node:fs/promises'
-import { join, basename } from 'node:path'
+import { join, basename, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn } from 'node:child_process'
 import type { PRDRecord, PRDJson, CommitRow, DecisionFile, DocFile } from './types'
@@ -11,54 +11,106 @@ function sessionJsonlPathFor(worktreeDir: string, sessionId: string): string {
   return join(homedir(), '.claude', 'projects', encoded, `${sessionId}.jsonl`)
 }
 
-// Refresh all derived fields on a PRDRecord by reading from disk.
-// Idempotent and safe to call repeatedly.
-export async function refreshSnapshot(prd: PRDRecord): Promise<PRDRecord> {
-  const updated: PRDRecord = { ...prd, lastUpdated: Date.now() }
+export interface GetSnapshotInput {
+  prdPath: string
+  workingDir: string
+  sessionId?: string
+  unitName?: string
+}
 
-  // prd.json
-  try {
-    const text = await readFile(join(prd.taskDir, 'prd.json'), 'utf-8')
-    updated.prd = JSON.parse(text) as PRDJson
-  } catch {
-    updated.prd = undefined
+// Core snapshot builder, keyed by prd-file path rather than a full PRDRecord.
+// Fields that depend on absent sessionId/unitName gracefully degrade to empty
+// arrays / undefined.  If prdPath doesn't exist on disk, returns a minimal
+// PRDRecord with status 'pending' rather than throwing.
+export async function getSnapshotForPath(input: GetSnapshotInput): Promise<PRDRecord> {
+  const { prdPath, workingDir, sessionId, unitName } = input
+  const taskDir = dirname(prdPath)
+
+  // Skeleton — every required PRDRecord field has a safe default.
+  const base: PRDRecord = {
+    unitName: unitName ?? '',
+    taskDir,
+    worktreeDir: workingDir,
+    sessionId: sessionId ?? '',
+    recentCommits: [],
+    watchdogLogTail: [],
+    decisionFiles: [],
+    docFiles: [],
+    status: 'pending',
+    lastUpdated: Date.now(),
   }
+
+  // prd.json — early exit with 'pending' status on ENOENT
+  let prdJson: PRDJson | undefined
+  try {
+    const text = await readFile(prdPath, 'utf-8')
+    prdJson = JSON.parse(text) as PRDJson
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') {
+      // File doesn't exist yet — return the skeleton as-is
+      return base
+    }
+    // Other errors (parse failure, permissions): continue with prd undefined
+  }
+
+  const updated: PRDRecord = { ...base, prd: prdJson }
 
   // heartbeat mtime
   try {
-    const s = await stat(join(prd.taskDir, '.heartbeat'))
+    const s = await stat(join(taskDir, '.heartbeat'))
     updated.heartbeatMtime = s.mtimeMs
   } catch { updated.heartbeatMtime = undefined }
 
-  // session jsonl mtime
-  updated.jsonlMtime = await jsonlMtime(prd.worktreeDir, prd.sessionId)
+  // session jsonl mtime — only meaningful when sessionId is known
+  if (sessionId) {
+    updated.jsonlMtime = await jsonlMtime(workingDir, sessionId)
+  } else {
+    updated.jsonlMtime = undefined
+  }
 
   // git log (last 10 commits)
-  updated.recentCommits = await readGitLog(prd.worktreeDir, 10)
+  updated.recentCommits = await readGitLog(workingDir, 10)
 
   // watchdog log tail
-  updated.watchdogLogTail = await readLastLines(join(prd.taskDir, '.watchdog/watchdog.log'), 20)
+  updated.watchdogLogTail = await readLastLines(join(taskDir, '.watchdog/watchdog.log'), 20)
 
   // decisions/*.md — pass prd.json so we can cross-reference story.passes
   // and decisionConfig.status to avoid false-positive "pending" labels.
   updated.decisionFiles = await readDecisions(
-    join(prd.taskDir, 'decisions'),
+    join(taskDir, 'decisions'),
     updated.prd,
   )
 
   // top-level *.md and *.txt docs (prd.md, HANDOFF*.md, progress.txt, etc.)
-  updated.docFiles = await readDocFiles(prd.taskDir)
+  updated.docFiles = await readDocFiles(taskDir)
 
   // Live agent picture: claude processes in the worktree (best-effort orchestrator
   // identification via cmdline+fd checks) + hook-tracked Task dispatches.
-  const sessionJsonlPath = sessionJsonlPathFor(prd.worktreeDir, prd.sessionId)
-  updated.agents = {
-    processes: await findClaudeProcessesInCwd(prd.worktreeDir, prd.sessionId, sessionJsonlPath),
-    tasks: agents.getTasks(prd.unitName),
+  // When sessionId/unitName are absent, both fields degrade to empty arrays.
+  if (sessionId && unitName) {
+    const sessionJsonlPath = sessionJsonlPathFor(workingDir, sessionId)
+    updated.agents = {
+      processes: await findClaudeProcessesInCwd(workingDir, sessionId, sessionJsonlPath),
+      tasks: agents.getTasks(unitName),
+    }
+  } else {
+    updated.agents = { processes: [], tasks: [] }
   }
 
   updated.status = await computeStatus(updated)
   return updated
+}
+
+// Thin caller: extracts the four fields from a PRDRecord and delegates to
+// getSnapshotForPath.  Preserves the original semantics exactly.
+export async function refreshSnapshot(prd: PRDRecord): Promise<PRDRecord> {
+  return getSnapshotForPath({
+    prdPath: join(prd.taskDir, 'prd.json'),
+    workingDir: prd.worktreeDir,
+    sessionId: prd.sessionId,
+    unitName: prd.unitName,
+  })
 }
 
 async function readDocFiles(dir: string): Promise<DocFile[]> {

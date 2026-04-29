@@ -2,7 +2,7 @@
 
 import type { Project, Effort, Session } from './db'
 
-export type PRDStatus = 'active' | 'idle' | 'crashed' | 'complete' | 'blocked'
+export type PRDStatus = 'active' | 'idle' | 'crashed' | 'complete' | 'blocked' | 'pending'
 
 export interface AcceptanceCriterion {
   description: string

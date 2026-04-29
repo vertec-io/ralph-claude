@@ -1092,6 +1092,7 @@ function StatusPip({ status }: { status: PRDRecord['status'] }) {
     crashed: 'bg-rose-500',
     complete: 'bg-sky-500',
     blocked: 'bg-violet-500',
+    pending: 'bg-zinc-500',
   }
   return <span className={`size-2 rounded-full ${colors[status]}`} title={status} />
 }
