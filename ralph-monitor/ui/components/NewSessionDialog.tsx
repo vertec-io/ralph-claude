@@ -3,11 +3,13 @@
 // Modal for creating a new session under an existing effort.
 //
 // Fields:
-//   - mode            ('interactive' default | 'autonomous' opt-in)
-//   - working_dir     (optional override; placeholder shows effort.working_dir)
-//   - initial_prompt  (optional textarea; only meaningful for autonomous mode)
+//   - working_dir    (optional override; placeholder shows effort.working_dir)
+//   - initial_prompt (optional; if set, sent to claude immediately on spawn)
 //
-// Submits POST /api/sessions { effort_id, mode, working_dir?, initial_prompt? }.
+// Submits POST /api/sessions { effort_id, mode: 'interactive', working_dir?, initial_prompt? }.
+// `mode` is always sent as 'interactive' for server compatibility while the field
+// is phased out — the server now writes the initial_prompt to PTY stdin regardless
+// of mode, so the distinction is meaningless to the user.
 //
 // On 201: calls onCreated with { id, ws_url } so the parent can navigate to the
 // session detail view.
@@ -37,8 +39,6 @@ export interface NewSessionDialogProps {
   onCreated: (session: { id: string; ws_url: string }) => void
 }
 
-type SessionMode = 'interactive' | 'autonomous'
-
 // ---------------------------------------------------------------------------
 // Main dialog
 // ---------------------------------------------------------------------------
@@ -51,7 +51,6 @@ export function NewSessionDialog({
   onClose,
   onCreated,
 }: NewSessionDialogProps) {
-  const [mode, setMode] = useState<SessionMode>('interactive')
   const [workingDir, setWorkingDir] = useState('')
   const [initialPrompt, setInitialPrompt] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -60,7 +59,6 @@ export function NewSessionDialog({
   // Reset state when dialog opens.
   useEffect(() => {
     if (open) {
-      setMode('interactive')
       setWorkingDir('')
       setInitialPrompt('')
       setError(null)
@@ -83,7 +81,7 @@ export function NewSessionDialog({
     try {
       const body: Record<string, string | undefined> = {
         effort_id: effortId,
-        mode,
+        mode: 'interactive',
       }
       if (workingDir.trim()) {
         body.working_dir = workingDir.trim()
@@ -166,32 +164,6 @@ export function NewSessionDialog({
         {/* Form */}
         <div className="px-6 py-5 space-y-4 overflow-y-auto">
 
-          {/* Mode */}
-          <div className="space-y-1">
-            <span className="text-[11px] uppercase tracking-wide text-zinc-500">Mode</span>
-            <div className="flex gap-2">
-              {(['interactive', 'autonomous'] as SessionMode[]).map((m) => (
-                <button
-                  key={m}
-                  type="button"
-                  onClick={() => setMode(m)}
-                  className={`flex-1 py-1.5 rounded border text-xs transition ${
-                    mode === m
-                      ? 'border-zinc-500 bg-zinc-800 text-zinc-100'
-                      : 'border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600'
-                  }`}
-                >
-                  {m === 'interactive' ? 'Interactive' : 'Autonomous'}
-                </button>
-              ))}
-            </div>
-            {mode === 'autonomous' && (
-              <p className="text-[11px] text-amber-400/80 mt-1">
-                Autonomous mode runs without user interaction.
-              </p>
-            )}
-          </div>
-
           {/* working_dir (optional) */}
           <div className="space-y-1">
             <label
@@ -223,11 +195,8 @@ export function NewSessionDialog({
               value={initialPrompt}
               onChange={(e) => setInitialPrompt(e.target.value)}
               rows={3}
-              placeholder={
-                mode === 'autonomous'
-                  ? 'Instruction to run autonomously…'
-                  : 'Optional opening message…'
-              }
+              placeholder="Opening message sent to claude on spawn…"
+              title="If set, this is sent to claude immediately on spawn."
               className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 transition resize-none"
             />
           </div>

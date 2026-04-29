@@ -73,12 +73,13 @@ sessionsRouter.post('/api/sessions', async (c) => {
   if (typeof b.effort_id !== 'string' || b.effort_id.length === 0) {
     return c.json({ error: 'effort_id_required' }, 400)
   }
-  if (b.mode !== 'interactive' && b.mode !== 'autonomous') {
-    return c.json(
-      { error: 'mode_invalid', details: { allowed: ['interactive', 'autonomous'] } },
-      400,
-    )
-  }
+  // mode: accept 'interactive' | 'autonomous' for backwards compat; anything else
+  // is silently defaulted to 'interactive' (mode is being phased out — the only
+  // server behavior that differs is the initial_prompt write, which is now gated
+  // on the prompt being non-empty regardless of mode).
+  const modeRaw = b.mode
+  const mode: 'interactive' | 'autonomous' =
+    modeRaw === 'interactive' || modeRaw === 'autonomous' ? modeRaw : 'interactive'
   if (b.working_dir !== undefined && typeof b.working_dir !== 'string') {
     return c.json({ error: 'working_dir_invalid' }, 400)
   }
@@ -87,7 +88,6 @@ sessionsRouter.post('/api/sessions', async (c) => {
   }
 
   const effort_id = b.effort_id
-  const mode = b.mode
   const working_dir = b.working_dir as string | undefined
   const initial_prompt = b.initial_prompt as string | undefined
 

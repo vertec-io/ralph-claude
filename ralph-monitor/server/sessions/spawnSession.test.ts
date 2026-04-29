@@ -803,7 +803,10 @@ describe('spawnSession — mode-conditional initial prompt (US-005a-3)', () => {
     expect(rec.child.writes).toEqual([])
   })
 
-  test('interactive + initial_prompt → zero stdin writes (mode never auto-writes)', async () => {
+  test('interactive + initial_prompt → one stdin write (mode no longer gates prompt write)', async () => {
+    // Since the mode distinction was removed, interactive + initial_prompt now
+    // writes the prompt to stdin just like autonomous mode did. The initial_prompt
+    // is always written when non-empty, regardless of mode.
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), {
       name: 'P-init-interactive',
@@ -820,11 +823,11 @@ describe('spawnSession — mode-conditional initial prompt (US-005a-3)', () => {
       {
         effort_id: effort.id,
         mode: 'interactive',
-        initial_prompt: 'should not be sent',
+        initial_prompt: 'should now be sent',
       },
       { spawner: rec.spawner },
     )
-    expect(rec.child.writes).toEqual([])
+    expect(rec.child.writes).toEqual(['should now be sent\r'])
   })
 })
 

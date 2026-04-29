@@ -765,7 +765,10 @@ describe('POST /api/sessions', () => {
     expect((await res.json()).error).toBe('effort_id_required')
   })
 
-  test('invalid mode -> 400 mode_invalid', async () => {
+  test('unknown mode is accepted (defaults to interactive) -> 201', async () => {
+    // mode is being phased out. Unknown values are silently defaulted to
+    // 'interactive' rather than returning mode_invalid, so existing clients
+    // that omit mode or send an unrecognised string don't break.
     const { effortId } = await makeProjectAndEffort('Spawn-BadMode')
     const res = await app.fetch(
       new Request('http://test/api/sessions', {
@@ -774,8 +777,7 @@ describe('POST /api/sessions', () => {
         body: JSON.stringify({ effort_id: effortId, mode: 'wrong' }),
       }),
     )
-    expect(res.status).toBe(400)
-    expect((await res.json()).error).toBe('mode_invalid')
+    expect(res.status).toBe(201)
   })
 
   test('non-string working_dir -> 400 working_dir_invalid', async () => {

@@ -32,6 +32,7 @@ import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown,
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
+import type { UnmanagedPRDItem } from '../../server/routes/unmanaged'
 import { authFetch } from '../auth'
 import { ContextMenu, useContextMenu } from './ContextMenu'
 import type { MenuItem } from './ContextMenu'
@@ -56,11 +57,20 @@ export interface SidebarProps {
   onSelectEffort: (id: string) => void
   selectedSessionId: string | null
   onSelectSession: (id: string) => void
+  /** List of unmanaged PRDs to display. When non-empty, renders a section above the project tree. */
+  unmanaged?: UnmanagedPRDItem[]
+  /** Called when the user clicks an unmanaged PRD item to open the adopt dialog. */
+  onAdopt?: (item: UnmanagedPRDItem) => void
+  /** @deprecated Use unmanaged + onAdopt instead. Kept for backwards compat during migration. */
   unmanagedPrds?: React.ReactNode
   // Called after a mutation so the parent can re-fetch projects/efforts/sessions.
   onRefresh?: () => void
   // Called after a new session is created so the parent can navigate to it.
   onSessionCreated?: (projectId: string, effortId: string, sessionId: string) => void
+  // Callbacks for hoisting dialog state to App.tsx so main-content buttons work too.
+  onOpenNewProject?: () => void
+  onOpenNewEffort?: (target: { projectId: string; rootDir: string }) => void
+  onOpenNewSession?: (target: { projectId: string; effortId: string; effortName: string; effortWorkingDir: string | null }) => void
 }
 
 export interface BucketedProjects {
@@ -288,6 +298,7 @@ interface EffortRowProps {
   renamingId: string | null
   onRenameCommit: (id: string, name: string) => void
   onRenameCancel: () => void
+  onNewSession?: () => void
 }
 
 function EffortRow({
@@ -305,6 +316,7 @@ function EffortRow({
   renamingId,
   onRenameCommit,
   onRenameCancel,
+  onNewSession,
 }: EffortRowProps) {
   const hasLive = sessions.some(
     (s) => computeStatusClient(s, liveSessionIds) === 'live-attached' ||
@@ -363,19 +375,32 @@ function EffortRow({
               onClick={(e) => e.stopPropagation()}
             />
           ) : (
-            <button
-              onClick={onSelect}
-              data-testid={`effort-row-${effort.id}`}
-              className="flex items-center gap-2 min-w-0 flex-1 text-left"
-            >
-              <span className={`size-1.5 rounded-full shrink-0 ${
-                hasLive ? 'bg-emerald-500' : 'bg-zinc-600'
-              }`} />
-              <span className="text-xs truncate">{effort.name}</span>
-              {effort.status === 'done' && (
-                <span className="text-[10px] text-zinc-600 shrink-0">done</span>
+            <>
+              <button
+                onClick={onSelect}
+                data-testid={`effort-row-${effort.id}`}
+                className="flex items-center gap-2 min-w-0 flex-1 text-left"
+              >
+                <span className={`size-1.5 rounded-full shrink-0 ${
+                  hasLive ? 'bg-emerald-500' : 'bg-zinc-600'
+                }`} />
+                <span className="text-xs truncate">{effort.name}</span>
+                {effort.status === 'done' && (
+                  <span className="text-[10px] text-zinc-600 shrink-0">done</span>
+                )}
+              </button>
+              {onNewSession && effort.status !== 'archived' && (
+                <button
+                  type="button"
+                  title="New session"
+                  onClick={(e) => { e.stopPropagation(); onNewSession() }}
+                  className="shrink-0 ml-1 w-4 h-4 flex items-center justify-center rounded text-zinc-600 hover:text-zinc-200 hover:bg-zinc-700 transition opacity-40 hover:opacity-100"
+                  aria-label="New session"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
               )}
-            </button>
+            </>
           )}
         </div>
       </li>
@@ -428,6 +453,8 @@ interface ProjectRowProps {
   renamingId: string | null
   onRenameCommit: (id: string, name: string) => void
   onRenameCancel: () => void
+  onNewEffort?: () => void
+  onNewSession?: (effort: Effort) => void
 }
 
 function ProjectRow({
@@ -454,6 +481,8 @@ function ProjectRow({
   renamingId,
   onRenameCommit,
   onRenameCancel,
+  onNewEffort,
+  onNewSession,
 }: ProjectRowProps) {
   const dotColor = hasLiveSession
     ? 'bg-emerald-500'
@@ -525,25 +554,38 @@ function ProjectRow({
                 onClick={(e) => e.stopPropagation()}
               />
             ) : (
-              <button
-                onClick={onSelect}
-                data-testid={`project-row-${project.id}`}
-                className="w-full text-left min-w-0"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <span
-                    className={`size-2 rounded-full shrink-0 ${dotColor}`}
-                    title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'}
-                  />
-                  <span className="text-sm truncate flex-1">{project.name}</span>
-                  {project.pinned && (
-                    <Pin className="w-3 h-3 text-sky-400 shrink-0" aria-label="pinned" />
-                  )}
-                </div>
-                <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
-                  {lastActivity}
-                </div>
-              </button>
+              <div className="flex items-start gap-0.5 min-w-0 w-full">
+                <button
+                  onClick={onSelect}
+                  data-testid={`project-row-${project.id}`}
+                  className="flex-1 text-left min-w-0"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={`size-2 rounded-full shrink-0 ${dotColor}`}
+                      title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'}
+                    />
+                    <span className="text-sm truncate flex-1">{project.name}</span>
+                    {project.pinned && (
+                      <Pin className="w-3 h-3 text-sky-400 shrink-0" aria-label="pinned" />
+                    )}
+                  </div>
+                  <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
+                    {lastActivity}
+                  </div>
+                </button>
+                {onNewEffort && (
+                  <button
+                    type="button"
+                    title="New effort"
+                    onClick={(e) => { e.stopPropagation(); onNewEffort() }}
+                    className="shrink-0 mt-1.5 w-4 h-4 flex items-center justify-center rounded text-zinc-600 hover:text-zinc-200 hover:bg-zinc-700 transition opacity-40 hover:opacity-100"
+                    aria-label="New effort"
+                  >
+                    <Plus className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -571,6 +613,7 @@ function ProjectRow({
               renamingId={renamingId}
               onRenameCommit={onRenameCommit}
               onRenameCancel={onRenameCancel}
+              onNewSession={onNewSession ? () => onNewSession(e) : undefined}
             />
           ))}
           {archivedCount > 0 && (
@@ -624,6 +667,8 @@ interface SectionProps {
   renamingId: string | null
   onRenameCommit: (id: string, name: string) => void
   onRenameCancel: () => void
+  onNewEffortForProject?: (project: Project) => void
+  onNewSessionForEffort?: (effort: Effort) => void
   /** When true, renders projects with reduced opacity (for Archived section). */
   dimmed?: boolean
 }
@@ -655,6 +700,8 @@ function Section({
   renamingId,
   onRenameCommit,
   onRenameCancel,
+  onNewEffortForProject,
+  onNewSessionForEffort,
   dimmed,
 }: SectionProps) {
   return (
@@ -697,6 +744,8 @@ function Section({
               renamingId={renamingId}
               onRenameCommit={onRenameCommit}
               onRenameCancel={onRenameCancel}
+              onNewEffort={onNewEffortForProject ? () => onNewEffortForProject(p) : undefined}
+              onNewSession={onNewSessionForEffort}
             />
           ))}
         </ul>
@@ -726,9 +775,14 @@ export function Sidebar({
   onSelectEffort,
   selectedSessionId,
   onSelectSession,
+  unmanaged,
+  onAdopt,
   unmanagedPrds,
   onRefresh,
   onSessionCreated,
+  onOpenNewProject,
+  onOpenNewEffort,
+  onOpenNewSession,
 }: SidebarProps) {
   const [activeOpen, setActiveOpen] = useState(true)
   const [recentOpen, setRecentOpen] = useState(true)
@@ -890,7 +944,11 @@ export function Sidebar({
       {
         label: 'New Effort',
         onClick: () => {
-          setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir })
+          if (onOpenNewEffort) {
+            onOpenNewEffort({ projectId: project.id, rootDir: project.root_dir })
+          } else {
+            setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir })
+          }
         },
       },
       {
@@ -945,12 +1003,21 @@ export function Sidebar({
       {
         label: 'New Session',
         onClick: () => {
-          setNewSessionTarget({
-            projectId: effort.project_id,
-            effortId: effort.id,
-            effortName: effort.name,
-            effortWorkingDir: effort.working_dir,
-          })
+          if (onOpenNewSession) {
+            onOpenNewSession({
+              projectId: effort.project_id,
+              effortId: effort.id,
+              effortName: effort.name,
+              effortWorkingDir: effort.working_dir,
+            })
+          } else {
+            setNewSessionTarget({
+              projectId: effort.project_id,
+              effortId: effort.id,
+              effortName: effort.name,
+              effortWorkingDir: effort.working_dir,
+            })
+          }
         },
       },
       {
@@ -1047,6 +1114,22 @@ export function Sidebar({
     renamingId,
     onRenameCommit: handleRenameCommit,
     onRenameCancel: handleRenameCancel,
+    onNewEffortForProject: onOpenNewEffort
+      ? (project: Project) => onOpenNewEffort({ projectId: project.id, rootDir: project.root_dir })
+      : (project: Project) => setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir }),
+    onNewSessionForEffort: onOpenNewSession
+      ? (effort: Effort) => onOpenNewSession({
+          projectId: effort.project_id,
+          effortId: effort.id,
+          effortName: effort.name,
+          effortWorkingDir: effort.working_dir,
+        })
+      : (effort: Effort) => setNewSessionTarget({
+          projectId: effort.project_id,
+          effortId: effort.id,
+          effortName: effort.name,
+          effortWorkingDir: effort.working_dir,
+        }),
   }
 
   return (
@@ -1075,7 +1158,11 @@ export function Sidebar({
                 type="button"
                 onClick={() => {
                   setPlusMenuOpen(false)
-                  setShowNewProjectDialog(true)
+                  if (onOpenNewProject) {
+                    onOpenNewProject()
+                  } else {
+                    setShowNewProjectDialog(true)
+                  }
                 }}
                 className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
               >
@@ -1088,7 +1175,11 @@ export function Sidebar({
                     type="button"
                     onClick={() => {
                       setPlusMenuOpen(false)
-                      setNewEffortTarget({ projectId: proj.id, rootDir: proj.root_dir })
+                      if (onOpenNewEffort) {
+                        onOpenNewEffort({ projectId: proj.id, rootDir: proj.root_dir })
+                      } else {
+                        setNewEffortTarget({ projectId: proj.id, rootDir: proj.root_dir })
+                      }
                     }}
                     className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
                   >
@@ -1101,6 +1192,42 @@ export function Sidebar({
         </div>
       </div>
 
+      {/* Unmanaged PRDs section — rendered from the `unmanaged` prop array (preferred)
+          or from the legacy `unmanagedPrds` slot. */}
+      {unmanaged && unmanaged.length > 0 && (
+        <div>
+          <div className="px-1 pt-2 pb-1 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold">
+            Unmanaged PRDs
+          </div>
+          <ul>
+            {unmanaged.map((item) => (
+              <li key={item.unitName}>
+                <button
+                  onClick={() => onAdopt?.(item)}
+                  className="w-full text-left px-2 py-2 rounded hover:bg-zinc-800/60 transition"
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="size-2 rounded-full bg-zinc-600 shrink-0" title="unmanaged" />
+                    <span className="text-xs text-zinc-300 truncate">
+                      {item.unitName.replace(/^ralph-pilot-native-/, '')}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-zinc-500 truncate font-mono">
+                    {item.taskDir}
+                  </div>
+                  {item.suggestedProjectId && (
+                    <div className="mt-0.5 text-[10px] text-emerald-500">
+                      worktree match{item.suggestedBranch ? ` · ${item.suggestedBranch}` : ''}
+                    </div>
+                  )}
+                  <div className="mt-0.5 text-[10px] text-zinc-600 italic">click to adopt</div>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {/* Legacy slot support */}
       {unmanagedPrds}
 
       <Section
