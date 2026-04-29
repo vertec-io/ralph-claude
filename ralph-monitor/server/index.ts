@@ -13,6 +13,8 @@ import { effortsRouter } from './routes/efforts'
 import { sessionsRouter } from './routes/sessions'
 import { buildLifecycleSnapshot } from './routes/lifecycle'
 import { reconcileSessionsOnStartup } from './sessions/reconcile'
+import { watchEffortPrd } from './effortWatchers'
+import { listAllEfforts } from './db'
 import { bearerMiddleware, getOrCreateToken, validateWebSocketSubprotocol } from './auth'
 import {
   attachWsToSession,
@@ -66,6 +68,16 @@ const reconcileResult = await reconcileSessionsOnStartup()
 console.log(
   `reconcile: ${reconcileResult.liveOrphanedCount} live-orphaned, ${reconcileResult.dormantCount} dormant`,
 )
+
+// Re-establish per-effort prd.json watchers for all existing kind='prd'
+// efforts on startup (US-012c).  Runs after migrations + session reconcile so
+// the DB schema is stable.  watchEffortPrd is idempotent — duplicate calls are
+// safe.
+for (const effort of listAllEfforts(getDb())) {
+  if (effort.kind === 'prd' && effort.prd_path) {
+    watchEffortPrd(effort.id, effort.prd_path)
+  }
+}
 
 // Materialize the auth token early. Generates and writes to disk on first
 // boot; subsequent boots reuse the existing file. Doing this eagerly means

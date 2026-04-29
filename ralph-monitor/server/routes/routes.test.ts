@@ -31,6 +31,8 @@ const { store } = await import('../store')
 const { setTestSpawner } = await import('../sessions/spawn')
 const { __test__: registryTest } = await import('../sessions/registry')
 const { clearWorktreeCacheForTests } = await import('../git/worktrees')
+const { watchEffortPrd: _watchEffortPrd, unwatchEffortPrd: _unwatchEffortPrd } =
+  await import('../effortWatchers')
 import type { SpawnerChild, PtySpawner } from '../sessions/spawn'
 
 const app = new Hono()
@@ -956,5 +958,161 @@ describe('POST /api/sessions/:id/resume', () => {
     )
     expect(res.status).toBe(409)
     expect((await res.json()).error).toBe('session_already_live')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// GET /api/efforts/:id/snapshot  (US-012c)
+// ---------------------------------------------------------------------------
+
+describe('GET /api/efforts/:id/snapshot', () => {
+  // Helper: project + a kind='prd' effort with an optional real prd.json on disk.
+  async function makePrdEffort(opts: {
+    name: string
+    writePrd?: boolean
+  }): Promise<{ projectId: string; effortId: string; prdPath: string }> {
+    const dir = tmpProjectDir()
+    const rp = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: opts.name, root_dir: dir }),
+      }),
+    )
+    expect(rp.status).toBe(201)
+    const proj = await rp.json()
+
+    // prd.json lives inside its own subdir so path resolution is unambiguous.
+    const prdDir = mkdtempSync(join(tmpdir(), 'ralph-monitor-prd-'))
+    tempDirs.push(prdDir)
+    const prdPath = join(prdDir, 'prd.json')
+
+    if (opts.writePrd) {
+      writeFileSync(
+        prdPath,
+        JSON.stringify({
+          title: 'Test PRD',
+          userStories: [{ id: 'US-001', title: 'Story 1', passes: false }],
+        }),
+      )
+    }
+
+    const re = await app.fetch(
+      new Request(`http://test/api/projects/${proj.id}/efforts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'My PRD', kind: 'prd', prd_path: prdPath }),
+      }),
+    )
+    expect(re.status).toBe(201)
+    const effort = await re.json()
+
+    return { projectId: proj.id, effortId: effort.id, prdPath }
+  }
+
+  test('happy path: kind=prd with real prd.json -> 200 with prd field populated', async () => {
+    const { effortId } = await makePrdEffort({ name: 'Snapshot-Happy', writePrd: true })
+
+    const res = await app.fetch(new Request(`http://test/api/efforts/${effortId}/snapshot`))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.prd).toBeDefined()
+    expect(body.prd.title).toBe('Test PRD')
+    expect(Array.isArray(body.prd.userStories)).toBe(true)
+    expect(body.prd.userStories[0].id).toBe('US-001')
+  })
+
+  test('kind=prd with prd.json not on disk -> 200 + { status: "pending" }', async () => {
+    const { effortId } = await makePrdEffort({ name: 'Snapshot-Pending', writePrd: false })
+
+    const res = await app.fetch(new Request(`http://test/api/efforts/${effortId}/snapshot`))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.status).toBe('pending')
+  })
+
+  test('kind=general effort -> 404 effort_not_prd_kind', async () => {
+    const { effortId } = await makeProjectAndEffort('Snapshot-General')
+    // makeProjectAndEffort returns the auto-General effort which is kind='general'
+
+    const res = await app.fetch(new Request(`http://test/api/efforts/${effortId}/snapshot`))
+    expect(res.status).toBe(404)
+    const body = await res.json()
+    expect(body.error).toBe('effort_not_prd_kind')
+  })
+
+  test('non-existent effort id -> 404 effort_not_found', async () => {
+    const res = await app.fetch(
+      new Request('http://test/api/efforts/00000000-0000-4000-8000-000000000099/snapshot'),
+    )
+    expect(res.status).toBe(404)
+    const body = await res.json()
+    expect(body.error).toBe('effort_not_found')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Effort prd watcher: effort.snapshot.updated event (US-012c)
+// ---------------------------------------------------------------------------
+
+describe('effort prd watcher', () => {
+  test('modifying prd.json emits effort.snapshot.updated within 500ms', async () => {
+    const dir = tmpProjectDir()
+    const rp = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Watcher-Test', root_dir: dir }),
+      }),
+    )
+    const proj = await rp.json()
+
+    // Write an initial prd.json to a temp dir.
+    const prdDir = mkdtempSync(join(tmpdir(), 'ralph-monitor-watcher-'))
+    tempDirs.push(prdDir)
+    const prdPath = join(prdDir, 'prd.json')
+    writeFileSync(prdPath, JSON.stringify({ title: 'v1', userStories: [] }))
+
+    const re = await app.fetch(
+      new Request(`http://test/api/projects/${proj.id}/efforts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Watcher PRD', kind: 'prd', prd_path: prdPath }),
+      }),
+    )
+    expect(re.status).toBe(201)
+    const effort = await re.json()
+
+    // Capture SSE events.
+    const cap = captureEvents()
+    try {
+      // Modify the prd.json to trigger the watcher.
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('watcher timeout')), 500)
+        const id = store.subscribe((chunk) => {
+          const m = chunk.match(/data: (.+)\n/)
+          if (!m) return
+          try {
+            const evt = JSON.parse(m[1])
+            if (
+              evt.type === 'effort.snapshot.updated' &&
+              evt.effort_id === effort.id
+            ) {
+              clearTimeout(timeout)
+              store.unsubscribe(id)
+              resolve()
+            }
+          } catch {}
+        })
+
+        // Write the file change slightly after subscription is established.
+        setTimeout(() => {
+          writeFileSync(prdPath, JSON.stringify({ title: 'v2', userStories: [] }))
+        }, 20)
+      })
+    } finally {
+      cap.stop()
+      _unwatchEffortPrd(effort.id)
+    }
   })
 })

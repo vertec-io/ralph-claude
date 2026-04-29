@@ -141,6 +141,7 @@ export type LifecycleAppEvent =
   | { type: 'effort.created'; ts: number; effort: Effort }
   | { type: 'effort.updated'; ts: number; effort: Effort }
   | { type: 'effort.deleted'; ts: number; id: string }
+  | { type: 'effort.snapshot.updated'; ts: number; effort_id: string }
   | { type: 'session.created'; ts: number; session: Session }
   | { type: 'session.updated'; ts: number; session: Session }
   | { type: 'session.deleted'; ts: number; id: string }

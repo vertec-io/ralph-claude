@@ -4,6 +4,7 @@
 //   POST   /api/projects/:id/efforts
 //   PATCH  /api/efforts/:id
 //   DELETE /api/efforts/:id
+//   GET    /api/efforts/:id/snapshot
 //
 // The kind='prd' CHECK constraint surfaces from the db layer as
 // `EffortPrdPathRequiredError`; we map that to 422.
@@ -26,6 +27,8 @@ import {
   type EffortStatus,
 } from '../db'
 import { store } from '../store'
+import { getSnapshotForPath } from '../snapshot'
+import { watchEffortPrd, unwatchEffortPrd, rewatchEffortPrd } from '../effortWatchers'
 
 export const effortsRouter = new Hono()
 
@@ -114,6 +117,12 @@ effortsRouter.post('/api/projects/:id/efforts', async (c) => {
   }
 
   store.recordEvent({ type: 'effort.created', ts: Date.now(), effort })
+
+  // Start watching prd.json for changes so SSE clients can re-fetch the snapshot.
+  if (effort.kind === 'prd' && effort.prd_path) {
+    watchEffortPrd(effort.id, effort.prd_path)
+  }
+
   return c.json(effort, 201)
 })
 
@@ -190,6 +199,13 @@ effortsRouter.patch('/api/efforts/:id', async (c) => {
 
   const updated = getEffortById(db, id) as Effort
   store.recordEvent({ type: 'effort.updated', ts: Date.now(), effort: updated })
+
+  // Re-establish the file watcher if prd_path was part of this patch.
+  // `rewatchEffortPrd` is idempotent when nothing changed and handles null.
+  if ('prd_path' in patch && updated.kind === 'prd') {
+    rewatchEffortPrd(updated.id, updated.prd_path)
+  }
+
   return c.json(updated)
 })
 
@@ -203,5 +219,31 @@ effortsRouter.delete('/api/efforts/:id', (c) => {
   }
   hardDeleteEffort(db, id)
   store.recordEvent({ type: 'effort.deleted', ts: Date.now(), id })
+  // Stop watching the prd.json file for this effort (no-op if not a prd-kind).
+  unwatchEffortPrd(id)
   return c.body(null, 204)
+})
+
+// GET /api/efforts/:id/snapshot — returns the PRDRecord snapshot for a
+// kind='prd' effort.  Returns { status: 'pending' } when prd_path doesn't
+// exist on disk yet.  Returns 404 for non-prd efforts or missing efforts.
+effortsRouter.get('/api/efforts/:id/snapshot', async (c) => {
+  const id = c.req.param('id')
+  const db = getDb()
+  const effort = getEffortById(db, id)
+  if (!effort) return c.json({ error: 'effort_not_found' }, 404)
+  if (effort.kind !== 'prd') return c.json({ error: 'effort_not_prd_kind' }, 404)
+  if (!effort.prd_path) return c.json({ error: 'effort_missing_prd_path' }, 422)
+
+  const project = getProjectById(db, effort.project_id)
+  const workingDir = effort.working_dir ?? project?.root_dir ?? ''
+  if (!workingDir) return c.json({ error: 'no_working_dir' }, 500)
+
+  const snapshot = await getSnapshotForPath({
+    prdPath: effort.prd_path,
+    workingDir,
+    // sessionId/unitName intentionally undefined → graceful empty agents
+  })
+
+  return c.json(snapshot)
 })
