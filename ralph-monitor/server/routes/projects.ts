@@ -21,13 +21,36 @@ import {
   getProjectById,
   getProjectByRootDir,
   listProjects,
+  listEffortsByProject,
   updateProject,
+  updateEffort,
   hardDeleteProject,
   type Project,
   type ListProjectsFilter,
 } from '../db'
 import { store } from '../store'
 import { evictWorktreeCacheForProject, checkIsWorktreeOfProject } from '../git/worktrees'
+import * as registry from '../sessions/registry'
+
+// Test seam — allows unit tests to override the live-session check without
+// importing the real PTY registry (which has no live handles in a test
+// environment). Production path always uses the real registry.
+let _liveCheckOverride: ((effortId: string) => number) | null = null
+
+export const __test__ = {
+  setLiveCheckOverride(fn: ((effortId: string) => number) | null) {
+    _liveCheckOverride = fn
+  },
+}
+
+function countLiveSessions(effortId: string): string[] {
+  if (_liveCheckOverride !== null) {
+    const count = _liveCheckOverride(effortId)
+    // Return fake ids for the count
+    return count > 0 ? Array.from({ length: count }, (_, i) => `fake-session-${i}`) : []
+  }
+  return registry.listLiveByEffort(effortId).map((h) => h.sessionId)
+}
 
 const RECENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
@@ -138,6 +161,13 @@ projectsRouter.post('/api/projects', async (c) => {
 })
 
 // PATCH /api/projects/:id { name?, archived?, pinned? }
+//
+// When archived=true is requested:
+//   1. Checks all efforts for live sessions — returns 409 with details if any found.
+//   2. Cascades archive to all non-archived efforts for the project.
+//   3. Emits effort.updated events for each cascaded effort.
+//
+// When archived=false (unarchive) is requested, effort statuses are NOT touched.
 projectsRouter.patch('/api/projects/:id', async (c) => {
   const id = c.req.param('id')
   let body: { name?: unknown; archived?: unknown; pinned?: unknown }
@@ -158,6 +188,50 @@ projectsRouter.patch('/api/projects/:id', async (c) => {
   if (typeof body.archived === 'boolean') patch.archived = body.archived
   if (typeof body.pinned === 'boolean') patch.pinned = body.pinned
 
+  // Archive cascade: when archiving a project, first check all its efforts for
+  // live sessions. If any effort has a live session, return 409 before any DB
+  // write. After the project update, cascade archive to all non-archived efforts
+  // and emit effort.updated events.
+  if (patch.archived === true) {
+    const allEfforts = listEffortsByProject(db, id)
+
+    // Check for live sessions across all efforts BEFORE any DB write.
+    const offendingEfforts: Array<{ effort_id: string; live_session_ids: string[] }> = []
+    for (const effort of allEfforts) {
+      const liveIds = countLiveSessions(effort.id)
+      if (liveIds.length > 0) {
+        offendingEfforts.push({ effort_id: effort.id, live_session_ids: liveIds })
+      }
+    }
+
+    if (offendingEfforts.length > 0) {
+      return c.json(
+        {
+          error: 'project_has_live_sessions',
+          details: { offending_efforts: offendingEfforts },
+        },
+        409,
+      )
+    }
+
+    // No live sessions — safe to write. Cascade archive to non-archived efforts.
+    updateProject(db, id, patch)
+    const updated = getProjectById(db, id) as Project
+    store.recordEvent({ type: 'project.updated', ts: Date.now(), project: updated })
+
+    const now = Date.now()
+    for (const effort of allEfforts) {
+      if (effort.status !== 'archived') {
+        updateEffort(db, effort.id, { status: 'archived' })
+        const updatedEffort = { ...effort, status: 'archived' as const }
+        store.recordEvent({ type: 'effort.updated', ts: now, effort: updatedEffort })
+      }
+    }
+
+    return c.json(updated)
+  }
+
+  // Non-archive patch (name, pinned, or unarchive) — no cascade.
   updateProject(db, id, patch)
   const updated = getProjectById(db, id) as Project
 

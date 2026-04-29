@@ -1352,27 +1352,27 @@
       "acceptanceCriteria": [
         {
           "description": "Archive moves a project/effort out of Active/Recent into Archived without deleting data",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Pin keeps a project at the top of Active; unpin returns it to normal lifecycle ordering",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Rename updates name; reflects immediately in sidebar and any open detail views",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Archiving a project also archives all its efforts (UI confirms first if any effort has a live session, blocked with 'Stop the live session first')",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Archiving an effort with a live session is blocked with a clear error",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Typecheck passes (bunx tsc --noEmit -p ralph-monitor/)",
-          "passes": false
+          "passes": true
         },
         {
           "description": "Using Playwright MCP, archive a project -> moves to Archived; pin another -> sticks to top; rename a third -> name updates everywhere",

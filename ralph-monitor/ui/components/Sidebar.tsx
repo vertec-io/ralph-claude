@@ -28,7 +28,7 @@
 //     expand the relevant project + effort so the selected node is visible.
 
 import { useEffect, useRef, useState } from 'react'
-import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown, Plus } from 'lucide-react'
+import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown, Plus, Pin } from 'lucide-react'
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
@@ -200,8 +200,8 @@ function timeAgo(ms: number): string {
 // API mutation helpers
 // ---------------------------------------------------------------------------
 
-async function patchProject(id: string, patch: Record<string, unknown>): Promise<void> {
-  await authFetch(`/api/projects/${id}`, {
+async function patchProject(id: string, patch: Record<string, unknown>): Promise<Response> {
+  return authFetch(`/api/projects/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -214,8 +214,8 @@ async function deleteProject(id: string, confirmName: string): Promise<void> {
   })
 }
 
-async function patchEffort(id: string, patch: Record<string, unknown>): Promise<void> {
-  await authFetch(`/api/efforts/${id}`, {
+async function patchEffort(id: string, patch: Record<string, unknown>): Promise<Response> {
+  return authFetch(`/api/efforts/${id}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(patch),
@@ -296,6 +296,9 @@ interface EffortRowProps {
   onSelectSession: (id: string) => void
   onContextMenu: (e: React.MouseEvent) => void
   onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
+  renamingId: string | null
+  onRenameCommit: (id: string, name: string) => void
+  onRenameCancel: () => void
 }
 
 function EffortRow({
@@ -310,11 +313,24 @@ function EffortRow({
   onSelectSession,
   onContextMenu,
   onSessionContextMenu,
+  renamingId,
+  onRenameCommit,
+  onRenameCancel,
 }: EffortRowProps) {
   const hasLive = sessions.some(
     (s) => computeStatusClient(s, liveSessionIds) === 'live-attached' ||
            computeStatusClient(s, liveSessionIds) === 'live-orphaned',
   )
+
+  const isRenaming = renamingId === effort.id
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isRenaming && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [isRenaming])
 
   return (
     <>
@@ -336,19 +352,42 @@ function EffortRow({
               ? <ChevronDown className="w-3 h-3" />
               : <ChevronRight className="w-3 h-3" />}
           </button>
-          <button
-            onClick={onSelect}
-            data-testid={`effort-row-${effort.id}`}
-            className="flex items-center gap-2 min-w-0 flex-1 text-left"
-          >
-            <span className={`size-1.5 rounded-full shrink-0 ${
-              hasLive ? 'bg-emerald-500' : 'bg-zinc-600'
-            }`} />
-            <span className="text-xs truncate">{effort.name}</span>
-            {effort.status === 'done' && (
-              <span className="text-[10px] text-zinc-600 shrink-0">done</span>
-            )}
-          </button>
+          {isRenaming ? (
+            <input
+              ref={renameInputRef}
+              defaultValue={effort.name}
+              className="flex-1 text-xs bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none min-w-0"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const v = (e.target as HTMLInputElement).value.trim()
+                  if (v) onRenameCommit(effort.id, v)
+                  else onRenameCancel()
+                } else if (e.key === 'Escape') {
+                  onRenameCancel()
+                }
+              }}
+              onBlur={(e) => {
+                const v = e.target.value.trim()
+                if (v && v !== effort.name) onRenameCommit(effort.id, v)
+                else onRenameCancel()
+              }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <button
+              onClick={onSelect}
+              data-testid={`effort-row-${effort.id}`}
+              className="flex items-center gap-2 min-w-0 flex-1 text-left"
+            >
+              <span className={`size-1.5 rounded-full shrink-0 ${
+                hasLive ? 'bg-emerald-500' : 'bg-zinc-600'
+              }`} />
+              <span className="text-xs truncate">{effort.name}</span>
+              {effort.status === 'done' && (
+                <span className="text-[10px] text-zinc-600 shrink-0">done</span>
+              )}
+            </button>
+          )}
         </div>
       </li>
       {expanded && (
@@ -397,6 +436,9 @@ interface ProjectRowProps {
   onContextMenu: (e: React.MouseEvent) => void
   onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
   onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
+  renamingId: string | null
+  onRenameCommit: (id: string, name: string) => void
+  onRenameCancel: () => void
 }
 
 function ProjectRow({
@@ -420,6 +462,9 @@ function ProjectRow({
   onContextMenu,
   onEffortContextMenu,
   onSessionContextMenu,
+  renamingId,
+  onRenameCommit,
+  onRenameCancel,
 }: ProjectRowProps) {
   const dotColor = hasLiveSession
     ? 'bg-emerald-500'
@@ -437,6 +482,16 @@ function ProjectRow({
     : efforts.filter((e) => e.status !== 'archived')
 
   const archivedCount = efforts.filter((e) => e.status === 'archived').length
+
+  const isRenaming = renamingId === project.id
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isRenaming && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [isRenaming])
 
   return (
     <>
@@ -458,22 +513,50 @@ function ProjectRow({
               ? <ChevronDown className="w-3 h-3" />
               : <ChevronRight className="w-3 h-3" />}
           </button>
-          <button
-            onClick={onSelect}
-            data-testid={`project-row-${project.id}`}
-            className="flex-1 text-left px-2 py-2 min-w-0"
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span
-                className={`size-2 rounded-full shrink-0 ${dotColor}`}
-                title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'}
+          <div className="flex-1 px-2 py-2 min-w-0">
+            {isRenaming ? (
+              <input
+                ref={renameInputRef}
+                defaultValue={project.name}
+                className="w-full text-sm bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const v = (e.target as HTMLInputElement).value.trim()
+                    if (v) onRenameCommit(project.id, v)
+                    else onRenameCancel()
+                  } else if (e.key === 'Escape') {
+                    onRenameCancel()
+                  }
+                }}
+                onBlur={(e) => {
+                  const v = e.target.value.trim()
+                  if (v && v !== project.name) onRenameCommit(project.id, v)
+                  else onRenameCancel()
+                }}
+                onClick={(e) => e.stopPropagation()}
               />
-              <span className="text-sm truncate flex-1">{project.name}</span>
-            </div>
-            <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
-              {lastActivity}
-            </div>
-          </button>
+            ) : (
+              <button
+                onClick={onSelect}
+                data-testid={`project-row-${project.id}`}
+                className="w-full text-left min-w-0"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className={`size-2 rounded-full shrink-0 ${dotColor}`}
+                    title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'}
+                  />
+                  <span className="text-sm truncate flex-1">{project.name}</span>
+                  {project.pinned && (
+                    <Pin className="w-3 h-3 text-sky-400 shrink-0" aria-label="pinned" />
+                  )}
+                </div>
+                <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
+                  {lastActivity}
+                </div>
+              </button>
+            )}
+          </div>
         </div>
       </li>
 
@@ -496,6 +579,9 @@ function ProjectRow({
               onSelectSession={onSelectSession}
               onContextMenu={(ev) => onEffortContextMenu(e, ev)}
               onSessionContextMenu={onSessionContextMenu}
+              renamingId={renamingId}
+              onRenameCommit={onRenameCommit}
+              onRenameCancel={onRenameCancel}
             />
           ))}
           {archivedCount > 0 && (
@@ -546,6 +632,11 @@ interface SectionProps {
   onProjectContextMenu: (project: Project, e: React.MouseEvent) => void
   onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
   onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
+  renamingId: string | null
+  onRenameCommit: (id: string, name: string) => void
+  onRenameCancel: () => void
+  /** When true, renders projects with reduced opacity (for Archived section). */
+  dimmed?: boolean
 }
 
 function Section({
@@ -572,9 +663,13 @@ function Section({
   onProjectContextMenu,
   onEffortContextMenu,
   onSessionContextMenu,
+  renamingId,
+  onRenameCommit,
+  onRenameCancel,
+  dimmed,
 }: SectionProps) {
   return (
-    <div>
+    <div className={dimmed ? 'opacity-60' : undefined}>
       <button
         onClick={onToggle}
         data-testid={`sidebar-section-${title.toLowerCase()}`}
@@ -610,6 +705,9 @@ function Section({
               onContextMenu={(e) => onProjectContextMenu(p, e)}
               onEffortContextMenu={onEffortContextMenu}
               onSessionContextMenu={onSessionContextMenu}
+              renamingId={renamingId}
+              onRenameCommit={onRenameCommit}
+              onRenameCancel={onRenameCancel}
             />
           ))}
         </ul>
@@ -819,6 +917,44 @@ export function Sidebar({
   // Delete-session dialog state
   const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null)
 
+  // Inline rename state — stores the id of the project or effort being renamed
+  // (both share the same field since only one item can be renamed at a time).
+  const [renamingId, setRenamingId] = useState<string | null>(null)
+
+  const handleRenameCommitProject = async (id: string, name: string) => {
+    setRenamingId(null)
+    const res = await patchProject(id, { name })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      window.alert(`Rename failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
+      return
+    }
+    onRefresh?.()
+  }
+
+  const handleRenameCommitEffort = async (id: string, name: string) => {
+    setRenamingId(null)
+    const res = await patchEffort(id, { name })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      window.alert(`Rename failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
+      return
+    }
+    onRefresh?.()
+  }
+
+  // Unified rename commit — detects whether the id is a project or effort.
+  const handleRenameCommit = async (id: string, name: string) => {
+    const isProject = projects.some((p) => p.id === id)
+    if (isProject) {
+      await handleRenameCommitProject(id, name)
+    } else {
+      await handleRenameCommitEffort(id, name)
+    }
+  }
+
+  const handleRenameCancel = () => setRenamingId(null)
+
   const handleProjectContextMenu = (project: Project, e: React.MouseEvent) => {
     e.preventDefault()
     const items: MenuItem[] = [
@@ -831,24 +967,35 @@ export function Sidebar({
       {
         label: project.pinned ? 'Unpin' : 'Pin',
         onClick: async () => {
-          await patchProject(project.id, { pinned: !project.pinned })
+          const res = await patchProject(project.id, { pinned: !project.pinned })
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({}))
+            window.alert(`Pin failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
+            return
+          }
           onRefresh?.()
         },
       },
       {
         label: project.archived ? 'Unarchive' : 'Archive',
         onClick: async () => {
-          await patchProject(project.id, { archived: !project.archived })
+          const res = await patchProject(project.id, { archived: !project.archived })
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({})) as { error?: string }
+            if (body.error === 'project_has_live_sessions') {
+              window.alert('Stop the live session first.')
+            } else {
+              window.alert(`Archive failed: ${body.error ?? `HTTP ${res.status}`}`)
+            }
+            return
+          }
           onRefresh?.()
         },
       },
       {
         label: 'Rename',
-        onClick: async () => {
-          const name = window.prompt('New project name:', project.name)
-          if (!name || name.trim() === '' || name === project.name) return
-          await patchProject(project.id, { name: name.trim() })
-          onRefresh?.()
+        onClick: () => {
+          setRenamingId(project.id)
         },
       },
       {
@@ -897,19 +1044,25 @@ export function Sidebar({
         separator: true,
         label: effort.status === 'archived' ? 'Unarchive' : 'Archive',
         onClick: async () => {
-          await patchEffort(effort.id, {
+          const res = await patchEffort(effort.id, {
             status: effort.status === 'archived' ? 'active' : 'archived',
           })
+          if (!res.ok) {
+            const body = await res.json().catch(() => ({})) as { error?: string }
+            if (body.error === 'effort_has_live_sessions') {
+              window.alert('Stop the live session first.')
+            } else {
+              window.alert(`Archive failed: ${body.error ?? `HTTP ${res.status}`}`)
+            }
+            return
+          }
           onRefresh?.()
         },
       },
       {
         label: 'Rename',
-        onClick: async () => {
-          const name = window.prompt('New effort name:', effort.name)
-          if (!name || name.trim() === '' || name === effort.name) return
-          await patchEffort(effort.id, { name: name.trim() })
-          onRefresh?.()
+        onClick: () => {
+          setRenamingId(effort.id)
         },
       },
       {
@@ -985,6 +1138,9 @@ export function Sidebar({
     onProjectContextMenu: handleProjectContextMenu,
     onEffortContextMenu: handleEffortContextMenu,
     onSessionContextMenu: handleSessionContextMenu,
+    renamingId,
+    onRenameCommit: handleRenameCommit,
+    onRenameCancel: handleRenameCancel,
   }
 
   return (
@@ -1068,6 +1224,7 @@ export function Sidebar({
         onToggle={() => setArchivedOpen((o) => !o)}
         selectedProjectId={selectedProjectId}
         onSelectProject={onSelectProject}
+        dimmed
         {...sharedSectionProps}
       />
 

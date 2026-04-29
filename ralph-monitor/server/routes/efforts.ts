@@ -30,6 +30,26 @@ import { store } from '../store'
 import { getSnapshotForPath } from '../snapshot'
 import { watchEffortPrd, unwatchEffortPrd, rewatchEffortPrd } from '../effortWatchers'
 import { isPathInsideProjectOrWorktree } from '../git/worktrees'
+import * as registry from '../sessions/registry'
+
+// Test seam — allows unit tests to override the live-session check without
+// importing the real PTY registry (which has no live handles in a test
+// environment). Production path always uses the real registry.
+let _liveCheckOverride: ((effortId: string) => number) | null = null
+
+export const __test__ = {
+  setLiveCheckOverride(fn: ((effortId: string) => number) | null) {
+    _liveCheckOverride = fn
+  },
+}
+
+function countLiveSessions(effortId: string): string[] {
+  if (_liveCheckOverride !== null) {
+    const count = _liveCheckOverride(effortId)
+    return count > 0 ? Array.from({ length: count }, (_, i) => `fake-session-${i}`) : []
+  }
+  return registry.listLiveByEffort(effortId).map((h) => h.sessionId)
+}
 
 export const effortsRouter = new Hono()
 
@@ -180,6 +200,19 @@ effortsRouter.patch('/api/efforts/:id', async (c) => {
         { error: 'invalid-status', details: { status: body.status } },
         400,
       )
+    }
+    // Block archiving an effort that has a live session.
+    if (body.status === 'archived') {
+      const liveIds = countLiveSessions(id)
+      if (liveIds.length > 0) {
+        return c.json(
+          {
+            error: 'effort_has_live_sessions',
+            details: { effort_id: id, live_session_ids: liveIds },
+          },
+          409,
+        )
+      }
     }
     patch.status = body.status as EffortStatus
   }
