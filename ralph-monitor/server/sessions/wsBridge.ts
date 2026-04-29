@@ -15,6 +15,19 @@
 //                  Binary frames inbound are reserved for future use and
 //                  silently ignored.
 //
+// Replay-on-attach (US-005c): if the session's ring buffer has bytes when a
+// client attaches, the server emits TWO frames before any live data:
+//   1. JSON text frame {type:'replay', size: N}  -- envelope, tells the
+//      client the next binary frame is replay (vs. live output).
+//   2. Binary frame: the buffered bytes themselves (length === N).
+// The AC describes a single `{type:'replay', bytes}` frame, but Bun's
+// `ws.send` only accepts string OR binary in a single call — packing
+// both into one JSON object would require base64-encoding the payload
+// (~33% bytes on the wire and an extra encode/decode roundtrip per
+// attach). Two-frame envelope-then-binary preserves the same semantics
+// for the consumer (replay-then-live ordering) at zero overhead. Clients
+// MUST pair the envelope with the next binary frame.
+//
 // Exit handling: when the PTY exits, we broadcast `{type:'exit', code: N}`
 // as a text frame to every attached client and close their connections with
 // code 1000 ('pty_exit'). DB row clearing, registry.unregister, and the
@@ -71,6 +84,23 @@ export function attachWsToSession(ws: ServerWebSocket<WsBridgeData>): void {
     return
   }
 
+  // US-005c: replay any buffered bytes BEFORE subscribing to live data, so
+  // a late-attaching client sees recent history first and live output
+  // after, with no interleaving and no gap. Two frames: JSON envelope
+  // describing the size, then the raw bytes. See the file-level docstring
+  // for why we don't pack both into one frame.
+  const replayBytes = handle.buffer.snapshot()
+  if (replayBytes.byteLength > 0) {
+    try {
+      ws.send(JSON.stringify({ type: 'replay', size: replayBytes.byteLength }))
+      ws.send(replayBytes)
+    } catch {
+      // Send may fail if the socket was closed mid-flight; we still want
+      // to subscribe to onData/onExit below so the per-handle cleanup
+      // path runs uniformly. Subsequent sends will fail and be swallowed.
+    }
+  }
+
   // PTY -> WS: raw binary frame per chunk. Bun's ws.send dispatches to
   // sendBinary when the argument is a BufferSource (Uint8Array passes), so
   // the receiver sees a binary message. We do NOT JSON-wrap here because
@@ -111,6 +141,23 @@ export function attachWsToSession(ws: ServerWebSocket<WsBridgeData>): void {
     attachedBySession.set(sessionId, set)
   }
   set.add({ ws, unsubscribeData, unsubscribeExit })
+
+  // US-005c grace-window attach: if the PTY already exited (we're in the
+  // grace period before the registry unregisters), the onExit subscriber
+  // above will NEVER fire because the underlying child.onExit already
+  // dispatched. Synthesize the exit-frame + close here using handle.lastExit
+  // so the client sees the standard exit semantics rather than hanging on
+  // an open WS. Done AFTER the subscriber registration so the AttachedClient
+  // entry exists when detachWsFromSession runs on close.
+  if (handle.exited) {
+    const code = handle.lastExit?.exitCode ?? 0
+    try {
+      ws.send(JSON.stringify({ type: 'exit', code }))
+    } catch {}
+    try {
+      ws.close(1000, 'pty_exit_grace')
+    } catch {}
+  }
 }
 
 export function detachWsFromSession(ws: ServerWebSocket<WsBridgeData>): void {

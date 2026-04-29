@@ -11,6 +11,7 @@ import {
   __test__ as R,
   type PtyHandle,
 } from './registry'
+import { RingBuffer } from './ringBuffer'
 
 afterEach(() => R.clear())
 
@@ -19,6 +20,9 @@ function fakeHandle(sessionId: string, effortId: string, pid = 42): PtyHandle {
     sessionId,
     effortId,
     pid,
+    buffer: new RingBuffer(8192),
+    exited: false,
+    lastExit: null,
     write: () => {},
     resize: () => {},
     onData: () => () => {},

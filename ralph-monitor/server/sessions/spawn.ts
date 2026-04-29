@@ -73,7 +73,44 @@ import {
 import { encodeClaudeProjectDir } from '../jsonl/paths'
 import { store } from '../store'
 import { register, unregister, type PtyHandle } from './registry'
+import { RingBuffer } from './ringBuffer'
 import { withEffortLock } from './spawnMutex'
+
+// Default ring-buffer capacity (bytes) for PTY output replay. 256 KiB is
+// enough to capture a few screens of dense terminal output; configurable via
+// RALPH_MONITOR_PTY_BUFFER_BYTES. Exported only so tests can reference the
+// same default rather than duplicating the magic number.
+export const DEFAULT_PTY_BUFFER_BYTES = 262144
+
+// Default grace period (ms) to keep a handle in the registry AFTER the PTY
+// exits, so a client that attaches in the gap between exit and unregister
+// still sees the final output via replay. Configurable via
+// RALPH_MONITOR_PTY_GRACE_MS.
+export const DEFAULT_PTY_GRACE_MS = 60000
+
+function readBufferBytesEnv(): number {
+  const raw = process.env.RALPH_MONITOR_PTY_BUFFER_BYTES
+  if (raw === undefined) return DEFAULT_PTY_BUFFER_BYTES
+  const n = parseInt(raw, 10)
+  if (!Number.isFinite(n) || n <= 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[ralph-monitor] invalid RALPH_MONITOR_PTY_BUFFER_BYTES=${raw!}, falling back to ${DEFAULT_PTY_BUFFER_BYTES}`,
+    )
+    return DEFAULT_PTY_BUFFER_BYTES
+  }
+  return n
+}
+
+function readGraceMsEnv(): number {
+  const raw = process.env.RALPH_MONITOR_PTY_GRACE_MS
+  if (raw === undefined) return DEFAULT_PTY_GRACE_MS
+  const n = parseInt(raw, 10)
+  // Negative or NaN -> default; 0 is permitted (immediate cleanup, useful
+  // in tests that don't want a setTimeout dangling).
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_PTY_GRACE_MS
+  return n
+}
 
 export class EffortNotFoundError extends Error {
   override readonly name = 'EffortNotFoundError'
@@ -333,16 +370,67 @@ function signalToString(sig: NodeJS.Signals | number | undefined): string | unde
 // Build the PtyHandle adapter around a spawner's child. Exported only so
 // future stories (and the test for the auto-cleanup branch) can inspect it
 // in isolation; production callers go through `spawnSession`.
+//
+// Fan-out adapter pattern (US-005c): a SINGLE underlying child.onData/onExit
+// subscription multiplexes to N PtyHandle subscribers + the ring buffer.
+// This is required for the buffer to capture every byte regardless of
+// whether anyone has called handle.onData yet — the underlying child
+// callback fires once per PTY chunk, the adapter buffers AND broadcasts.
+//
+// Subscriber-set semantics: we iterate a SNAPSHOT of the set per dispatch
+// (`[...dataSubscribers]`) so a callback that adds/removes a subscriber
+// during fanout doesn't perturb the in-flight iteration. New subscribers
+// added during fanout will see the NEXT chunk, not the current one;
+// subscribers removed during fanout that have already been called will
+// still complete their current invocation. Standard pub-sub semantics.
 function buildPtyHandle(args: {
   child: SpawnerChild
   sessionId: string
   effortId: string
+  buffer: RingBuffer
 }): PtyHandle {
-  const { child, sessionId, effortId } = args
-  return {
+  const { child, sessionId, effortId, buffer } = args
+  const dataSubscribers = new Set<(chunk: Uint8Array) => void>()
+  const exitSubscribers = new Set<(exit: { exitCode: number; signal?: number }) => void>()
+
+  // Single underlying onData -> ring buffer + fanout. The disposer is held
+  // by the closure below (we don't expose it); it lives for the life of the
+  // child, which is the life of the handle.
+  child.onData((data: string) => {
+    const bytes = Buffer.from(data, 'utf8')
+    buffer.append(bytes)
+    for (const cb of [...dataSubscribers]) {
+      try {
+        cb(bytes)
+      } catch {
+        // Subscriber failures must not poison sibling subscribers or the
+        // buffer-append we already did. Swallow; the WS bridge wraps its
+        // own send() in try/catch already, this is defense-in-depth.
+      }
+    }
+  })
+
+  // Single underlying onExit -> set exited/lastExit BEFORE fanning out, so
+  // a subscriber that re-reads handle.exited (or a fresh attach racing the
+  // exit) sees the post-exit state consistently.
+  child.onExit((ev: IExitEvent) => {
+    const normalized = { exitCode: ev.exitCode, signal: normalizeExitSignal(ev.signal) }
+    handle.exited = true
+    handle.lastExit = normalized
+    for (const cb of [...exitSubscribers]) {
+      try {
+        cb(normalized)
+      } catch {}
+    }
+  })
+
+  const handle: PtyHandle = {
     sessionId,
     effortId,
     pid: child.pid,
+    buffer,
+    exited: false,
+    lastExit: null,
     write(data) {
       const s = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
       child.write(s)
@@ -351,21 +439,22 @@ function buildPtyHandle(args: {
       child.resize(cols, rows)
     },
     onData(cb) {
-      // bun-pty delivers strings; the registry contract delivers Uint8Arrays
-      // so the same chunks can flow through the WS encoder unchanged.
-      const sub = child.onData((data: string) => cb(Buffer.from(data, 'utf8')))
-      return () => sub.dispose()
+      dataSubscribers.add(cb)
+      return () => {
+        dataSubscribers.delete(cb)
+      }
     },
     onExit(cb) {
-      const sub = child.onExit((ev: IExitEvent) => {
-        cb({ exitCode: ev.exitCode, signal: normalizeExitSignal(ev.signal) })
-      })
-      return () => sub.dispose()
+      exitSubscribers.add(cb)
+      return () => {
+        exitSubscribers.delete(cb)
+      }
     },
     kill(signal) {
       child.kill(signalToString(signal))
     },
   }
+  return handle
 }
 
 export async function spawnSession(
@@ -446,10 +535,14 @@ export async function spawnSession(
 
   // 6. Build the PtyHandle adapter and register it. NO `await` between
   // spawn() and register() — that's the synchronous-registration invariant.
+  // The ring buffer (US-005c) is allocated here so it lives as long as the
+  // handle does; its capacity comes from RALPH_MONITOR_PTY_BUFFER_BYTES.
+  const buffer = new RingBuffer(readBufferBytesEnv())
   const handle = buildPtyHandle({
     child,
     sessionId: prep.uuid,
     effortId: input.effort_id,
+    buffer,
   })
 
   try {
@@ -503,11 +596,13 @@ export async function spawnSession(
     throw err
   }
 
-  // 9. Wire auto-cleanup on PTY exit. unregister + clear the live-pid
-  // columns + emit `session.exited`. US-005b will add WS broadcast on top
-  // of this; for US-005a-2 we just keep the DB and registry consistent.
+  // 9. Wire auto-cleanup on PTY exit. Clear the live-pid columns + emit
+  // `session.exited` immediately. The registry entry is kept around for a
+  // grace period (US-005c, RALPH_MONITOR_PTY_GRACE_MS, default 60s) so a
+  // late-attaching client can replay the final output AND see the recorded
+  // exit code via handle.lastExit. After the grace period we drop the
+  // buffer's bytes (proactive GC) and unregister.
   handle.onExit((exit) => {
-    unregister(prep.uuid)
     try {
       updateSession(db, prep.uuid, {
         process_pid: null,
@@ -524,6 +619,22 @@ export async function spawnSession(
       id: prep.uuid,
       exit_code: exit.exitCode,
     })
+    const graceMs = readGraceMsEnv()
+    if (graceMs <= 0) {
+      // 0 (or invalid->0 fallback) => synchronous cleanup. Useful for
+      // tests that don't want a setTimeout dangling past test end.
+      handle.buffer.clear()
+      unregister(prep.uuid)
+      return
+    }
+    // unref() so a long grace timer doesn't hold the process open if all
+    // other work has finished. The buffer/handle pair will still be GC'd
+    // on process exit.
+    const t = setTimeout(() => {
+      handle.buffer.clear()
+      unregister(prep.uuid)
+    }, graceMs)
+    if (typeof t.unref === 'function') t.unref()
   })
 
   // 10. Emit session.created. We re-fetch the row so the event payload

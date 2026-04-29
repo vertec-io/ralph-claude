@@ -7,20 +7,39 @@
 //                            session row, so an external observer never sees
 //                            "row alive but no handle" or vice versa.
 //   - US-005b WebSocket:    get(sessionId) to attach onData / write.
-//   - US-005c ring buffer:  get(sessionId) to wire output capture.
+//   - US-005c ring buffer:  get(sessionId) to wire output capture +
+//                            buffer.snapshot() for late-attaching clients.
 //   - US-016 status badge:  listLiveSessionIds() for the header live-count.
 //
 // The registry intentionally holds opaque handles. The `PtyHandle` interface
 // below is the contract US-005a-2 must implement when it instantiates the
 // handle around `bun-pty`'s `IPty` — it covers exactly the surface downstream
-// stories need (write/resize/onData/onExit/kill) and nothing more, so the
-// indirection lets us swap `bun-pty` for `node-pty` later without rippling
-// through every consumer.
+// stories need (write/resize/onData/onExit/kill + buffer/exit-state for
+// US-005c) and nothing more, so the indirection lets us swap `bun-pty` for
+// `node-pty` later without rippling through every consumer.
+
+import type { RingBuffer } from './ringBuffer'
 
 export interface PtyHandle {
   readonly sessionId: string
   readonly effortId: string
   readonly pid: number
+
+  // Ring buffer of recent PTY output bytes (US-005c). The handle owns this;
+  // the buffer is appended to on every PTY -> WS chunk and read by
+  // attachWsToSession to send a replay frame to late-attaching clients.
+  // Size is bounded by RALPH_MONITOR_PTY_BUFFER_BYTES (default 256 KiB).
+  readonly buffer: RingBuffer
+
+  // True once the underlying PTY has exited. Set by the spawn-side fanout
+  // adapter BEFORE invoking onExit subscribers, so a fresh attach during
+  // the post-exit grace window can observe "already exited" via the handle
+  // itself rather than racing the registry-unregister timer.
+  exited: boolean
+
+  // Captured exit info (mirrors the onExit payload). Populated together
+  // with `exited`. `null` until the PTY has exited.
+  lastExit: { exitCode: number; signal?: number } | null
 
   // Write a chunk of bytes (or a UTF-8 string) into the PTY's stdin. Throws
   // synchronously if the PTY has already exited; callers must guard against

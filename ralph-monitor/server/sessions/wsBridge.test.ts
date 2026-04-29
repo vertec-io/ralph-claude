@@ -40,6 +40,7 @@ import {
   __test__ as R,
   type PtyHandle,
 } from './registry'
+import { RingBuffer } from './ringBuffer'
 
 // -- Fake PtyHandle factory ------------------------------------------------
 
@@ -56,13 +57,21 @@ interface FakeHandle extends PtyHandle {
   exitListenerCount(): number
 }
 
-function fakeHandle(sessionId: string, effortId = 'e-1', pid = 4242): FakeHandle {
+function fakeHandle(
+  sessionId: string,
+  effortId = 'e-1',
+  pid = 4242,
+  bufferCapacity = 8192,
+): FakeHandle {
   const dataListeners = new Set<(c: Uint8Array) => void>()
   const exitListeners = new Set<(e: { exitCode: number; signal?: number }) => void>()
   const h: FakeHandle = {
     sessionId,
     effortId,
     pid,
+    buffer: new RingBuffer(bufferCapacity),
+    exited: false,
+    lastExit: null,
     writes: [],
     resizes: [],
     killCalls: [],
@@ -84,9 +93,15 @@ function fakeHandle(sessionId: string, effortId = 'e-1', pid = 4242): FakeHandle
       h.killCalls.push(signal)
     },
     triggerData(chunk) {
+      // Mirror production fanout: append to the buffer BEFORE invoking
+      // subscribers, so a test that asserts handle.buffer.snapshot() after
+      // triggerData sees the byte regardless of subscriber state.
+      h.buffer.append(chunk)
       for (const l of [...dataListeners]) l(chunk)
     },
     triggerExit(exit) {
+      h.exited = true
+      h.lastExit = exit
       for (const l of [...exitListeners]) l(exit)
     },
     dataListenerCount: () => dataListeners.size,
@@ -256,6 +271,122 @@ describe('attachWsToSession', () => {
     expect(ws2.sent).toHaveLength(2)
     expect(ws1.closed).not.toBeNull()
     expect(ws2.closed).not.toBeNull()
+  })
+})
+
+describe('attachWsToSession — US-005c replay frame', () => {
+  test('attach with empty buffer: no replay frames sent (idle as before)', () => {
+    const h = fakeHandle('s-replay-empty')
+    register(h)
+    const ws = fakeWs('s-replay-empty')
+
+    attachWsToSession(asWs(ws))
+
+    expect(ws.sent).toEqual([])
+  })
+
+  test('attach with buffered bytes: sends {type:replay,size} text frame + binary frame BEFORE live data', () => {
+    const h = fakeHandle('s-replay-1')
+    // Pre-populate the ring buffer (simulating PTY output that arrived
+    // before this client attached).
+    h.buffer.append(new Uint8Array([1, 2, 3, 4, 5]))
+    register(h)
+    const ws = fakeWs('s-replay-1')
+
+    attachWsToSession(asWs(ws))
+
+    expect(ws.sent).toHaveLength(2)
+    expect(ws.sent[0]!.kind).toBe('text')
+    expect(JSON.parse(ws.sent[0]!.payload as string)).toEqual({ type: 'replay', size: 5 })
+    expect(ws.sent[1]!.kind).toBe('binary')
+    expect(Array.from(ws.sent[1]!.payload as Uint8Array)).toEqual([1, 2, 3, 4, 5])
+
+    // Live data after replay flows as a normal binary frame.
+    h.triggerData(new Uint8Array([6, 7]))
+    expect(ws.sent).toHaveLength(3)
+    expect(ws.sent[2]!.kind).toBe('binary')
+    expect(Array.from(ws.sent[2]!.payload as Uint8Array)).toEqual([6, 7])
+  })
+
+  test('two clients attach sequentially: each gets its own replay from current buffer state at attach time', () => {
+    const h = fakeHandle('s-replay-multi')
+    h.buffer.append(new Uint8Array([0xaa, 0xbb]))
+    register(h)
+
+    const ws1 = fakeWs('s-replay-multi')
+    attachWsToSession(asWs(ws1))
+
+    // Buffer grows between attaches.
+    h.triggerData(new Uint8Array([0xcc]))
+
+    const ws2 = fakeWs('s-replay-multi')
+    attachWsToSession(asWs(ws2))
+
+    // ws1 saw the original 2-byte replay then received the 0xcc live.
+    expect(ws1.sent.length).toBeGreaterThanOrEqual(3)
+    expect(JSON.parse(ws1.sent[0]!.payload as string)).toEqual({ type: 'replay', size: 2 })
+    expect(Array.from(ws1.sent[1]!.payload as Uint8Array)).toEqual([0xaa, 0xbb])
+    // The live byte: third frame (binary).
+    expect(ws1.sent[2]!.kind).toBe('binary')
+    expect(Array.from(ws1.sent[2]!.payload as Uint8Array)).toEqual([0xcc])
+
+    // ws2 saw a 3-byte replay (buffer state at its attach time) and no
+    // live frames yet.
+    expect(ws2.sent.length).toBe(2)
+    expect(JSON.parse(ws2.sent[0]!.payload as string)).toEqual({ type: 'replay', size: 3 })
+    expect(Array.from(ws2.sent[1]!.payload as Uint8Array)).toEqual([0xaa, 0xbb, 0xcc])
+  })
+
+  test('attach to an exited handle (grace window): replay + immediate exit frame + close 1000', () => {
+    // Simulate a handle that's already exited but still in the registry
+    // because the grace-period setTimeout hasn't fired yet.
+    const h = fakeHandle('s-replay-exited')
+    h.buffer.append(new Uint8Array([0xde, 0xad]))
+    h.exited = true
+    h.lastExit = { exitCode: 42 }
+    register(h)
+    const ws = fakeWs('s-replay-exited')
+
+    attachWsToSession(asWs(ws))
+
+    // Frames in order: replay envelope, replay binary, exit JSON, close.
+    expect(ws.sent.length).toBe(3)
+    expect(JSON.parse(ws.sent[0]!.payload as string)).toEqual({ type: 'replay', size: 2 })
+    expect(ws.sent[1]!.kind).toBe('binary')
+    expect(Array.from(ws.sent[1]!.payload as Uint8Array)).toEqual([0xde, 0xad])
+    expect(ws.sent[2]!.kind).toBe('text')
+    expect(JSON.parse(ws.sent[2]!.payload as string)).toEqual({ type: 'exit', code: 42 })
+    expect(ws.closed).toEqual({ code: 1000, reason: 'pty_exit_grace' })
+  })
+
+  test('attach to an exited handle with no buffer: just exit + close, no replay frames', () => {
+    const h = fakeHandle('s-replay-exited-empty')
+    h.exited = true
+    h.lastExit = { exitCode: 0 }
+    register(h)
+    const ws = fakeWs('s-replay-exited-empty')
+
+    attachWsToSession(asWs(ws))
+
+    expect(ws.sent.length).toBe(1)
+    expect(JSON.parse(ws.sent[0]!.payload as string)).toEqual({ type: 'exit', code: 0 })
+    expect(ws.closed).toEqual({ code: 1000, reason: 'pty_exit_grace' })
+  })
+
+  test('attach to an exited handle with null lastExit defaults code to 0', () => {
+    // Defensive path: exited=true but lastExit=null shouldn't happen in
+    // production (set together), but the bridge tolerates it.
+    const h = fakeHandle('s-replay-exited-null')
+    h.exited = true
+    h.lastExit = null
+    register(h)
+    const ws = fakeWs('s-replay-exited-null')
+
+    attachWsToSession(asWs(ws))
+
+    expect(ws.sent.length).toBe(1)
+    expect(JSON.parse(ws.sent[0]!.payload as string)).toEqual({ type: 'exit', code: 0 })
+    expect(ws.closed).toEqual({ code: 1000, reason: 'pty_exit_grace' })
   })
 })
 

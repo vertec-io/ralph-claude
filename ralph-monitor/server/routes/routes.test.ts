@@ -414,11 +414,15 @@ describe('buildLifecycleSnapshot', () => {
     // from the global registry. Seed it with a fake handle, snapshot, then clean
     // up so neighboring tests don't see a polluted registry.
     const { register, unregister } = await import('../sessions/registry')
+    const { RingBuffer } = await import('../sessions/ringBuffer')
     const fakeId = 'live-session-from-registry-test'
     register({
       sessionId: fakeId,
       effortId: 'irrelevant',
       pid: 1,
+      buffer: new RingBuffer(8192),
+      exited: false,
+      lastExit: null,
       write: () => {},
       resize: () => {},
       onData: () => () => {},

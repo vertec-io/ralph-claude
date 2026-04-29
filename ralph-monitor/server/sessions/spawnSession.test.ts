@@ -42,6 +42,7 @@ const {
 } = await import('./spawn')
 import type { SpawnerChild, PtySpawner } from './spawn'
 const { __test__: R, register, get: regGet } = await import('./registry')
+const { RingBuffer } = await import('./ringBuffer')
 const { store } = await import('../store')
 import type { LifecycleAppEvent } from '../types'
 
@@ -331,6 +332,9 @@ describe('spawnSession — registration failure rollback', () => {
       sessionId: FORCED,
       effortId: 'sentinel-effort',
       pid: 999999,
+      buffer: new RingBuffer(8192),
+      exited: false,
+      lastExit: null,
       write: () => {},
       resize: () => {},
       onData: () => () => {},
@@ -431,7 +435,7 @@ describe('spawnSession — synchronous spawn failure', () => {
 })
 
 describe('spawnSession — PTY exit auto-cleanup', () => {
-  test('triggering onExit drops the registry entry, clears DB pid, emits session.exited', async () => {
+  test('triggering onExit drops the registry entry, clears DB pid, emits session.exited (grace=0)', async () => {
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), {
       name: 'P-exit',
@@ -447,20 +451,27 @@ describe('spawnSession — PTY exit auto-cleanup', () => {
     const rec = recordingSpawner(child)
     const cap = captureEvents()
 
-    const result = await spawnSession(
-      { effort_id: effort.id, mode: 'autonomous' },
-      { spawner: rec.spawner },
-    )
+    // Force grace=0 so unregister is synchronous within triggerExit. This
+    // keeps the original assertion shape (regGet -> null right after exit)
+    // while the grace-period behavior is exercised in its own describe
+    // block below.
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '0'
+    let result: { id: string }
+    try {
+      result = await spawnSession(
+        { effort_id: effort.id, mode: 'autonomous' },
+        { spawner: rec.spawner },
+      )
 
-    expect(regGet(result.id)).not.toBeNull()
-    expect(getSessionById(getDb(), result.id)?.process_pid).toBe(77777)
+      expect(regGet(result.id)).not.toBeNull()
+      expect(getSessionById(getDb(), result.id)?.process_pid).toBe(77777)
 
-    // Trigger the child's exit. Our spawnSession wired a handle.onExit
-    // callback that does the cleanup; the listener fires synchronously
-    // when triggerExit runs.
-    child.triggerExit({ exitCode: 0 })
+      child.triggerExit({ exitCode: 0 })
 
-    expect(regGet(result.id)).toBeNull()
+      expect(regGet(result.id)).toBeNull()
+    } finally {
+      delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+    }
     const row = getSessionById(getDb(), result.id)
     expect(row).not.toBeNull()
     expect(row!.process_pid).toBeNull()
@@ -491,16 +502,169 @@ describe('spawnSession — PTY exit auto-cleanup', () => {
     const child = fakeChild(88888)
     const rec = recordingSpawner(child)
 
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '0'
+    try {
+      const result = await spawnSession(
+        { effort_id: effort.id, mode: 'autonomous' },
+        { spawner: rec.spawner },
+      )
+
+      // External hard-delete (race condition simulation).
+      hardDeleteSession(getDb(), result.id)
+
+      // Trigger exit — must not throw even though the row is gone.
+      expect(() => child.triggerExit({ exitCode: 1 })).not.toThrow()
+    } finally {
+      delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+    }
+  })
+})
+
+describe('spawnSession — US-005c ring buffer + grace period', () => {
+  test('PTY data flows into the handle ring buffer (fanout adapter captures even with no subscribers)', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-ring-data',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-ring-data',
+      kind: 'task',
+    })
+
+    const child = fakeChild(101)
+    const rec = recordingSpawner(child)
     const result = await spawnSession(
       { effort_id: effort.id, mode: 'autonomous' },
       { spawner: rec.spawner },
     )
 
-    // External hard-delete (race condition simulation).
-    hardDeleteSession(getDb(), result.id)
+    const handle = regGet(result.id)!
+    expect(handle).not.toBeNull()
 
-    // Trigger exit — must not throw even though the row is gone.
-    expect(() => child.triggerExit({ exitCode: 1 })).not.toThrow()
+    // No onData subscriber yet — fire data through the underlying child.
+    // The fanout adapter must still append to the ring buffer.
+    child.triggerData('abc')
+    child.triggerData('def')
+
+    const snap = handle.buffer.snapshot()
+    expect(new TextDecoder().decode(snap)).toBe('abcdef')
+  })
+
+  test('handle.exited + handle.lastExit are set BEFORE onExit subscribers fire', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-ring-exit-state',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-ring-exit-state',
+      kind: 'task',
+    })
+
+    const child = fakeChild(202)
+    const rec = recordingSpawner(child)
+
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '0'
+    const observed: {
+      exited: boolean
+      lastExit: { exitCode: number; signal?: number } | null
+    } = { exited: false, lastExit: null }
+    try {
+      const result = await spawnSession(
+        { effort_id: effort.id, mode: 'autonomous' },
+        { spawner: rec.spawner },
+      )
+      const handle = regGet(result.id)!
+      handle.onExit(() => {
+        observed.exited = handle.exited
+        observed.lastExit = handle.lastExit
+      })
+      child.triggerExit({ exitCode: 7 })
+    } finally {
+      delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+    }
+    expect(observed.exited).toBe(true)
+    expect(observed.lastExit).toEqual({ exitCode: 7, signal: undefined })
+  })
+
+  test('grace period: registry entry persists for graceMs after exit, then unregisters and clears buffer', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-grace',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-grace',
+      kind: 'task',
+    })
+
+    const child = fakeChild(303)
+    const rec = recordingSpawner(child)
+
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '100'
+    try {
+      const result = await spawnSession(
+        { effort_id: effort.id, mode: 'autonomous' },
+        { spawner: rec.spawner },
+      )
+      const handle = regGet(result.id)!
+
+      // Buffer some bytes pre-exit.
+      child.triggerData('final-output')
+      expect(new TextDecoder().decode(handle.buffer.snapshot())).toBe('final-output')
+
+      // Exit. Within grace, registry still has the handle.
+      child.triggerExit({ exitCode: 0 })
+      expect(regGet(result.id)).not.toBeNull()
+      expect(handle.exited).toBe(true)
+      // Bytes still replayable in the grace window.
+      expect(new TextDecoder().decode(handle.buffer.snapshot())).toBe('final-output')
+
+      // Wait past the 100ms grace.
+      await new Promise((r) => setTimeout(r, 200))
+
+      expect(regGet(result.id)).toBeNull()
+      expect(handle.buffer.byteLength()).toBe(0)
+    } finally {
+      delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+    }
+  })
+
+  test('RALPH_MONITOR_PTY_BUFFER_BYTES env tunes capacity', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-buf-cap',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-buf-cap',
+      kind: 'task',
+    })
+
+    const child = fakeChild(404)
+    const rec = recordingSpawner(child)
+
+    process.env.RALPH_MONITOR_PTY_BUFFER_BYTES = '8'
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '0'
+    try {
+      const result = await spawnSession(
+        { effort_id: effort.id, mode: 'autonomous' },
+        { spawner: rec.spawner },
+      )
+      const handle = regGet(result.id)!
+      expect(handle.buffer.capacity).toBe(8)
+
+      child.triggerData('abcdefghij') // 10 bytes -> buffer keeps last 8
+      expect(new TextDecoder().decode(handle.buffer.snapshot())).toBe('cdefghij')
+    } finally {
+      delete process.env.RALPH_MONITOR_PTY_BUFFER_BYTES
+      delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+    }
   })
 })
 
