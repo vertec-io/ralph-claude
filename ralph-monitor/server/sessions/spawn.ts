@@ -276,6 +276,26 @@ export type PtySpawner = (
 export const defaultSpawner: PtySpawner = (file, args, options) =>
   pty.spawn(file, args, options) as IPty as SpawnerChild
 
+// Test-spawner override seam (US-005d).
+//
+// The route layer can't easily pass a `spawner` into `spawnSession` per
+// request (it has no clean place to thread one in), but the route tests
+// MUST avoid spawning the real `claude` binary. We expose a process-wide
+// override slot here: tests call `setTestSpawner(mock)` in their setup,
+// the route layer reads via `getSpawner()`, and tests reset it to `null`
+// in teardown.
+//
+// In production, the slot is null and `getSpawner()` returns
+// `defaultSpawner` — i.e. the route is wired exactly the same as a direct
+// `spawnSession({ ... })` call would be.
+let testSpawner: PtySpawner | null = null
+export function setTestSpawner(s: PtySpawner | null): void {
+  testSpawner = s
+}
+export function getSpawner(): PtySpawner {
+  return testSpawner ?? defaultSpawner
+}
+
 export interface SpawnSessionInput {
   effort_id: string
   mode: 'interactive' | 'autonomous'

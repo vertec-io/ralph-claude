@@ -9,7 +9,7 @@
 // disk. This mirrors how real callers use the API and avoids reaching past
 // the public surface to swap singletons.
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,6 +28,10 @@ const { buildLifecycleSnapshot } = await import('./lifecycle')
 const { getDb, closeDb, getProjectById, listEffortsByProject, getSessionById, createSession } =
   await import('../db')
 const { store } = await import('../store')
+const { setTestSpawner } = await import('../sessions/spawn')
+const { __test__: registryTest } = await import('../sessions/registry')
+const { clearWorktreeCacheForTests } = await import('../git/worktrees')
+import type { SpawnerChild, PtySpawner } from '../sessions/spawn'
 
 const app = new Hono()
 app.route('/', projectsRouter)
@@ -435,5 +439,312 @@ describe('buildLifecycleSnapshot', () => {
     } finally {
       unregister(fakeId)
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// POST /api/sessions  (US-005d)
+// ---------------------------------------------------------------------------
+//
+// Why we test the route here rather than in spawnSession.test.ts:
+//   - This file exercises the full Hono pipeline: JSON parsing, body
+//     validation, DB lookups for effort+project, working_dir validation
+//     against worktrees.ts, and the typed-error -> HTTP-status mapping.
+//   - The route reads its spawner via getSpawner() (US-005d Option C), which
+//     returns a process-wide override slot we set via setTestSpawner. Tests
+//     install a recording spawner in beforeEach and clear it in afterEach so
+//     parallel describe blocks can't leak the override into each other.
+//   - We DO NOT spawn the real `claude` binary. The recording spawner returns
+//     a fake child that satisfies SpawnerChild's surface and ignores all
+//     write/resize calls.
+//
+// All POST tests share the helpers below to (a) seed a project + effort
+// against the test DB, and (b) install a fresh recording spawner that lets
+// us assert the argv that spawnSession would have invoked.
+
+interface FakeChild extends SpawnerChild {
+  triggerExit(event: { exitCode: number; signal?: number | string }): void
+  triggerData(data: string): void
+  killCalls: string[]
+  writes: string[]
+}
+
+function fakeChild(pid = 12345): FakeChild {
+  const dataListeners = new Set<(d: string) => void>()
+  const exitListeners = new Set<(e: { exitCode: number; signal?: number | string }) => void>()
+  const child: FakeChild = {
+    pid,
+    killCalls: [],
+    writes: [],
+    onData(listener) {
+      dataListeners.add(listener)
+      return { dispose: () => { dataListeners.delete(listener) } }
+    },
+    onExit(listener) {
+      exitListeners.add(listener)
+      return { dispose: () => { exitListeners.delete(listener) } }
+    },
+    write(data) { child.writes.push(data) },
+    resize() {},
+    kill(signal) { child.killCalls.push(signal ?? '<default>') },
+    triggerExit(event) { for (const l of [...exitListeners]) l(event) },
+    triggerData(data) { for (const l of [...dataListeners]) l(data) },
+  }
+  return child
+}
+
+interface RecordingSpawner {
+  spawner: PtySpawner
+  child: FakeChild
+  calls: { file: string; args: string[]; cwd?: string; env?: Record<string, string> }[]
+}
+
+function recordingSpawner(child: FakeChild = fakeChild()): RecordingSpawner {
+  const rec: RecordingSpawner = {
+    child,
+    calls: [],
+    spawner: (file, args, options) => {
+      rec.calls.push({ file, args: [...args], cwd: options.cwd, env: options.env })
+      return child
+    },
+  }
+  return rec
+}
+
+// Create a project + reuse its auto-General effort. Returns IDs the route
+// callers need.
+async function makeProjectAndEffort(name: string): Promise<{
+  projectId: string
+  effortId: string
+  rootDir: string
+}> {
+  const dir = tmpProjectDir()
+  const r = await app.fetch(
+    new Request('http://test/api/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, root_dir: dir }),
+    }),
+  )
+  expect(r.status).toBe(201)
+  const proj = await r.json()
+  const effort = listEffortsByProject(getDb(), proj.id)[0]
+  return { projectId: proj.id, effortId: effort.id, rootDir: proj.root_dir }
+}
+
+describe('POST /api/sessions', () => {
+  let rec: RecordingSpawner
+
+  beforeEach(() => {
+    // Each test starts with an empty registry + worktree cache so prior
+    // tests' state can't leak in.
+    registryTest.clear()
+    clearWorktreeCacheForTests()
+    rec = recordingSpawner()
+    setTestSpawner(rec.spawner)
+    // Force grace=0 so the auto-cleanup-on-exit timer doesn't dangle past
+    // the end of the test (mirrors spawnSession.test.ts).
+    process.env.RALPH_MONITOR_PTY_GRACE_MS = '0'
+  })
+
+  afterEach(() => {
+    setTestSpawner(null)
+    registryTest.clear()
+    delete process.env.RALPH_MONITOR_PTY_GRACE_MS
+  })
+
+  test('happy path: 201 + { id, jsonl_path, ws_url }', async () => {
+    const { effortId } = await makeProjectAndEffort('Spawn-Happy')
+    const cap = captureEvents()
+    try {
+      const res = await app.fetch(
+        new Request('http://test/api/sessions', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ effort_id: effortId, mode: 'interactive' }),
+        }),
+      )
+      expect(res.status).toBe(201)
+      const body = await res.json()
+      expect(typeof body.id).toBe('string')
+      expect(body.id.length).toBeGreaterThan(0)
+      expect(typeof body.jsonl_path).toBe('string')
+      expect(body.jsonl_path.endsWith(`${body.id}.jsonl`)).toBe(true)
+      expect(body.ws_url).toBe(`/ws/sessions/${body.id}`)
+
+      // Recording spawner saw exactly one invocation with the right argv.
+      expect(rec.calls.length).toBe(1)
+      expect(rec.calls[0]!.file).toBe('claude')
+      expect(rec.calls[0]!.args).toContain('--session-id')
+      expect(rec.calls[0]!.args).toContain(body.id)
+
+      // session.created event fired.
+      const evt = cap.events.find(
+        (e: any) => e.type === 'session.created' && e.session?.id === body.id,
+      )
+      expect(evt).toBeDefined()
+    } finally {
+      cap.stop()
+    }
+  })
+
+  test('missing effort_id -> 400 effort_id_required', async () => {
+    const res = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: 'autonomous' }),
+      }),
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('effort_id_required')
+  })
+
+  test('invalid mode -> 400 mode_invalid', async () => {
+    const { effortId } = await makeProjectAndEffort('Spawn-BadMode')
+    const res = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ effort_id: effortId, mode: 'wrong' }),
+      }),
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('mode_invalid')
+  })
+
+  test('non-string working_dir -> 400 working_dir_invalid', async () => {
+    const { effortId } = await makeProjectAndEffort('Spawn-BadWD')
+    const res = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ effort_id: effortId, mode: 'autonomous', working_dir: 42 }),
+      }),
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('working_dir_invalid')
+  })
+
+  test('invalid JSON body -> 400 invalid_json', async () => {
+    const res = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: 'not-json',
+      }),
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('invalid_json')
+  })
+
+  test('non-existent effort_id -> 404 effort_not_found', async () => {
+    const res = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          effort_id: '00000000-0000-4000-8000-000000000000',
+          mode: 'autonomous',
+        }),
+      }),
+    )
+    expect(res.status).toBe(404)
+    expect((await res.json()).error).toBe('effort_not_found')
+  })
+
+  test('working_dir outside project -> 422 working_dir_outside_project_or_worktree', async () => {
+    const { effortId } = await makeProjectAndEffort('Spawn-OutOfProject')
+    const otherDir = tmpProjectDir() // sibling tmp, not a worktree of project
+    const res = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          effort_id: effortId,
+          mode: 'autonomous',
+          working_dir: otherDir,
+        }),
+      }),
+    )
+    expect(res.status).toBe(422)
+    const body = await res.json()
+    expect(body.error).toBe('working_dir_outside_project_or_worktree')
+    expect(body.details?.working_dir).toBe(otherDir)
+  })
+
+  test('one-live-session-per-effort -> 409 on second POST', async () => {
+    const { effortId } = await makeProjectAndEffort('Spawn-OneLive')
+
+    const r1 = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ effort_id: effortId, mode: 'autonomous' }),
+      }),
+    )
+    expect(r1.status).toBe(201)
+
+    const r2 = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ effort_id: effortId, mode: 'autonomous' }),
+      }),
+    )
+    expect(r2.status).toBe(409)
+    expect((await r2.json()).error).toBe('one_live_session_per_effort')
+  })
+
+  test('argv assertion: when resolved cwd != project.root_dir, includes --add-dir <project.root_dir>', async () => {
+    // Create project, then mark effort.working_dir to a subdir of root_dir.
+    // POST with no session-level working_dir -> prepareSpawn falls back to
+    // effort.working_dir, which differs from project.root_dir, which means
+    // buildClaudeArgv emits the --add-dir branch.
+    const dir = tmpProjectDir()
+    const sub = join(dir, 'sub')
+    mkdirSync(sub)
+
+    const r = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Spawn-AddDir', root_dir: dir }),
+      }),
+    )
+    const proj = await r.json()
+
+    // Create an effort under this project whose working_dir = the subdir.
+    // Reuse the efforts route so we don't reach past the public surface.
+    const er = await app.fetch(
+      new Request(`http://test/api/projects/${proj.id}/efforts`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'sub-effort', kind: 'task', working_dir: sub }),
+      }),
+    )
+    expect(er.status).toBe(201)
+    const effort = await er.json()
+
+    const sres = await app.fetch(
+      new Request('http://test/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ effort_id: effort.id, mode: 'autonomous' }),
+      }),
+    )
+    expect(sres.status).toBe(201)
+
+    // Recording spawner saw the --add-dir branch.
+    expect(rec.calls.length).toBe(1)
+    const args = rec.calls[0]!.args
+    const addDirIdx = args.indexOf('--add-dir')
+    expect(addDirIdx).toBeGreaterThanOrEqual(0)
+    // realpathSync may resolve symlinks (e.g. /tmp -> /private/tmp on macOS),
+    // so we compare the realpath'd version of dir rather than dir literally.
+    const realDir = require('node:fs').realpathSync.native(dir)
+    expect(args[addDirIdx + 1]).toBe(realDir)
+    // cwd was the subdir.
+    expect(rec.calls[0]!.cwd).toBe(require('node:fs').realpathSync.native(sub))
   })
 })
