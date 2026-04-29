@@ -10,6 +10,7 @@ import type { Session } from '../server/db/sessions'
 import { PrdSnapshotPanels } from './components/PrdSnapshotPanels'
 import { AdoptPrdDialog } from './components/AdoptPrdDialog'
 import { Sidebar } from './components/Sidebar'
+import { SessionDetail } from './components/SessionDetail'
 import { useSelection } from './router'
 
 marked.setOptions({ gfm: true, breaks: false })
@@ -159,7 +160,25 @@ export function App() {
           setSelection({ projectId, effortId, sessionId })
         }}
       />
-      {selected ? <PRDDetail prd={selected} /> : <EmptyDetail />}
+      {selectedSessionId
+        ? (() => {
+            // Find the effort and project for breadcrumb context.
+            const sessionEffort = efforts.find((e) => e.id === selectedEffortId) ?? null
+            const sessionProject = sessionEffort
+              ? projects.find((p) => p.id === sessionEffort.project_id) ?? null
+              : projects.find((p) => p.id === selectedProjectId) ?? null
+            return (
+              <SessionDetail
+                sessionId={selectedSessionId}
+                project={sessionProject}
+                effort={sessionEffort}
+              />
+            )
+          })()
+        : selected
+          ? <PRDDetail prd={selected} />
+          : <EmptyDetail />
+      }
       <EventFeed
         events={filteredEvents}
         showAll={showAllEvents}
