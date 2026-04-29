@@ -243,8 +243,10 @@ export interface SpawnSessionInput {
   effort_id: string
   mode: 'interactive' | 'autonomous'
   working_dir?: string
-  // Accepted for forward-compat with US-005a-3, which will write the prompt
-  // into the PTY after spawn. US-005a-2 just accepts and ignores it.
+  // First prompt to type into the PTY after spawn. Honored only when
+  // mode === 'autonomous' AND the string is non-empty; ignored otherwise
+  // (interactive sessions take their first input from the user via WS).
+  // US-005a-3 wires the actual write.
   initial_prompt?: string
   title?: string
 }
@@ -533,6 +535,23 @@ export async function spawnSession(
       ts: Date.now(),
       session,
     })
+  }
+
+  // 11. Mode-conditional initial prompt write (US-005a-3). Placed AFTER the
+  // `session.created` emit so any UI subscribed to lifecycle events sees the
+  // session exist before the first byte arrives (and before output echoed
+  // from this write streams out via the upcoming US-005c ring buffer). For
+  // 'interactive' mode we never auto-write — the PTY's stdin remains open
+  // and the user's first input arrives via WebSocket. For 'autonomous' with
+  // no prompt (or an empty string) we also skip — caller's choice. claude
+  // expects CR (\r) to submit a line, not LF; bun-pty's write() is
+  // fire-and-forget so this is fully synchronous.
+  if (
+    input.mode === 'autonomous' &&
+    typeof input.initial_prompt === 'string' &&
+    input.initial_prompt.length > 0
+  ) {
+    handle.write(input.initial_prompt + '\r')
   }
 
   return {

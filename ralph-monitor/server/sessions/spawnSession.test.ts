@@ -542,6 +542,128 @@ describe('spawnSession — one-live-session-per-effort', () => {
   })
 })
 
+describe('spawnSession — mode-conditional initial prompt (US-005a-3)', () => {
+  test('autonomous + initial_prompt → exactly one stdin write of "<prompt>\\r" AFTER register', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-init-auto',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-init-auto',
+      kind: 'task',
+    })
+
+    // Track call ordering across register() and the subsequent write. We
+    // wrap child.write to log a 'write' event, and intercept register() via
+    // a wrapper spawner that logs 'spawned' immediately after spawn (the
+    // production code calls register() synchronously after spawn returns,
+    // so any 'write' that lands after the spawner returns is by definition
+    // post-register).
+    const order: string[] = []
+    const child = fakeChild(31415)
+    const origWrite = child.write
+    child.write = (data) => {
+      order.push(`write:${data}`)
+      origWrite.call(child, data)
+    }
+    const rec: RecordingSpawner = {
+      child,
+      calls: [],
+      spawner: (file, args, options) => {
+        rec.calls.push({ file, args: [...args], cwd: options.cwd, env: options.env })
+        order.push('spawned')
+        return child
+      },
+    }
+
+    const result = await spawnSession(
+      {
+        effort_id: effort.id,
+        mode: 'autonomous',
+        initial_prompt: 'hello world',
+      },
+      { spawner: rec.spawner },
+    )
+
+    // Exactly one write of 'hello world\r'.
+    expect(child.writes).toEqual(['hello world\r'])
+
+    // Ordering: spawn (and therefore register, which is synchronous in
+    // spawnSession with no awaits between them) happened before the write.
+    expect(order[0]).toBe('spawned')
+    expect(order[1]).toBe('write:hello world\r')
+
+    // Sanity: the registry entry exists at this point.
+    expect(regGet(result.id)).not.toBeNull()
+  })
+
+  test('autonomous + no initial_prompt → zero stdin writes', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-init-auto-none',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-init-auto-none',
+      kind: 'task',
+    })
+
+    const rec = recordingSpawner(fakeChild(1))
+    await spawnSession(
+      { effort_id: effort.id, mode: 'autonomous' },
+      { spawner: rec.spawner },
+    )
+    expect(rec.child.writes).toEqual([])
+  })
+
+  test('autonomous + empty-string initial_prompt → zero stdin writes', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-init-auto-empty',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-init-auto-empty',
+      kind: 'task',
+    })
+
+    const rec = recordingSpawner(fakeChild(2))
+    await spawnSession(
+      { effort_id: effort.id, mode: 'autonomous', initial_prompt: '' },
+      { spawner: rec.spawner },
+    )
+    expect(rec.child.writes).toEqual([])
+  })
+
+  test('interactive + initial_prompt → zero stdin writes (mode never auto-writes)', async () => {
+    const dir = tmpProjectDir()
+    const { projectId } = createProject(getDb(), {
+      name: 'P-init-interactive',
+      root_dir: dir,
+    })
+    const effort = createEffort(getDb(), {
+      project_id: projectId,
+      name: 'effort-init-interactive',
+      kind: 'task',
+    })
+
+    const rec = recordingSpawner(fakeChild(3))
+    await spawnSession(
+      {
+        effort_id: effort.id,
+        mode: 'interactive',
+        initial_prompt: 'should not be sent',
+      },
+      { spawner: rec.spawner },
+    )
+    expect(rec.child.writes).toEqual([])
+  })
+})
+
 describe('buildClaudeArgv — pure helper', () => {
   test('no --add-dir when cwd == projectRootDir', () => {
     expect(
