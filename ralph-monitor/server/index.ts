@@ -101,9 +101,10 @@ app.get('/events', (c) => {
     // creating the very fetch-then-subscribe race window the snapshot exists
     // to close.
     //
-    // live_session_ids is `[]` here as a stub; US-005a-2 / US-006 wires the
-    // live-session registry into this builder.
-    const snapshot = buildLifecycleSnapshot(getDb(), [])
+    // live_session_ids comes from the in-memory PTY handle registry
+    // (server/sessions/registry.ts, US-005a-1). The builder reads it
+    // directly when no override is passed.
+    const snapshot = buildLifecycleSnapshot(getDb())
     await stream.writeSSE({
       event: 'lifecycle.snapshot',
       data: JSON.stringify(snapshot),

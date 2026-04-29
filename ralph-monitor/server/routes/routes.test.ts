@@ -25,7 +25,7 @@ const { projectsRouter } = await import('./projects')
 const { effortsRouter } = await import('./efforts')
 const { sessionsRouter } = await import('./sessions')
 const { buildLifecycleSnapshot } = await import('./lifecycle')
-const { getDb, getProjectById, listEffortsByProject, getSessionById, createSession } =
+const { getDb, closeDb, getProjectById, listEffortsByProject, getSessionById, createSession } =
   await import('../db')
 const { store } = await import('../store')
 
@@ -42,6 +42,10 @@ function tmpProjectDir(): string {
 }
 
 afterAll(() => {
+  // Close the DB singleton before removing the file so neighboring test
+  // files (which run in the same Bun test process) don't inherit a handle
+  // pointing at a now-deleted file (manifests as SQLITE_READONLY_DBMOVED).
+  try { closeDb() } catch {}
   for (const d of tempDirs) {
     try { rmSync(d, { recursive: true, force: true }) } catch {}
   }
@@ -388,7 +392,7 @@ describe('DELETE /api/sessions/:id?purge_jsonl=true', () => {
 })
 
 describe('buildLifecycleSnapshot', () => {
-  test('emits projects, efforts arrays + live_session_ids stub', () => {
+  test('emits projects, efforts arrays + live_session_ids', () => {
     const snap = buildLifecycleSnapshot(getDb(), [])
     expect(snap.type).toBe('lifecycle.snapshot')
     expect(typeof snap.ts).toBe('number')
@@ -399,9 +403,33 @@ describe('buildLifecycleSnapshot', () => {
     expect(snap.efforts.length).toBeGreaterThanOrEqual(snap.projects.length)
   })
 
-  test('passes through live_session_ids verbatim', () => {
+  test('passes through live_session_ids verbatim when override is provided', () => {
     const ids = ['a', 'b', 'c']
     const snap = buildLifecycleSnapshot(getDb(), ids)
     expect(snap.live_session_ids).toEqual(ids)
+  })
+
+  test('reads from the live PTY handle registry when no override is passed', async () => {
+    // US-005a-1: with no liveSessionIds argument, buildLifecycleSnapshot pulls
+    // from the global registry. Seed it with a fake handle, snapshot, then clean
+    // up so neighboring tests don't see a polluted registry.
+    const { register, unregister } = await import('../sessions/registry')
+    const fakeId = 'live-session-from-registry-test'
+    register({
+      sessionId: fakeId,
+      effortId: 'irrelevant',
+      pid: 1,
+      write: () => {},
+      resize: () => {},
+      onData: () => () => {},
+      onExit: () => () => {},
+      kill: () => {},
+    })
+    try {
+      const snap = buildLifecycleSnapshot(getDb())
+      expect(snap.live_session_ids).toContain(fakeId)
+    } finally {
+      unregister(fakeId)
+    }
   })
 })
