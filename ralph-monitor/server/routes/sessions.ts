@@ -40,6 +40,7 @@ import {
   CwdResolutionError,
   OneLiveSessionPerEffortPrepError,
 } from '../sessions/spawn'
+import { computeSessionStatus } from '../sessions/status'
 import { isPathInProjectOrWorktree } from '../git/worktrees'
 
 export const sessionsRouter = new Hono()
@@ -150,6 +151,30 @@ sessionsRouter.post('/api/sessions', async (c) => {
       500,
     )
   }
+})
+
+// GET /api/sessions/:id (US-006)
+//
+// Returns the session row plus a computed status field so callers can tell
+// at a glance whether the session is dormant, live and attached to our PTY,
+// live but orphaned (process still running but no PTY parent), or in the
+// post-exit replay-grace window. `live` and `attached` are derived from
+// `status` for convenience: AC requires live-orphaned to expose
+// `{ status: 'live-orphaned', live: true, attached: false }`, and we expose
+// the same shape on every status for consistency.
+sessionsRouter.get('/api/sessions/:id', (c) => {
+  const id = c.req.param('id')
+  const session = getSessionById(getDb(), id)
+  if (!session) {
+    return c.json({ error: 'session_not_found', details: { id } }, 404)
+  }
+  const status = computeSessionStatus(session)
+  return c.json({
+    ...session,
+    status,
+    live: status === 'live-attached' || status === 'live-orphaned',
+    attached: status === 'live-attached',
+  })
 })
 
 // GET /api/efforts/:id/sessions

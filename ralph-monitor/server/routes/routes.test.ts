@@ -532,6 +532,82 @@ async function makeProjectAndEffort(name: string): Promise<{
   return { projectId: proj.id, effortId: effort.id, rootDir: proj.root_dir }
 }
 
+describe('GET /api/sessions/:id', () => {
+  test('happy path: dormant session -> 200 with status=dormant, live=false, attached=false', async () => {
+    const dir = tmpProjectDir()
+    const r = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'GetSession-Dormant', root_dir: dir }),
+      }),
+    )
+    const proj = await r.json()
+    const effort = listEffortsByProject(getDb(), proj.id)[0]
+
+    const sessId = crypto.randomUUID()
+    createSession(getDb(), {
+      id: sessId,
+      effort_id: effort.id,
+      mode: 'autonomous',
+      jsonl_path: '/tmp/dormant.jsonl',
+      // No pid — this is the dormant case.
+    })
+
+    const res = await app.fetch(new Request(`http://test/api/sessions/${sessId}`))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.id).toBe(sessId)
+    expect(body.status).toBe('dormant')
+    expect(body.live).toBe(false)
+    expect(body.attached).toBe(false)
+    expect(body.process_pid).toBeNull()
+  })
+
+  test('live-orphaned: row has pid but no registry entry -> live=true, attached=false', async () => {
+    const dir = tmpProjectDir()
+    const r = await app.fetch(
+      new Request('http://test/api/projects', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'GetSession-Orphan', root_dir: dir }),
+      }),
+    )
+    const proj = await r.json()
+    const effort = listEffortsByProject(getDb(), proj.id)[0]
+
+    // Make sure registry is empty for this id (it is by default; explicit
+    // for clarity).
+    registryTest.clear()
+
+    const sessId = crypto.randomUUID()
+    createSession(getDb(), {
+      id: sessId,
+      effort_id: effort.id,
+      mode: 'autonomous',
+      jsonl_path: '/tmp/orphan.jsonl',
+      process_pid: 99999,
+      process_started_at: Date.now(),
+    })
+
+    const res = await app.fetch(new Request(`http://test/api/sessions/${sessId}`))
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.status).toBe('live-orphaned')
+    expect(body.live).toBe(true)
+    expect(body.attached).toBe(false)
+  })
+
+  test('not found -> 404 session_not_found', async () => {
+    const res = await app.fetch(
+      new Request('http://test/api/sessions/00000000-0000-4000-8000-000000000000'),
+    )
+    expect(res.status).toBe(404)
+    const body = await res.json()
+    expect(body.error).toBe('session_not_found')
+  })
+})
+
 describe('POST /api/sessions', () => {
   let rec: RecordingSpawner
 

@@ -12,6 +12,7 @@ import { projectsRouter } from './routes/projects'
 import { effortsRouter } from './routes/efforts'
 import { sessionsRouter } from './routes/sessions'
 import { buildLifecycleSnapshot } from './routes/lifecycle'
+import { reconcileSessionsOnStartup } from './sessions/reconcile'
 import { bearerMiddleware, getOrCreateToken, validateWebSocketSubprotocol } from './auth'
 import {
   attachWsToSession,
@@ -54,6 +55,17 @@ if (RALPH_MONITOR_BIND !== '127.0.0.1') {
 // invoke once eagerly so any schema problem fails loudly at boot rather than
 // at the first request that touches the DB.
 getDb()
+
+// Startup reconciliation (US-006). Runs AFTER getDb() so migrations are in
+// place, BEFORE Bun.serve / startWatchers so no client request can observe a
+// half-reconciled state. Walks every DB session row with a non-null
+// process_pid: matches by /proc/<pid>/comm + /proc/<pid>/environ and either
+// keeps the row as live-orphaned OR clears the live-pid columns. On non-Linux
+// platforms it logs a warning and clears every PID-bearing row.
+const reconcileResult = await reconcileSessionsOnStartup()
+console.log(
+  `reconcile: ${reconcileResult.liveOrphanedCount} live-orphaned, ${reconcileResult.dormantCount} dormant`,
+)
 
 // Materialize the auth token early. Generates and writes to disk on first
 // boot; subsequent boots reuse the existing file. Doing this eagerly means

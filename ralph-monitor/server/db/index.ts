@@ -94,6 +94,7 @@ export {
   createSession,
   getSessionById,
   listSessionsByEffort,
+  listSessionsWithPid,
   updateSession,
   hardDeleteSession,
   SessionIdCollisionError,

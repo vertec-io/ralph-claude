@@ -180,6 +180,19 @@ export function listSessionsByEffort(db: Database, effort_id: string): Session[]
   return rows.map(rowToSession)
 }
 
+// All sessions whose `process_pid` is non-null. Used by the startup
+// reconciler (US-006) to enumerate rows that claim to track a live process.
+// Order is `created_at DESC` for human-readable logs; the reconciler doesn't
+// depend on the order itself.
+export function listSessionsWithPid(db: Database): Session[] {
+  const rows = db
+    .prepare(
+      'SELECT * FROM sessions WHERE process_pid IS NOT NULL ORDER BY created_at DESC',
+    )
+    .all() as SessionRow[]
+  return rows.map(rowToSession)
+}
+
 export interface UpdateSessionPatch {
   title?: string | null
   working_dir?: string | null
