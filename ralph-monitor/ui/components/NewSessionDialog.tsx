@@ -36,6 +36,8 @@ export interface NewSessionDialogProps {
   /** Shown as placeholder in the working_dir field. Null when the effort has no
    *  override (falls back to project root_dir at spawn time). */
   effortWorkingDir: string | null
+  /** Used as the DirectoryPicker starting path when effortWorkingDir is null. */
+  projectRootDir?: string
   onClose: () => void
   onCreated: (session: { id: string; ws_url: string }) => void
 }
@@ -49,6 +51,7 @@ export function NewSessionDialog({
   effortId,
   effortName,
   effortWorkingDir,
+  projectRootDir,
   onClose,
   onCreated,
 }: NewSessionDialogProps) {
@@ -156,7 +159,7 @@ export function NewSessionDialog({
           </div>
           <div className="px-6 py-5 overflow-y-auto">
             <DirectoryPicker
-              initialPath={effortWorkingDir ?? undefined}
+              initialPath={effortWorkingDir ?? projectRootDir ?? undefined}
               onPick={(p) => { setWorkingDir(p); setPickerOpen(false) }}
               onCancel={() => setPickerOpen(false)}
             />

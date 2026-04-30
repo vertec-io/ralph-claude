@@ -78,6 +78,7 @@ export function App() {
     effortId: string
     effortName: string
     effortWorkingDir: string | null
+    projectRootDir: string
   } | null>(null)
 
   // ---------------------------------------------------------------------------
@@ -203,7 +204,10 @@ export function App() {
         }
         onOpenNewProject={() => setNewProjectOpen(true)}
         onOpenNewEffort={(target) => setNewEffortTarget(target)}
-        onOpenNewSession={(target) => setNewSessionTarget(target)}
+        onOpenNewSession={(target) => {
+          const proj = projects.find((p) => p.id === target.projectId)
+          setNewSessionTarget({ ...target, projectRootDir: proj?.root_dir ?? target.projectRootDir })
+        }}
       />
 
       <main className="overflow-y-auto bg-zinc-950">
@@ -223,11 +227,13 @@ export function App() {
             }
             onNewSession={() => {
               if (selectedEffort) {
+                const proj = projects.find((p) => p.id === selectedEffort.project_id)
                 setNewSessionTarget({
                   projectId: selectedEffort.project_id,
                   effortId: selectedEffort.id,
                   effortName: selectedEffort.name,
                   effortWorkingDir: selectedEffort.working_dir,
+                  projectRootDir: proj?.root_dir ?? '',
                 })
               }
             }}
@@ -248,6 +254,7 @@ export function App() {
                 })
               }
             }}
+            onRefresh={() => void refreshEffortsAndSessions()}
           />
         ) : (
           <Welcome
@@ -316,6 +323,7 @@ export function App() {
           effortId={newSessionTarget.effortId}
           effortName={newSessionTarget.effortName}
           effortWorkingDir={newSessionTarget.effortWorkingDir}
+          projectRootDir={newSessionTarget.projectRootDir}
           onClose={() => setNewSessionTarget(null)}
           onCreated={(session) => {
             const { projectId: pId, effortId: eId } = newSessionTarget

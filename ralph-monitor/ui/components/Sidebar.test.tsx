@@ -78,6 +78,7 @@ function makeSession(overrides: Partial<Session> & Pick<Session, 'id' | 'effort_
     process_started_at: overrides.process_started_at ?? null,
     last_activity_at: overrides.last_activity_at !== undefined ? overrides.last_activity_at : null,
     created_at: overrides.created_at ?? NOW - DAYS_20,
+    archived: overrides.archived ?? false,
   }
 }
 

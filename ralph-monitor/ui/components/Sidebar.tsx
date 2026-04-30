@@ -28,7 +28,7 @@
 //     expand the relevant project + effort so the selected node is visible.
 
 import { useEffect, useRef, useState } from 'react'
-import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown, Plus, Pin } from 'lucide-react'
+import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown, Plus, Pin, Pencil } from 'lucide-react'
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
@@ -70,7 +70,7 @@ export interface SidebarProps {
   // Callbacks for hoisting dialog state to App.tsx so main-content buttons work too.
   onOpenNewProject?: () => void
   onOpenNewEffort?: (target: { projectId: string; rootDir: string }) => void
-  onOpenNewSession?: (target: { projectId: string; effortId: string; effortName: string; effortWorkingDir: string | null }) => void
+  onOpenNewSession?: (target: { projectId: string; effortId: string; effortName: string; effortWorkingDir: string | null; projectRootDir: string }) => void
 }
 
 export interface BucketedProjects {
@@ -229,6 +229,14 @@ async function patchEffort(id: string, patch: Record<string, unknown>): Promise<
   })
 }
 
+async function patchSession(id: string, patch: Record<string, unknown>): Promise<Response> {
+  return authFetch(`/api/sessions/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+}
+
 // Kill: US-016c will add the actual endpoint. For now we POST to
 // /api/sessions/:id/kill and swallow 404/501 silently; a real error will be
 // surfaced as a console.error + alert so the user knows something went wrong.
@@ -250,31 +258,80 @@ interface SessionRowProps {
   liveSessionIds: Set<string>
   onSelect: () => void
   onContextMenu: (e: React.MouseEvent) => void
+  renamingId: string | null
+  onRenameCommit: (id: string, name: string) => void
+  onRenameCancel: () => void
+  dimmed?: boolean
 }
 
-function SessionRow({ session, selected, liveSessionIds, onSelect, onContextMenu }: SessionRowProps) {
+function SessionRow({
+  session,
+  selected,
+  liveSessionIds,
+  onSelect,
+  onContextMenu,
+  renamingId,
+  onRenameCommit,
+  onRenameCancel,
+  dimmed,
+}: SessionRowProps) {
   const status = computeStatusClient(session, liveSessionIds)
   const lastActivity = session.last_activity_at ? timeAgo(session.last_activity_at) : '—'
-  const title = session.title ?? session.id.slice(0, 8)
+  const displayTitle = session.title ?? session.id.slice(0, 8)
+  const isRenaming = renamingId === session.id
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (isRenaming && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [isRenaming])
 
   return (
-    <li>
-      <button
-        onClick={onSelect}
-        onContextMenu={onContextMenu}
-        data-testid={`session-row-${session.id}`}
-        className={`w-full text-left pl-10 pr-3 py-1.5 rounded transition ${
-          selected
-            ? 'bg-zinc-700/60 text-zinc-100'
-            : 'hover:bg-zinc-800/60 text-zinc-400'
-        }`}
-      >
-        <div className="flex items-center gap-1.5 min-w-0">
-          <StatusIcon status={status} />
-          <span className="text-xs truncate flex-1">{title}</span>
-          <span className="text-[11px] text-zinc-600 tabular-nums shrink-0">{lastActivity}</span>
+    <li className={dimmed ? 'opacity-60' : undefined}>
+      {isRenaming ? (
+        <div className="pl-10 pr-3 py-1.5">
+          <input
+            ref={renameInputRef}
+            defaultValue={session.title ?? ''}
+            placeholder={session.id.slice(0, 8)}
+            className="w-full text-xs bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none min-w-0"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                const v = (e.target as HTMLInputElement).value.trim()
+                if (v) onRenameCommit(session.id, v)
+                else onRenameCancel()
+              } else if (e.key === 'Escape') {
+                onRenameCancel()
+              }
+            }}
+            onBlur={(e) => {
+              const v = e.target.value.trim()
+              if (v) onRenameCommit(session.id, v)
+              else onRenameCancel()
+            }}
+            onClick={(e) => e.stopPropagation()}
+          />
         </div>
-      </button>
+      ) : (
+        <button
+          onClick={onSelect}
+          onContextMenu={onContextMenu}
+          data-testid={`session-row-${session.id}`}
+          className={`w-full text-left pl-10 pr-3 py-1.5 rounded transition ${
+            selected
+              ? 'bg-zinc-700/60 text-zinc-100'
+              : 'hover:bg-zinc-800/60 text-zinc-400'
+          }`}
+        >
+          <div className="flex items-center gap-1.5 min-w-0">
+            <StatusIcon status={status} />
+            <span className="text-xs truncate flex-1">{displayTitle}</span>
+            <span className="text-[11px] text-zinc-600 tabular-nums shrink-0">{lastActivity}</span>
+          </div>
+        </button>
+      )}
     </li>
   )
 }
@@ -299,6 +356,8 @@ interface EffortRowProps {
   onRenameCommit: (id: string, name: string) => void
   onRenameCancel: () => void
   onNewSession?: () => void
+  showArchivedSessions: boolean
+  onToggleShowArchivedSessions: () => void
 }
 
 function EffortRow({
@@ -317,11 +376,18 @@ function EffortRow({
   onRenameCommit,
   onRenameCancel,
   onNewSession,
+  showArchivedSessions,
+  onToggleShowArchivedSessions,
 }: EffortRowProps) {
   const hasLive = sessions.some(
     (s) => computeStatusClient(s, liveSessionIds) === 'live-attached' ||
            computeStatusClient(s, liveSessionIds) === 'live-orphaned',
   )
+
+  const archivedSessionCount = sessions.filter((s) => s.archived).length
+  const visibleSessions = showArchivedSessions
+    ? sessions
+    : sessions.filter((s) => !s.archived)
 
   const isRenaming = renamingId === effort.id
   const renameInputRef = useRef<HTMLInputElement>(null)
@@ -406,10 +472,10 @@ function EffortRow({
       </li>
       {expanded && (
         <ul className="space-y-0.5">
-          {sessions.length === 0 && (
+          {visibleSessions.length === 0 && archivedSessionCount === 0 && (
             <li className="pl-10 pr-3 py-1 text-[11px] text-zinc-600 italic">no sessions</li>
           )}
-          {sessions.map((s) => (
+          {visibleSessions.map((s) => (
             <SessionRow
               key={s.id}
               session={s}
@@ -417,8 +483,24 @@ function EffortRow({
               liveSessionIds={liveSessionIds}
               onSelect={() => onSelectSession(s.id)}
               onContextMenu={(e) => onSessionContextMenu(s, e)}
+              renamingId={renamingId}
+              onRenameCommit={onRenameCommit}
+              onRenameCancel={onRenameCancel}
+              dimmed={s.archived}
             />
           ))}
+          {archivedSessionCount > 0 && (
+            <li>
+              <button
+                onClick={onToggleShowArchivedSessions}
+                className="pl-10 pr-3 py-1 text-[11px] text-zinc-600 hover:text-zinc-400 transition italic"
+              >
+                {showArchivedSessions
+                  ? `hide ${archivedSessionCount} archived`
+                  : `+${archivedSessionCount} archived`}
+              </button>
+            </li>
+          )}
         </ul>
       )}
     </>
@@ -441,12 +523,14 @@ interface ProjectRowProps {
   liveSessionIds: Set<string>
   expandedEfforts: Set<string>
   showArchivedEfforts: boolean
+  showArchivedByEffort: Set<string>
   onToggle: () => void
   onSelect: () => void
   onSelectEffort: (id: string) => void
   onSelectSession: (id: string) => void
   onToggleEffort: (id: string) => void
   onToggleShowArchived: () => void
+  onToggleShowArchivedSessions: (effortId: string) => void
   onContextMenu: (e: React.MouseEvent) => void
   onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
   onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
@@ -469,12 +553,14 @@ function ProjectRow({
   liveSessionIds,
   expandedEfforts,
   showArchivedEfforts,
+  showArchivedByEffort,
   onToggle,
   onSelect,
   onSelectEffort,
   onSelectSession,
   onToggleEffort,
   onToggleShowArchived,
+  onToggleShowArchivedSessions,
   onContextMenu,
   onEffortContextMenu,
   onSessionContextMenu,
@@ -614,6 +700,8 @@ function ProjectRow({
               onRenameCommit={onRenameCommit}
               onRenameCancel={onRenameCancel}
               onNewSession={onNewSession ? () => onNewSession(e) : undefined}
+              showArchivedSessions={showArchivedByEffort.has(e.id)}
+              onToggleShowArchivedSessions={() => onToggleShowArchivedSessions(e.id)}
             />
           ))}
           {archivedCount > 0 && (
@@ -661,6 +749,8 @@ interface SectionProps {
   onToggleEffort: (id: string) => void
   showArchivedByProject: Set<string>
   onToggleShowArchived: (id: string) => void
+  showArchivedByEffort: Set<string>
+  onToggleShowArchivedSessions: (id: string) => void
   onProjectContextMenu: (project: Project, e: React.MouseEvent) => void
   onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
   onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
@@ -694,6 +784,8 @@ function Section({
   onToggleEffort,
   showArchivedByProject,
   onToggleShowArchived,
+  showArchivedByEffort,
+  onToggleShowArchivedSessions,
   onProjectContextMenu,
   onEffortContextMenu,
   onSessionContextMenu,
@@ -732,12 +824,14 @@ function Section({
               liveSessionIds={liveSessionIds}
               expandedEfforts={expandedEfforts}
               showArchivedEfforts={showArchivedByProject.has(p.id)}
+              showArchivedByEffort={showArchivedByEffort}
               onToggle={() => onToggleProject(p.id)}
               onSelect={() => onSelectProject(p.id)}
               onSelectEffort={onSelectEffort}
               onSelectSession={onSelectSession}
               onToggleEffort={onToggleEffort}
               onToggleShowArchived={() => onToggleShowArchived(p.id)}
+              onToggleShowArchivedSessions={onToggleShowArchivedSessions}
               onContextMenu={(e) => onProjectContextMenu(p, e)}
               onEffortContextMenu={onEffortContextMenu}
               onSessionContextMenu={onSessionContextMenu}
@@ -819,6 +913,7 @@ export function Sidebar({
     effortId: string
     effortName: string
     effortWorkingDir: string | null
+    projectRootDir: string
   } | null>(null)
 
   // Per-project expansion state (shared across sections via a single set)
@@ -847,6 +942,17 @@ export function Sidebar({
   const [showArchivedByProject, setShowArchivedByProject] = useState<Set<string>>(new Set())
   const toggleShowArchived = (id: string) => {
     setShowArchivedByProject((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  // Per-effort "show archived sessions" toggle
+  const [showArchivedByEffort, setShowArchivedByEffort] = useState<Set<string>>(new Set())
+  const toggleShowArchivedSessions = (id: string) => {
+    setShowArchivedByEffort((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -926,14 +1032,31 @@ export function Sidebar({
     onRefresh?.()
   }
 
-  // Unified rename commit — detects whether the id is a project or effort.
+  const handleRenameCommitSession = async (id: string, title: string) => {
+    setRenamingId(null)
+    const res = await patchSession(id, { title })
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      window.alert(`Rename failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
+      return
+    }
+    onRefresh?.()
+  }
+
+  // Unified rename commit — detects whether the id is a project, effort, or session.
   const handleRenameCommit = async (id: string, name: string) => {
     const isProject = projects.some((p) => p.id === id)
     if (isProject) {
       await handleRenameCommitProject(id, name)
-    } else {
-      await handleRenameCommitEffort(id, name)
+      return
     }
+    const isEffort = efforts.some((e) => e.id === id)
+    if (isEffort) {
+      await handleRenameCommitEffort(id, name)
+      return
+    }
+    // Must be a session.
+    await handleRenameCommitSession(id, name)
   }
 
   const handleRenameCancel = () => setRenamingId(null)
@@ -1003,12 +1126,15 @@ export function Sidebar({
       {
         label: 'New Session',
         onClick: () => {
+          const proj = projects.find((p) => p.id === effort.project_id)
+          const projectRootDir = proj?.root_dir ?? ''
           if (onOpenNewSession) {
             onOpenNewSession({
               projectId: effort.project_id,
               effortId: effort.id,
               effortName: effort.name,
               effortWorkingDir: effort.working_dir,
+              projectRootDir,
             })
           } else {
             setNewSessionTarget({
@@ -1016,6 +1142,7 @@ export function Sidebar({
               effortId: effort.id,
               effortName: effort.name,
               effortWorkingDir: effort.working_dir,
+              projectRootDir,
             })
           }
         },
@@ -1073,7 +1200,6 @@ export function Sidebar({
             await killSession(session.id)
             onRefresh?.()
           } catch (err) {
-            // US-016c hasn't landed yet — 404 is expected. Log but don't alert.
             console.error('[sidebar] kill session failed:', err)
             window.alert(`Kill failed: ${(err as Error)?.message ?? err}`)
           }
@@ -1082,9 +1208,29 @@ export function Sidebar({
     }
 
     items.push({
+      label: 'Rename',
+      onClick: () => {
+        setRenamingId(session.id)
+      },
+    })
+
+    items.push({
+      label: session.archived ? 'Unarchive' : 'Archive',
+      onClick: async () => {
+        const res = await patchSession(session.id, { archived: !session.archived })
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({})) as { error?: string }
+          window.alert(`Archive failed: ${body.error ?? `HTTP ${res.status}`}`)
+          return
+        }
+        onRefresh?.()
+      },
+    })
+
+    items.push({
       label: 'Delete…',
       destructive: true,
-      separator: items.length > 0,
+      separator: true,
       onClick: () => {
         setDeleteSessionTarget(session)
       },
@@ -1108,6 +1254,8 @@ export function Sidebar({
     onToggleEffort: toggleEffort,
     showArchivedByProject,
     onToggleShowArchived: toggleShowArchived,
+    showArchivedByEffort,
+    onToggleShowArchivedSessions: toggleShowArchivedSessions,
     onProjectContextMenu: handleProjectContextMenu,
     onEffortContextMenu: handleEffortContextMenu,
     onSessionContextMenu: handleSessionContextMenu,
@@ -1118,18 +1266,26 @@ export function Sidebar({
       ? (project: Project) => onOpenNewEffort({ projectId: project.id, rootDir: project.root_dir })
       : (project: Project) => setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir }),
     onNewSessionForEffort: onOpenNewSession
-      ? (effort: Effort) => onOpenNewSession({
-          projectId: effort.project_id,
-          effortId: effort.id,
-          effortName: effort.name,
-          effortWorkingDir: effort.working_dir,
-        })
-      : (effort: Effort) => setNewSessionTarget({
-          projectId: effort.project_id,
-          effortId: effort.id,
-          effortName: effort.name,
-          effortWorkingDir: effort.working_dir,
-        }),
+      ? (effort: Effort) => {
+          const proj = projects.find((p) => p.id === effort.project_id)
+          onOpenNewSession({
+            projectId: effort.project_id,
+            effortId: effort.id,
+            effortName: effort.name,
+            effortWorkingDir: effort.working_dir,
+            projectRootDir: proj?.root_dir ?? '',
+          })
+        }
+      : (effort: Effort) => {
+          const proj = projects.find((p) => p.id === effort.project_id)
+          setNewSessionTarget({
+            projectId: effort.project_id,
+            effortId: effort.id,
+            effortName: effort.name,
+            effortWorkingDir: effort.working_dir,
+            projectRootDir: proj?.root_dir ?? '',
+          })
+        },
   }
 
   return (
@@ -1347,6 +1503,7 @@ export function Sidebar({
           effortId={newSessionTarget.effortId}
           effortName={newSessionTarget.effortName}
           effortWorkingDir={newSessionTarget.effortWorkingDir}
+          projectRootDir={newSessionTarget.projectRootDir}
           onClose={() => setNewSessionTarget(null)}
           onCreated={(session) => {
             const { projectId, effortId } = newSessionTarget

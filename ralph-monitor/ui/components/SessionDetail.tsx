@@ -33,6 +33,7 @@
 //   model those as an intersection type local to this component.
 
 import { useState, useEffect, useRef } from 'react'
+import { Pencil } from 'lucide-react'
 import { authFetch, authEventSource, authWebSocket } from '../auth'
 import { SessionTranscript } from './SessionTranscript'
 import { SessionStream } from './SessionStream'
@@ -61,13 +62,24 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
   // not include it (it's not a DB field), but the SSE session.exited event does.
   const [exitCode, setExitCode] = useState<number | undefined>(undefined)
   const [turns, setTurns] = useState<Turn[]>([])
-  const [mode, setMode] = useState<ViewMode>('chat')
+  // Default to 'stream' — the chat-rendered view is still rough; raw PTY
+  // output is the more reliable surface today.
+  const [mode, setMode] = useState<ViewMode>('stream')
   const [input, setInput] = useState('')
   const [resuming, setResuming] = useState(false)
   const [resumeError, setResumeError] = useState<string | null>(null)
   const [killing, setKilling] = useState(false)
   const [killPhase, setKillPhase] = useState<'idle' | 'killing' | 'resuming'>('idle')
   const wsRef = useRef<WebSocket | null>(null)
+  const [renamingTitle, setRenamingTitle] = useState(false)
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (renamingTitle && renameInputRef.current) {
+      renameInputRef.current.focus()
+      renameInputRef.current.select()
+    }
+  }, [renamingTitle])
 
   // Fetch the session row + computed status on mount (or sessionId change).
   useEffect(() => {
@@ -253,6 +265,24 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
     }
   }
 
+  async function handleRenameTitle(newTitle: string) {
+    setRenamingTitle(false)
+    if (!newTitle.trim()) return
+    try {
+      const res = await authFetch(`/api/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newTitle.trim() }),
+      })
+      if (res.ok) {
+        const updated = await res.json() as SessionWithStatus
+        setSession(updated)
+      }
+    } catch {
+      // Silently ignore rename failure — not worth a dialog.
+    }
+  }
+
   async function handleKillAndResume() {
     if (killing || resuming) return
     setKilling(true)
@@ -333,9 +363,39 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
 
         {/* Title row */}
         <div className="flex items-center gap-2 mt-1">
-          <h2 className="font-semibold truncate" data-testid="session-title">
-            {sessionTitle}
-          </h2>
+          {renamingTitle ? (
+            <input
+              ref={renameInputRef}
+              defaultValue={session.title ?? ''}
+              placeholder={sessionId.slice(0, 8)}
+              className="font-semibold bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none text-sm flex-1 min-w-0"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  void handleRenameTitle((e.target as HTMLInputElement).value)
+                } else if (e.key === 'Escape') {
+                  setRenamingTitle(false)
+                }
+              }}
+              onBlur={(e) => {
+                void handleRenameTitle(e.target.value)
+              }}
+            />
+          ) : (
+            <div className="flex items-center gap-1 min-w-0 flex-1">
+              <h2 className="font-semibold truncate" data-testid="session-title">
+                {sessionTitle}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setRenamingTitle(true)}
+                title="Rename session"
+                aria-label="Rename session"
+                className="shrink-0 text-zinc-600 hover:text-zinc-300 transition"
+              >
+                <Pencil className="w-3 h-3" />
+              </button>
+            </div>
+          )}
           <StatusBadge status={session.status} />
           <div className="ml-auto shrink-0">
             <ViewModeToggle

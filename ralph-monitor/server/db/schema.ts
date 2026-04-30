@@ -74,6 +74,18 @@ CREATE UNIQUE INDEX idx_sessions_one_live_per_effort ON sessions(effort_id)
   WHERE process_pid IS NOT NULL;
 `
 
+// Migration 2: add archived column to sessions + index.
+//
+// Uses ALTER TABLE so existing data (sessions already in the DB) receives the
+// new column with its DEFAULT value (0 = not archived). SQLite evaluates
+// ALTER TABLE ... ADD COLUMN only when user_version < 2, so running the
+// migration runner a second time is a safe no-op.
+const MIGRATION_2 = `
+ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived);
+`
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: MIGRATION_1 },
+  { version: 2, sql: MIGRATION_2 },
 ]

@@ -26,18 +26,19 @@ describe('runMigrations', () => {
     expect(names.has('sessions')).toBe(true)
   })
 
-  test('sets PRAGMA user_version = 1 on first run', () => {
+  test('sets PRAGMA user_version to the latest migration version on first run', () => {
     const db = freshDb()
     const v = db.query('PRAGMA user_version').get() as { user_version: number }
-    expect(v.user_version).toBe(1)
+    // Version 2 is the current latest migration (migration 2 adds sessions.archived).
+    expect(v.user_version).toBe(2)
   })
 
   test('is a no-op when run twice', () => {
     const db = freshDb()
-    // Second run must not throw and must not bump user_version past 1.
+    // Second run must not throw and must not bump user_version past the latest.
     expect(() => runMigrations(db)).not.toThrow()
     const v = db.query('PRAGMA user_version').get() as { user_version: number }
-    expect(v.user_version).toBe(1)
+    expect(v.user_version).toBe(2)
   })
 })
 

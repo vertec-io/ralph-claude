@@ -398,6 +398,7 @@ sessionsRouter.post('/api/sessions/:id/kill', async (c) => {
 })
 
 // GET /api/efforts/:id/sessions
+// Query param: ?include_archived=true — default behaviour excludes archived sessions.
 sessionsRouter.get('/api/efforts/:id/sessions', (c) => {
   const effortId = c.req.param('id')
   const db = getDb()
@@ -405,17 +406,19 @@ sessionsRouter.get('/api/efforts/:id/sessions', (c) => {
   if (!effort) {
     return c.json({ error: 'effort-not-found', details: { id: effortId } }, 404)
   }
-  const sessions = listSessionsByEffort(db, effortId)
+  const includeArchived = c.req.query('include_archived') === 'true'
+  const sessions = listSessionsByEffort(db, effortId, includeArchived)
   return c.json({ sessions })
 })
 
-// PATCH /api/sessions/:id { title?, working_dir?, last_activity_at? }
+// PATCH /api/sessions/:id { title?, working_dir?, last_activity_at?, archived? }
 sessionsRouter.patch('/api/sessions/:id', async (c) => {
   const id = c.req.param('id')
   let body: {
     title?: unknown
     working_dir?: unknown
     last_activity_at?: unknown
+    archived?: unknown
   }
   try {
     body = await c.req.json()
@@ -433,6 +436,7 @@ sessionsRouter.patch('/api/sessions/:id', async (c) => {
     title?: string | null
     working_dir?: string | null
     last_activity_at?: number | null
+    archived?: boolean
   } = {}
   if ('title' in body) {
     if (typeof body.title === 'string' || body.title === null) {
@@ -450,6 +454,11 @@ sessionsRouter.patch('/api/sessions/:id', async (c) => {
       body.last_activity_at === null
     ) {
       patch.last_activity_at = body.last_activity_at
+    }
+  }
+  if ('archived' in body) {
+    if (typeof body.archived === 'boolean') {
+      patch.archived = body.archived
     }
   }
 

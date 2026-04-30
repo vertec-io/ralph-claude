@@ -40,6 +40,7 @@ export interface Session {
   process_started_at: number | null
   last_activity_at: number | null
   created_at: number
+  archived: boolean
 }
 
 interface SessionRow {
@@ -53,10 +54,23 @@ interface SessionRow {
   process_started_at: number | null
   last_activity_at: number | null
   created_at: number
+  archived: number
 }
 
 function rowToSession(row: SessionRow): Session {
-  return { ...row }
+  return {
+    id: row.id,
+    effort_id: row.effort_id,
+    working_dir: row.working_dir,
+    jsonl_path: row.jsonl_path,
+    title: row.title,
+    mode: row.mode,
+    process_pid: row.process_pid,
+    process_started_at: row.process_started_at,
+    last_activity_at: row.last_activity_at,
+    created_at: row.created_at,
+    archived: !!row.archived,
+  }
 }
 
 // Typed errors. Both extend Error and set a discriminating `name`. Callers
@@ -157,6 +171,7 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
     process_started_at: input.process_started_at ?? null,
     last_activity_at: null,
     created_at: now,
+    archived: false,
   }
 }
 
@@ -170,13 +185,20 @@ export function getSessionById(db: Database, id: string): Session | null {
 // Most-recently-active first. NULLS LAST keeps never-active sessions out of
 // the way; secondary sort on `created_at DESC` keeps insertion order stable
 // within a no-activity bucket.
-export function listSessionsByEffort(db: Database, effort_id: string): Session[] {
-  const rows = db
-    .prepare(
-      `SELECT * FROM sessions WHERE effort_id = ?
-       ORDER BY last_activity_at DESC NULLS LAST, created_at DESC`,
-    )
-    .all(effort_id) as SessionRow[]
+//
+// `includeArchived` (default false) mirrors the projects.listProjects pattern:
+// by default archived=1 rows are excluded; pass true to get everything.
+export function listSessionsByEffort(
+  db: Database,
+  effort_id: string,
+  includeArchived = false,
+): Session[] {
+  const sql = includeArchived
+    ? `SELECT * FROM sessions WHERE effort_id = ?
+       ORDER BY last_activity_at DESC NULLS LAST, created_at DESC`
+    : `SELECT * FROM sessions WHERE effort_id = ? AND archived = 0
+       ORDER BY last_activity_at DESC NULLS LAST, created_at DESC`
+  const rows = db.prepare(sql).all(effort_id) as SessionRow[]
   return rows.map(rowToSession)
 }
 
@@ -199,6 +221,7 @@ export interface UpdateSessionPatch {
   process_pid?: number | null
   process_started_at?: number | null
   last_activity_at?: number | null
+  archived?: boolean
 }
 
 // Typed partial. Setting `process_pid` to a different non-null value while
@@ -228,6 +251,10 @@ export function updateSession(db: Database, id: string, patch: UpdateSessionPatc
   if ('last_activity_at' in patch) {
     sets.push('last_activity_at = ?')
     params.push(patch.last_activity_at ?? null)
+  }
+  if ('archived' in patch && patch.archived !== undefined) {
+    sets.push('archived = ?')
+    params.push(patch.archived ? 1 : 0)
   }
 
   if (sets.length === 0) return

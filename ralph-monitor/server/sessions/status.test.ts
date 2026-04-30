@@ -29,6 +29,7 @@ function fakeSession(overrides: Partial<Session> = {}): Session {
     process_started_at: null,
     last_activity_at: null,
     created_at: Date.now(),
+    archived: false,
     ...overrides,
   }
 }

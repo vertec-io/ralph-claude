@@ -9,6 +9,7 @@
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
+import { DiskConversations } from './DiskConversations'
 
 export interface ProjectDetailProps {
   project: Project
@@ -16,6 +17,7 @@ export interface ProjectDetailProps {
   sessions: Session[]
   onSelectEffort: (id: string) => void
   onNewEffort: () => void
+  onRefresh?: () => void
 }
 
 function StatusBadge({ status }: { status: Effort['status'] }) {
@@ -31,7 +33,7 @@ function StatusBadge({ status }: { status: Effort['status'] }) {
   )
 }
 
-export function ProjectDetail({ project, efforts, sessions, onSelectEffort, onNewEffort }: ProjectDetailProps) {
+export function ProjectDetail({ project, efforts, sessions, onSelectEffort, onNewEffort, onRefresh }: ProjectDetailProps) {
   const visibleEfforts = efforts.filter((e) => e.status !== 'archived')
 
   return (
@@ -53,7 +55,7 @@ export function ProjectDetail({ project, efforts, sessions, onSelectEffort, onNe
         </button>
       </div>
 
-      {/* Effort list */}
+      {/* Effort list + disk conversations */}
       <div className="flex-1 overflow-y-auto">
         {visibleEfforts.length === 0 ? (
           <div className="px-6 py-10 text-sm text-zinc-500 text-center">
@@ -93,6 +95,13 @@ export function ProjectDetail({ project, efforts, sessions, onSelectEffort, onNe
             })}
           </ul>
         )}
+
+        {/* Disk conversation discovery */}
+        <DiskConversations
+          projectId={project.id}
+          efforts={efforts}
+          onAdopted={() => onRefresh?.()}
+        />
       </div>
     </div>
   )

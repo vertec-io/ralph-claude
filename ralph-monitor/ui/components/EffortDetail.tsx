@@ -6,6 +6,7 @@
 //   - List of sessions with id short form, status badge, last_activity_at
 //   - Empty state if no sessions
 
+import { useState } from 'react'
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
@@ -52,6 +53,11 @@ function timeAgo(ms: number): string {
 }
 
 export function EffortDetail({ project, effort, sessions, onSelectSession, onNewSession }: EffortDetailProps) {
+  const [showArchived, setShowArchived] = useState(false)
+
+  const archivedCount = sessions.filter((s) => s.archived).length
+  const visibleSessions = showArchived ? sessions : sessions.filter((s) => !s.archived)
+
   return (
     <div className="flex flex-col h-full bg-zinc-950">
       {/* Header */}
@@ -91,39 +97,59 @@ export function EffortDetail({ project, effort, sessions, onSelectSession, onNew
 
       {/* Session list */}
       <div className="flex-1 overflow-y-auto">
-        {sessions.length === 0 ? (
+        {visibleSessions.length === 0 && archivedCount === 0 ? (
           <div className="px-6 py-10 text-sm text-zinc-500 text-center">
             No sessions yet. Click{' '}
             <span className="text-zinc-300 font-medium">+ New session</span> to spawn a claude
             conversation here.
           </div>
         ) : (
-          <ul className="divide-y divide-zinc-800/60">
-            {sessions.map((session) => {
-              const status = computeStatus(session)
-              const lastActivity = session.last_activity_at ? timeAgo(session.last_activity_at) : '—'
-              const title = session.title ?? session.id.slice(0, 8)
-              return (
-                <li key={session.id}>
-                  <button
-                    type="button"
-                    onClick={() => onSelectSession(session.id)}
-                    className="w-full text-left px-6 py-3 hover:bg-zinc-900/60 transition group"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-sm text-zinc-200 truncate flex-1 group-hover:text-zinc-100">
-                        {title}
-                      </span>
-                      <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${STATUS_COLORS[status]}`}>
-                        {STATUS_LABELS[status]}
-                      </span>
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-zinc-600 tabular-nums">{lastActivity}</div>
-                  </button>
-                </li>
-              )
-            })}
-          </ul>
+          <>
+            <ul className="divide-y divide-zinc-800/60">
+              {visibleSessions.map((session) => {
+                const status = computeStatus(session)
+                const lastActivity = session.last_activity_at ? timeAgo(session.last_activity_at) : '—'
+                const title = session.title ?? session.id.slice(0, 8)
+                return (
+                  <li key={session.id} className={session.archived ? 'opacity-60' : undefined}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectSession(session.id)}
+                      className="w-full text-left px-6 py-3 hover:bg-zinc-900/60 transition group"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm text-zinc-200 truncate flex-1 group-hover:text-zinc-100">
+                          {title}
+                        </span>
+                        {session.archived && (
+                          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium bg-zinc-800 text-zinc-600">
+                            archived
+                          </span>
+                        )}
+                        <span className={`shrink-0 text-[10px] px-1.5 py-0.5 rounded font-medium ${STATUS_COLORS[status]}`}>
+                          {STATUS_LABELS[status]}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-zinc-600 tabular-nums">{lastActivity}</div>
+                    </button>
+                  </li>
+                )
+              })}
+            </ul>
+            {archivedCount > 0 && (
+              <div className="px-6 py-2">
+                <button
+                  type="button"
+                  onClick={() => setShowArchived((v) => !v)}
+                  className="text-[11px] text-zinc-600 hover:text-zinc-400 transition italic"
+                >
+                  {showArchived
+                    ? `Hide ${archivedCount} archived`
+                    : `Show ${archivedCount} archived`}
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
