@@ -38,7 +38,6 @@ const {
 const {
   spawnSession,
   buildClaudeArgv,
-  OneLiveSessionPerEffortPrepError,
 } = await import('./spawn')
 import type { SpawnerChild, PtySpawner } from './spawn'
 const { __test__: R, register, get: regGet } = await import('./registry')
@@ -668,8 +667,10 @@ describe('spawnSession — US-005c ring buffer + grace period', () => {
   })
 })
 
-describe('spawnSession — one-live-session-per-effort', () => {
-  test('second spawnSession for the same effort surfaces OneLiveSessionPerEffortPrepError', async () => {
+describe('spawnSession — parallel live sessions (constraint lifted)', () => {
+  test('second spawnSession for the same effort now succeeds (constraint lifted)', async () => {
+    // Migration 3 dropped idx_sessions_one_live_per_effort.
+    // Multiple parallel spawns under the same effort are now allowed.
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), {
       name: 'P-onelive',
@@ -686,23 +687,26 @@ describe('spawnSession — one-live-session-per-effort', () => {
       { effort_id: effort.id, mode: 'autonomous' },
       { spawner: rec1.spawner },
     )
-    // r1's row has process_pid = 11 (non-NULL), so r2 must be refused.
     expect(getSessionById(getDb(), r1.id)?.process_pid).toBe(11)
 
+    // Second spawn must SUCCEED now.
     const rec2 = recordingSpawner(fakeChild(22))
     let err: unknown = null
+    let r2: Awaited<ReturnType<typeof spawnSession>> | null = null
     try {
-      await spawnSession(
+      r2 = await spawnSession(
         { effort_id: effort.id, mode: 'autonomous' },
         { spawner: rec2.spawner },
       )
     } catch (e) {
       err = e
     }
-    expect(err).toBeInstanceOf(OneLiveSessionPerEffortPrepError)
-    // The second spawner was NEVER called — prepareSpawn rejected before
-    // we got that far.
-    expect(rec2.calls.length).toBe(0)
+    expect(err).toBeNull()
+    expect(r2).not.toBeNull()
+    expect(r2?.id).not.toBe(r1.id)
+    // Both sessions should be live (process_pid set).
+    expect(getSessionById(getDb(), r1.id)?.process_pid).toBe(11)
+    expect(getSessionById(getDb(), r2!.id)?.process_pid).toBe(22)
   })
 })
 

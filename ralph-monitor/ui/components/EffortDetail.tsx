@@ -5,11 +5,15 @@
 //   - Toolbar: "+ New session" button
 //   - List of sessions with id short form, status badge, last_activity_at
 //   - Empty state if no sessions
+//   - For prd-kind efforts: PRD snapshot panels (stories, agents, commits, etc.)
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { authFetch, authEventSource } from '../auth'
 import type { Project } from '../../server/db/projects'
 import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
+import type { PRDRecord, LifecycleAppEvent } from '../../server/types'
+import { PrdSnapshotPanels } from './PrdSnapshotPanels'
 
 export interface EffortDetailProps {
   project: Project | null
@@ -54,6 +58,50 @@ function timeAgo(ms: number): string {
 
 export function EffortDetail({ project, effort, sessions, onSelectSession, onNewSession }: EffortDetailProps) {
   const [showArchived, setShowArchived] = useState(false)
+  const [prdSnapshot, setPrdSnapshot] = useState<PRDRecord | null>(null)
+
+  // For prd-kind efforts: fetch the snapshot on mount and whenever effort id changes.
+  useEffect(() => {
+    if (effort.kind !== 'prd') return
+    let cancelled = false
+
+    const fetchSnapshot = () => {
+      authFetch(`/api/efforts/${effort.id}/snapshot`)
+        .then((r) => r.ok ? r.json() : null)
+        .then((data) => {
+          if (!cancelled && data && data.status !== 'pending') {
+            setPrdSnapshot(data as PRDRecord)
+          }
+        })
+        .catch(() => {})
+    }
+
+    fetchSnapshot()
+
+    // Subscribe to SSE: re-fetch on effort.snapshot.updated (or effort.updated) for this effort.
+    let es: EventSource
+    try {
+      es = authEventSource('/events')
+    } catch {
+      return () => { cancelled = true }
+    }
+    es.addEventListener('update', (ev) => {
+      try {
+        const evt = JSON.parse((ev as MessageEvent).data) as LifecycleAppEvent
+        if (
+          (evt.type === 'effort.snapshot.updated' && evt.effort_id === effort.id) ||
+          (evt.type === 'effort.updated' && evt.effort.id === effort.id)
+        ) {
+          fetchSnapshot()
+        }
+      } catch {}
+    })
+
+    return () => {
+      cancelled = true
+      es.close()
+    }
+  }, [effort.id, effort.kind])
 
   const archivedCount = sessions.filter((s) => s.archived).length
   const visibleSessions = showArchived ? sessions : sessions.filter((s) => !s.archived)
@@ -150,6 +198,13 @@ export function EffortDetail({ project, effort, sessions, onSelectSession, onNew
               </div>
             )}
           </>
+        )}
+
+        {/* PRD snapshot panels — only for prd-kind efforts */}
+        {effort.kind === 'prd' && prdSnapshot && (
+          <div className="border-t border-zinc-800 mt-2">
+            <PrdSnapshotPanels snapshot={prdSnapshot} />
+          </div>
         )}
       </div>
     </div>

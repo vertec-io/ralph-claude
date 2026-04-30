@@ -51,6 +51,8 @@ export interface SidebarProps {
   sessions: Session[]
   liveSessionIds: Set<string>
   effortsLiveByProject?: Map<string, boolean>
+  /** Session IDs with recent live transcript activity (turn events). Used for pulse indicator. */
+  recentActivityIds?: Set<string>
   selectedProjectId: string | null
   onSelectProject: (id: string) => void
   selectedEffortId: string | null
@@ -256,6 +258,7 @@ interface SessionRowProps {
   session: Session
   selected: boolean
   liveSessionIds: Set<string>
+  recentActivityIds?: Set<string>
   onSelect: () => void
   onContextMenu: (e: React.MouseEvent) => void
   renamingId: string | null
@@ -268,6 +271,7 @@ function SessionRow({
   session,
   selected,
   liveSessionIds,
+  recentActivityIds,
   onSelect,
   onContextMenu,
   renamingId,
@@ -329,6 +333,12 @@ function SessionRow({
             <StatusIcon status={status} />
             <span className="text-xs truncate flex-1">{displayTitle}</span>
             <span className="text-[11px] text-zinc-600 tabular-nums shrink-0">{lastActivity}</span>
+            {recentActivityIds?.has(session.id) && (
+              <span
+                className="shrink-0 size-2 rounded-full bg-emerald-500 animate-pulse"
+                title="live activity"
+              />
+            )}
           </div>
         </button>
       )}
@@ -347,6 +357,7 @@ interface EffortRowProps {
   selected: boolean
   selectedSessionId: string | null
   liveSessionIds: Set<string>
+  recentActivityIds?: Set<string>
   onToggle: () => void
   onSelect: () => void
   onSelectSession: (id: string) => void
@@ -367,6 +378,7 @@ function EffortRow({
   selected,
   selectedSessionId,
   liveSessionIds,
+  recentActivityIds,
   onToggle,
   onSelect,
   onSelectSession,
@@ -481,6 +493,7 @@ function EffortRow({
               session={s}
               selected={s.id === selectedSessionId}
               liveSessionIds={liveSessionIds}
+              recentActivityIds={recentActivityIds}
               onSelect={() => onSelectSession(s.id)}
               onContextMenu={(e) => onSessionContextMenu(s, e)}
               renamingId={renamingId}
@@ -521,6 +534,7 @@ interface ProjectRowProps {
   selectedEffortId: string | null
   selectedSessionId: string | null
   liveSessionIds: Set<string>
+  recentActivityIds?: Set<string>
   expandedEfforts: Set<string>
   showArchivedEfforts: boolean
   showArchivedByEffort: Set<string>
@@ -551,6 +565,7 @@ function ProjectRow({
   selectedEffortId,
   selectedSessionId,
   liveSessionIds,
+  recentActivityIds,
   expandedEfforts,
   showArchivedEfforts,
   showArchivedByEffort,
@@ -691,6 +706,7 @@ function ProjectRow({
               selected={e.id === selectedEffortId}
               selectedSessionId={selectedSessionId}
               liveSessionIds={liveSessionIds}
+              recentActivityIds={recentActivityIds}
               onToggle={() => onToggleEffort(e.id)}
               onSelect={() => onSelectEffort(e.id)}
               onSelectSession={onSelectSession}
@@ -735,6 +751,7 @@ interface SectionProps {
   onSelectProject: (id: string) => void
   liveSessionIds: Set<string>
   effortsLiveByProject?: Map<string, boolean>
+  recentActivityIds?: Set<string>
   effortsByProject: Map<string, Effort[]>
   sessionsByEffort: Map<string, Session[]>
   selectedEffortId: string | null
@@ -771,6 +788,7 @@ function Section({
   selectedProjectId,
   onSelectProject,
   effortsLiveByProject,
+  recentActivityIds,
   effortsByProject,
   sessionsByEffort,
   selectedEffortId,
@@ -822,6 +840,7 @@ function Section({
               selectedEffortId={selectedEffortId}
               selectedSessionId={selectedSessionId}
               liveSessionIds={liveSessionIds}
+              recentActivityIds={recentActivityIds}
               expandedEfforts={expandedEfforts}
               showArchivedEfforts={showArchivedByProject.has(p.id)}
               showArchivedByEffort={showArchivedByEffort}
@@ -863,6 +882,7 @@ export function Sidebar({
   sessions,
   liveSessionIds,
   effortsLiveByProject,
+  recentActivityIds,
   selectedProjectId,
   onSelectProject,
   selectedEffortId,
@@ -1242,6 +1262,7 @@ export function Sidebar({
   const sharedSectionProps = {
     liveSessionIds,
     effortsLiveByProject,
+    recentActivityIds,
     effortsByProject,
     sessionsByEffort,
     selectedEffortId,

@@ -58,6 +58,12 @@ export function App() {
   const [efforts, setEfforts] = useState<Effort[]>([])
   const [sessions, setSessions] = useState<Session[]>([])
 
+  // Session live-activity state: tracks session IDs that have had recent
+  // transcript turn events (from session.activity SSE). Each entry auto-expires
+  // after 3 seconds via a per-session timer ref.
+  const [recentActivityIds, setRecentActivityIds] = useState<Set<string>>(new Set())
+  const activityTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
   const [selection, setSelection] = useSelection()
   const { projectId, effortId, sessionId } = selection
 
@@ -134,6 +140,30 @@ export function App() {
           try {
             const evt = JSON.parse(e.data)
             const t = evt.type
+            if (t === 'session.activity') {
+              // Live-activity pulse: add the session id to the recent set,
+              // replacing any existing timer to extend the highlight.
+              const sessionId = evt.id as string
+              if (sessionId) {
+                setRecentActivityIds((prev) => {
+                  const next = new Set(prev)
+                  next.add(sessionId)
+                  return next
+                })
+                const existingTimer = activityTimers.current.get(sessionId)
+                if (existingTimer !== undefined) clearTimeout(existingTimer)
+                const timer = setTimeout(() => {
+                  setRecentActivityIds((prev) => {
+                    const next = new Set(prev)
+                    next.delete(sessionId)
+                    return next
+                  })
+                  activityTimers.current.delete(sessionId)
+                }, 3000)
+                activityTimers.current.set(sessionId, timer)
+              }
+              return
+            }
             if (
               t?.startsWith('effort.') ||
               t?.startsWith('session.') ||
@@ -179,6 +209,7 @@ export function App() {
         efforts={efforts}
         sessions={sessions}
         liveSessionIds={new Set<string>()}
+        recentActivityIds={recentActivityIds}
         selectedProjectId={projectId}
         onSelectProject={(id) => setSelection({ projectId: id, effortId: null, sessionId: null })}
         selectedEffortId={effortId}

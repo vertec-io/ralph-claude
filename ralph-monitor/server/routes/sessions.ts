@@ -223,6 +223,11 @@ sessionsRouter.get('/api/sessions/:id/transcript/stream', async (c) => {
       } catch {
         // Client likely went away mid-write; the abort handler will clean up.
       }
+      // Broadcast a global session.activity event when a new turn lands so
+      // sidebar rows can show a live-activity pulse indicator.
+      if (event.type === 'turn') {
+        store.recordEvent({ type: 'session.activity', ts: Date.now(), id })
+      }
       if (event.type === 'gone' && !goneClosed) {
         goneClosed = true
         try {

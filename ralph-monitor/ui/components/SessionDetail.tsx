@@ -32,7 +32,7 @@
 //   /api/sessions/:id response also adds `status`, `live`, `attached`; we
 //   model those as an intersection type local to this component.
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Pencil } from 'lucide-react'
 import { authFetch, authEventSource, authWebSocket } from '../auth'
 import { SessionTranscript } from './SessionTranscript'
@@ -62,9 +62,11 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
   // not include it (it's not a DB field), but the SSE session.exited event does.
   const [exitCode, setExitCode] = useState<number | undefined>(undefined)
   const [turns, setTurns] = useState<Turn[]>([])
-  // Default to 'stream' — the chat-rendered view is still rough; raw PTY
-  // output is the more reliable surface today.
+  // Default to 'stream' for live-attached sessions, 'chat' for dormant/exited/orphaned.
+  // Initialized here as 'stream' then corrected once the session status is known.
   const [mode, setMode] = useState<ViewMode>('stream')
+  // Track whether we have set the mode default based on session status.
+  const defaultedRef = useRef(false)
   const [input, setInput] = useState('')
   const [resuming, setResuming] = useState(false)
   const [resumeError, setResumeError] = useState<string | null>(null)
@@ -80,6 +82,13 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
       renameInputRef.current.select()
     }
   }, [renamingTitle])
+
+  // Reset the defaulted flag whenever sessionId changes so the next load
+  // of session status triggers a fresh mode default.
+  useEffect(() => {
+    defaultedRef.current = false
+    setMode('stream')
+  }, [sessionId])
 
   // Fetch the session row + computed status on mount (or sessionId change).
   useEffect(() => {
@@ -102,6 +111,17 @@ export function SessionDetail({ sessionId, project, effort }: SessionDetailProps
     })()
     return () => { cancelled = true }
   }, [sessionId])
+
+  // Once session status is first known, set the default view mode:
+  //   live-attached → 'stream' (already the initial value)
+  //   everything else → 'chat' (show history immediately without Resume click)
+  useEffect(() => {
+    if (!session || defaultedRef.current) return
+    defaultedRef.current = true
+    if (session.status !== 'live-attached') {
+      setMode('chat')
+    }
+  }, [session?.status])
 
   // Subscribe to transcript SSE for live turn updates (US-010).
   // Always subscribed — the server emits a `snapshot` on connect and

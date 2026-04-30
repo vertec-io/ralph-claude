@@ -66,7 +66,6 @@ import {
   createSession,
   getSessionById,
   hardDeleteSession,
-  listSessionsByEffort,
   updateSession,
   OneLiveSessionPerEffortError,
 } from '../db/sessions'
@@ -207,19 +206,9 @@ async function prepareSpawnInner(
     resolvedCwd = resolvedCwd.slice(0, -1)
   }
 
-  // JS-level pre-check for one-live-session-per-effort. The partial unique
-  // index in sqlite is on `(effort_id) WHERE process_pid IS NOT NULL`, so a
-  // row with NULL pid (which is what prepareSpawn inserts) does NOT trip
-  // it. The lock above guarantees we're the only caller for this effort,
-  // so the read+write is atomic in effect even though sqlite isn't enforcing
-  // it.
-  const existing = listSessionsByEffort(db, input.effort_id)
-  const live = existing.find((s) => s.process_pid !== null)
-  if (live) {
-    throw new OneLiveSessionPerEffortPrepError(
-      `effort ${input.effort_id} already has a live session: ${live.id}`,
-    )
-  }
+  // Note: the one-live-session-per-effort constraint has been lifted (Migration 3
+  // drops idx_sessions_one_live_per_effort). Multiple parallel live sessions per
+  // effort are now allowed. The pre-check and throw have been removed.
 
   const uuid = crypto.randomUUID()
   const encoded = encodeClaudeProjectDir(resolvedCwd)
@@ -239,10 +228,10 @@ async function prepareSpawnInner(
       process_started_at: null,
     })
   } catch (err) {
-    // Defense-in-depth: if a row with process_pid != null somehow trips the
-    // partial unique index in between our pre-check and this INSERT (e.g.
-    // a future schema widening or an out-of-band insert), surface it as
-    // the same typed error so route handlers can translate uniformly.
+    // Defense-in-depth: the OneLiveSessionPerEffortError catch is kept as dead
+    // code after Migration 3 dropped the partial unique index. If somehow the
+    // index re-appeared (e.g. test rollback, schema change), this surfaces the
+    // right typed error so route handlers can translate uniformly.
     if (err instanceof OneLiveSessionPerEffortError) {
       throw new OneLiveSessionPerEffortPrepError(
         `effort ${input.effort_id} already has a live session (sqlite)`,
@@ -845,19 +834,8 @@ async function resumeSessionInner(args: {
   const { spawner, session, resolvedCwd, projectRootDir, hasJsonl } = args
   const db = getDb()
 
-  // 5. One-live-per-effort re-check. The session we're resuming is dormant
-  // by definition (status gate above), but a DIFFERENT session in the same
-  // effort might be live and would block us per the partial unique index.
-  // We check before spawn so a refusal doesn't leak a live PTY.
-  const siblings = listSessionsByEffort(db, session.effort_id)
-  const liveSibling = siblings.find(
-    (s) => s.process_pid !== null && s.id !== session.id,
-  )
-  if (liveSibling) {
-    throw new OneLiveSessionPerEffortPrepError(
-      `effort ${session.effort_id} already has a live session: ${liveSibling.id}`,
-    )
-  }
+  // 5. (One-live-per-effort re-check removed — constraint lifted by Migration 3.
+  //    Multiple parallel live sessions per effort are now allowed.)
 
   // 6. Argv. If a JSONL transcript already exists, --resume re-opens it
   // (claude reads the prior turns into context). If not (session was

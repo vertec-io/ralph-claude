@@ -218,11 +218,14 @@ function timeAgo(ms: number): string {
 
 export interface PrdSnapshotPanelsProps {
   snapshot: PRDRecord
-  onStoryClick: (id: string) => void
-  onFileClick: (path: string) => void
+  onStoryClick?: (id: string) => void
+  onFileClick?: (path: string) => void
 }
 
 export function PrdSnapshotPanels({ snapshot, onStoryClick, onFileClick }: PrdSnapshotPanelsProps) {
+  // Fallback no-ops so callers that don't provide routing handlers still work.
+  const handleStoryClick = onStoryClick ?? (() => {})
+  const handleFileClick = onFileClick ?? (() => {})
   const [showCompleted, setShowCompleted] = useState(false)
 
   const stories = snapshot.prd?.userStories ?? []
@@ -244,7 +247,7 @@ export function PrdSnapshotPanels({ snapshot, onStoryClick, onFileClick }: PrdSn
             {pendingDecisions.map(d => (
               <li key={d.path}>
                 <button
-                  onClick={() => onFileClick(d.path)}
+                  onClick={() => handleFileClick(d.path)}
                   className="font-mono text-amber-200 hover:text-amber-100 underline-offset-2 hover:underline truncate text-left w-full"
                 >
                   {d.path.replace(snapshot.taskDir + '/', '')}
@@ -265,7 +268,7 @@ export function PrdSnapshotPanels({ snapshot, onStoryClick, onFileClick }: PrdSn
           <ul className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
             {buckets.active.map(s => (
               <li key={s.id}
-                onClick={() => onStoryClick(s.id)}
+                onClick={() => handleStoryClick(s.id)}
                 className="flex items-center gap-1.5 text-emerald-200 cursor-pointer hover:text-emerald-100"
               >
                 <span className="font-mono">{s.id}</span>
@@ -278,21 +281,21 @@ export function PrdSnapshotPanels({ snapshot, onStoryClick, onFileClick }: PrdSn
       )}
 
       {/* Agents panel */}
-      <AgentsPanel agents={snapshot.agents} onStoryClick={onStoryClick} />
+      <AgentsPanel agents={snapshot.agents} onStoryClick={handleStoryClick} />
 
       {/* User stories */}
       <section className="px-6 py-4 space-y-5">
         {buckets.active.length > 0 && (
           <StoryGroup label="active" count={buckets.active.length} color="emerald"
-            stories={buckets.active} bucket="active" onSelect={onStoryClick} />
+            stories={buckets.active} bucket="active" onSelect={handleStoryClick} />
         )}
         {buckets.pending.length > 0 && (
           <StoryGroup label="pending" count={buckets.pending.length} color="zinc"
-            stories={buckets.pending} bucket="pending" onSelect={onStoryClick} />
+            stories={buckets.pending} bucket="pending" onSelect={handleStoryClick} />
         )}
         {buckets.blocked.length > 0 && (
           <StoryGroup label="blocked" count={buckets.blocked.length} color="violet"
-            stories={buckets.blocked} bucket="blocked" onSelect={onStoryClick} />
+            stories={buckets.blocked} bucket="blocked" onSelect={handleStoryClick} />
         )}
         {buckets.completed.length > 0 && (
           <div>
@@ -308,7 +311,7 @@ export function PrdSnapshotPanels({ snapshot, onStoryClick, onFileClick }: PrdSn
               <ul className="space-y-0.5 ml-4 border-l border-zinc-900 pl-3">
                 {buckets.completed.map(s => (
                   <li key={s.id}
-                    onClick={() => onStoryClick(s.id)}
+                    onClick={() => handleStoryClick(s.id)}
                     className="flex items-center gap-2 text-xs text-zinc-500 hover:text-zinc-300 cursor-pointer"
                   >
                     <span className="text-emerald-700">✓</span>
@@ -333,7 +336,7 @@ export function PrdSnapshotPanels({ snapshot, onStoryClick, onFileClick }: PrdSn
             return (
               <li key={d.path}>
                 <button
-                  onClick={() => onFileClick(d.path)}
+                  onClick={() => handleFileClick(d.path)}
                   className={`font-mono text-left hover:text-sky-400 hover:underline underline-offset-2 ${
                     isDecisionsDir ? 'text-zinc-400' : 'text-zinc-300'
                   }`}

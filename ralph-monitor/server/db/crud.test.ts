@@ -34,7 +34,6 @@ import {
   listSessionsByEffort,
   hardDeleteSession,
   SessionIdCollisionError,
-  OneLiveSessionPerEffortError,
 } from './sessions'
 
 function freshDb(): Database {
@@ -241,8 +240,10 @@ describe('createSession id contract', () => {
   })
 })
 
-describe('one-live-session-per-effort partial unique index', () => {
-  test('second live session for same effort throws OneLiveSessionPerEffortError', () => {
+describe('parallel live sessions per effort (constraint lifted)', () => {
+  test('two live sessions for the same effort are now allowed', () => {
+    // The idx_sessions_one_live_per_effort index was dropped in Migration 3.
+    // Multiple concurrent live sessions (process_pid != null) per effort are permitted.
     const db = freshDb()
     const dir = tmpProjectDir()
     try {
@@ -258,17 +259,21 @@ describe('one-live-session-per-effort partial unique index', () => {
       })
       expect(first.process_pid).toBe(1234)
 
-      // Second live session must fail with our typed error.
-      expect(() => createSession(db, {
-        id: crypto.randomUUID(),
-        effort_id: effortId,
-        mode: 'autonomous',
-        jsonl_path: '/tmp/s2.jsonl',
-        process_pid: 5678,
-        process_started_at: Date.now(),
-      })).toThrow(OneLiveSessionPerEffortError)
+      // Second live session must now SUCCEED (constraint lifted).
+      let second: ReturnType<typeof createSession> | null = null
+      expect(() => {
+        second = createSession(db, {
+          id: crypto.randomUUID(),
+          effort_id: effortId,
+          mode: 'autonomous',
+          jsonl_path: '/tmp/s2.jsonl',
+          process_pid: 5678,
+          process_started_at: Date.now(),
+        })
+      }).not.toThrow()
+      expect(second).not.toBeNull()
 
-      // Third session with NULL pid is exempt — partial index doesn't apply.
+      // Third session with NULL pid is also fine.
       const terminated = createSession(db, {
         id: crypto.randomUUID(),
         effort_id: effortId,
@@ -277,14 +282,14 @@ describe('one-live-session-per-effort partial unique index', () => {
       })
       expect(terminated.process_pid).toBeNull()
 
-      const live = listSessionsByEffort(db, effortId)
-      expect(live.length).toBe(2)
+      const all = listSessionsByEffort(db, effortId)
+      expect(all.length).toBe(3)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
 
-  test('hardDeleteSession on the live row clears the partial-index slot', () => {
+  test('hardDeleteSession on a live row succeeds and new live row can be added', () => {
     const db = freshDb()
     const dir = tmpProjectDir()
     try {
@@ -299,7 +304,7 @@ describe('one-live-session-per-effort partial unique index', () => {
       hardDeleteSession(db, live1.id)
       expect(getSessionById(db, live1.id)).toBeNull()
 
-      // After deleting, a new live session is allowed.
+      // A new live session is always allowed.
       expect(() => createSession(db, {
         id: crypto.randomUUID(),
         effort_id: effortId,

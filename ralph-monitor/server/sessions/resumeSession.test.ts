@@ -36,7 +36,6 @@ const {
   SessionAlreadyLiveError,
   SessionInGraceWindowError,
   JsonlMissingError,
-  OneLiveSessionPerEffortPrepError,
 } = await import('./spawn')
 import type { SpawnerChild, PtySpawner } from './spawn'
 const { __test__: R, register, get: regGet } = await import('./registry')
@@ -372,7 +371,9 @@ describe('resumeSession — failure modes', () => {
     expect(rec.calls.length).toBe(0)
   })
 
-  test('OneLiveSessionPerEffortPrepError when a different session in the same effort is live', async () => {
+  test('resuming a dormant session succeeds even when a sibling session in the same effort is live (constraint lifted)', async () => {
+    // Migration 3 dropped idx_sessions_one_live_per_effort. Resume is now
+    // allowed even if another session in the same effort is already live.
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), {
       name: 'P-one-per-effort',
@@ -396,9 +397,11 @@ describe('resumeSession — failure modes', () => {
       process_started_at: Date.now(),
     })
 
-    // Target: dormant.
+    // Target: dormant, with a JSONL file so --resume can be used.
     const dormantId = crypto.randomUUID()
     const dormantJsonl = tmpJsonl()
+    // Write a minimal valid JSONL so the file exists on disk.
+    require('node:fs').writeFileSync(dormantJsonl, '')
     createSession(getDb(), {
       id: dormantId,
       effort_id: effort.id,
@@ -408,13 +411,15 @@ describe('resumeSession — failure modes', () => {
 
     const rec = recordingSpawner()
     let err: unknown = null
+    let result: Awaited<ReturnType<typeof resumeSession>> | null = null
     try {
-      await resumeSession({ session_id: dormantId }, { spawner: rec.spawner })
+      result = await resumeSession({ session_id: dormantId }, { spawner: rec.spawner })
     } catch (e) {
       err = e
     }
-    expect(err).toBeInstanceOf(OneLiveSessionPerEffortPrepError)
-    expect(rec.calls.length).toBe(0)
+    expect(err).toBeNull()
+    expect(result).not.toBeNull()
+    expect(result?.id).toBe(dormantId)
 
     // Both rows preserved.
     expect(getSessionById(getDb(), liveId)).not.toBeNull()

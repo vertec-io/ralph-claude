@@ -85,7 +85,19 @@ ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived);
 `
 
+// Migration 3: lift the one-live-session-per-effort constraint.
+//
+// The partial unique index `idx_sessions_one_live_per_effort` previously
+// enforced at most one session with a non-null process_pid per effort. We are
+// removing this constraint to allow multiple parallel live sessions under the
+// same effort. DROP INDEX IF EXISTS is safe on both fresh (where the index was
+// just created by MIGRATION_1) and existing DBs.
+const MIGRATION_3 = `
+DROP INDEX IF EXISTS idx_sessions_one_live_per_effort;
+`
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: MIGRATION_1 },
   { version: 2, sql: MIGRATION_2 },
+  { version: 3, sql: MIGRATION_3 },
 ]

@@ -20,7 +20,6 @@ const {
   prepareSpawn,
   EffortNotFoundError,
   CwdResolutionError,
-  OneLiveSessionPerEffortPrepError,
 } = await import('./spawn')
 const { __test__: M } = await import('./spawnMutex')
 
@@ -188,7 +187,7 @@ describe('prepareSpawn — error paths', () => {
   })
 })
 
-describe('prepareSpawn — one-live-session-per-effort', () => {
+describe('prepareSpawn — parallel spawns (constraint lifted)', () => {
   test('a row with NULL process_pid does NOT block a second prepareSpawn', async () => {
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), {
@@ -207,7 +206,9 @@ describe('prepareSpawn — one-live-session-per-effort', () => {
     expect(r2.uuid).not.toBe(r1.uuid)
   })
 
-  test('a row with non-NULL process_pid blocks a second prepareSpawn (typed error)', async () => {
+  test('a row with non-NULL process_pid no longer blocks a second prepareSpawn (constraint lifted)', async () => {
+    // Migration 3 dropped the partial unique index, so multiple live sessions
+    // per effort are now allowed. prepareSpawn no longer throws for this case.
     const dir = tmpProjectDir()
     const { projectId } = createProject(getDb(), {
       name: 'P-blocking',
@@ -224,9 +225,9 @@ describe('prepareSpawn — one-live-session-per-effort', () => {
     // this; here we bypass and write directly).
     updateSession(getDb(), r1.uuid, { process_pid: 99999, process_started_at: Date.now() })
 
-    await expect(
-      prepareSpawn({ effort_id: effort.id, mode: 'autonomous' }),
-    ).rejects.toBeInstanceOf(OneLiveSessionPerEffortPrepError)
+    // Second prepareSpawn must now SUCCEED.
+    const r2 = await prepareSpawn({ effort_id: effort.id, mode: 'autonomous' })
+    expect(r2.uuid).not.toBe(r1.uuid)
   })
 })
 

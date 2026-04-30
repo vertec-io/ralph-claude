@@ -840,7 +840,9 @@ describe('POST /api/sessions', () => {
     expect(body.details?.working_dir).toBe(otherDir)
   })
 
-  test('one-live-session-per-effort -> 409 on second POST', async () => {
+  test('two parallel live sessions in the same effort are allowed (constraint lifted)', async () => {
+    // Migration 3 dropped idx_sessions_one_live_per_effort; second POST must
+    // succeed with 201 and both sessions must appear in the effort's session list.
     const { effortId } = await makeProjectAndEffort('Spawn-OneLive')
 
     const r1 = await app.fetch(
@@ -851,6 +853,7 @@ describe('POST /api/sessions', () => {
       }),
     )
     expect(r1.status).toBe(201)
+    const s1 = await r1.json() as { id: string }
 
     const r2 = await app.fetch(
       new Request('http://test/api/sessions', {
@@ -859,8 +862,18 @@ describe('POST /api/sessions', () => {
         body: JSON.stringify({ effort_id: effortId, mode: 'autonomous' }),
       }),
     )
-    expect(r2.status).toBe(409)
-    expect((await r2.json()).error).toBe('one_live_session_per_effort')
+    expect(r2.status).toBe(201)
+    const s2 = await r2.json() as { id: string }
+
+    // Both sessions appear in the effort's session list.
+    const listRes = await app.fetch(
+      new Request(`http://test/api/efforts/${effortId}/sessions`),
+    )
+    expect(listRes.status).toBe(200)
+    const { sessions } = await listRes.json() as { sessions: { id: string }[] }
+    const ids = sessions.map((s) => s.id)
+    expect(ids).toContain(s1.id)
+    expect(ids).toContain(s2.id)
   })
 
   test('argv assertion: when resolved cwd != project.root_dir, includes --add-dir <project.root_dir>', async () => {

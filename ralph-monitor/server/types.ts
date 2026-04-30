@@ -146,6 +146,7 @@ export type LifecycleAppEvent =
   | { type: 'session.updated'; ts: number; session: Session }
   | { type: 'session.deleted'; ts: number; id: string }
   | { type: 'session.exited'; ts: number; id: string; exit_code?: number }
+  | { type: 'session.activity'; ts: number; id: string }
   | {
       type: 'lifecycle.snapshot'
       ts: number

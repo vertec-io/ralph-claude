@@ -29,8 +29,8 @@ describe('runMigrations', () => {
   test('sets PRAGMA user_version to the latest migration version on first run', () => {
     const db = freshDb()
     const v = db.query('PRAGMA user_version').get() as { user_version: number }
-    // Version 2 is the current latest migration (migration 2 adds sessions.archived).
-    expect(v.user_version).toBe(2)
+    // Version 3 is the current latest migration (migration 3 drops the one-live-per-effort index).
+    expect(v.user_version).toBe(3)
   })
 
   test('is a no-op when run twice', () => {
@@ -38,12 +38,14 @@ describe('runMigrations', () => {
     // Second run must not throw and must not bump user_version past the latest.
     expect(() => runMigrations(db)).not.toThrow()
     const v = db.query('PRAGMA user_version').get() as { user_version: number }
-    expect(v.user_version).toBe(2)
+    expect(v.user_version).toBe(3)
   })
 })
 
 describe('schema invariants', () => {
-  test('partial unique index forbids two live sessions per effort', () => {
+  test('multiple live sessions per effort are now allowed (constraint lifted by migration 3)', () => {
+    // Migration 3 drops idx_sessions_one_live_per_effort so multiple sessions
+    // with a non-null process_pid can coexist under the same effort.
     const db = freshDb()
     const now = Date.now()
     db.run(
@@ -61,20 +63,16 @@ describe('schema invariants', () => {
        VALUES (?, ?, ?, 'autonomous', ?, ?)`,
       ['s1', 'e1', '/tmp/s1.jsonl', 1234, now],
     )
-    // Second live session for the same effort must violate the unique index.
-    let caught: unknown
-    try {
+    // Second live session for the same effort must now SUCCEED.
+    expect(() =>
       db.run(
         `INSERT INTO sessions (id, effort_id, jsonl_path, mode, process_pid, created_at)
          VALUES (?, ?, ?, 'autonomous', ?, ?)`,
         ['s2', 'e1', '/tmp/s2.jsonl', 5678, now],
-      )
-    } catch (e) { caught = e }
-    expect(caught).toBeInstanceOf(SQLiteError)
-    expect(String((caught as Error).message)).toMatch(/UNIQUE/i)
+      ),
+    ).not.toThrow()
 
-    // But a terminated session (process_pid IS NULL) is allowed alongside a
-    // live one — the index is partial.
+    // Terminated session (process_pid IS NULL) is also fine.
     expect(() =>
       db.run(
         `INSERT INTO sessions (id, effort_id, jsonl_path, mode, created_at)
@@ -82,6 +80,10 @@ describe('schema invariants', () => {
         ['s3', 'e1', '/tmp/s3.jsonl', now],
       ),
     ).not.toThrow()
+
+    // Verify all three rows exist.
+    const count = db.query('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }
+    expect(count.n).toBe(3)
   })
 
   test('FK cascade deletes efforts and sessions when project is removed', () => {
