@@ -20,7 +20,7 @@ afterEach(() => {
 function fakeSession(overrides: Partial<Session> = {}): Session {
   return {
     id: crypto.randomUUID(),
-    effort_id: 'effort-1',
+    project_id: 'project-1',
     working_dir: null,
     jsonl_path: '/tmp/fake.jsonl',
     title: null,
@@ -30,6 +30,7 @@ function fakeSession(overrides: Partial<Session> = {}): Session {
     last_activity_at: null,
     created_at: Date.now(),
     archived: false,
+    pinned: false,
     ...overrides,
   }
 }
@@ -37,7 +38,7 @@ function fakeSession(overrides: Partial<Session> = {}): Session {
 function fakeHandle(sessionId: string, opts: { exited?: boolean } = {}): PtyHandle {
   return {
     sessionId,
-    effortId: 'effort-1',
+    projectId: 'project-1',
     pid: 999,
     buffer: new RingBuffer(1024),
     exited: opts.exited ?? false,

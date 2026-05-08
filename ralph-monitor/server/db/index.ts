@@ -4,14 +4,8 @@
 //   $RALPH_MONITOR_DB if set, else ~/.config/ralph-monitor/ralph-monitor.db
 // The parent directory is created with mode 0o700 if missing.
 //
-// Every connection enables `PRAGMA foreign_keys = ON` (sqlite default is OFF
-// per-connection, so this matters even though we only open once).
-//
+// Every connection enables `PRAGMA foreign_keys = ON`.
 // Migrations run lazily on first getDb() call.
-//
-// Per-table CRUD lives in ./projects.ts, ./efforts.ts, ./sessions.ts. We
-// re-export the row types and the helpers that callers reach for most often
-// so `import { ... } from './db'` keeps working as a one-stop entry point.
 
 import { Database } from 'bun:sqlite'
 import { mkdirSync } from 'node:fs'
@@ -31,8 +25,6 @@ export function getDb(): Database {
   if (_db) return _db
   const dbPath = resolveDbPath()
   const parent = dirname(dbPath)
-  // mode 0o700 — owner-only. mkdirSync with recursive:true won't throw if it
-  // exists. The mode arg only applies to dirs that get created.
   mkdirSync(parent, { recursive: true, mode: 0o700 })
   const db = new Database(dbPath, { create: true })
   db.exec('PRAGMA foreign_keys = ON')
@@ -48,9 +40,6 @@ export function closeDb(): void {
   }
 }
 
-// Re-exports from the per-table modules so consumers can import everything
-// they need from `./db`. The modules themselves remain the source of truth —
-// nothing here re-implements behavior.
 export {
   createProject,
   getProjectById,
@@ -71,38 +60,36 @@ export type {
 } from './projects'
 
 export {
-  createEffort,
-  getEffortById,
-  listEffortsByProject,
-  listAllEfforts,
-  updateEffort,
-  archiveEffort,
-  unarchiveEffort,
-  hardDeleteEffort,
-  EffortPrdPathRequiredError,
-} from './efforts'
-export type {
-  Effort,
-  EffortKind,
-  EffortStatus,
-  CreateEffortInput,
-  ListEffortsFilter,
-  UpdateEffortPatch,
-} from './efforts'
-
-export {
   createSession,
   getSessionById,
-  listSessionsByEffort,
+  getSessionByJsonlPath,
+  listSessionsByProject,
   listSessionsWithPid,
   updateSession,
   hardDeleteSession,
   SessionIdCollisionError,
-  OneLiveSessionPerEffortError,
+  JsonlPathCollisionError,
 } from './sessions'
 export type {
   Session,
   SessionMode,
   CreateSessionInput,
+  ListSessionsFilter,
   UpdateSessionPatch,
 } from './sessions'
+
+export {
+  upsertPrdSpec,
+  getPrdSpecById,
+  listPrdSpecsByProject,
+  listPrdSpecsBySession,
+  listSessionsByPrdSpec,
+  hardDeletePrdSpec,
+  setSessionPrds,
+  addSessionPrd,
+  removeSessionPrd,
+} from './prdSpecs'
+export type {
+  PrdSpec,
+  UpsertPrdSpecInput,
+} from './prdSpecs'

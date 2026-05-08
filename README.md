@@ -126,6 +126,32 @@ cp -r skills/ralph-handoff ~/.claude/skills/
 cp -r skills/research-prd ~/.claude/skills/
 ```
 
+## Monitor app
+
+The `ralph-monitor/` directory contains a local web app that provides real-time observability for Ralph PRDs and a Claude conversation manager (projects → efforts → sessions). See [ralph-monitor/README.md](ralph-monitor/README.md) for full details.
+
+**Install Bun** (required runtime):
+
+```bash
+# Linux / macOS
+curl -fsSL https://bun.sh/install | bash
+
+# Windows (PowerShell)
+powershell -c "irm bun.sh/install.ps1 | iex"
+```
+
+See [bun.sh](https://bun.sh) for other installation options.
+
+**Run the monitor:**
+
+```bash
+cd ralph-monitor
+bun install
+bun run dev
+```
+
+This starts the server on `127.0.0.1:7777` and the UI on `http://localhost:5173`.
+
 ## Directory Structure
 
 Each effort (feature or bug investigation) gets its own subdirectory:

@@ -1,1539 +1,504 @@
-// Sidebar — lifecycle-bucketed project tree (US-014a).
+// Sidebar — projects + per-project conversation list (Recents / Pinned / More).
 //
-// Three collapsible sections:
-//   Active   — pinned projects + projects with a live session + newly-created
-//              (created_at < 30d) projects that have never been opened
-//   Recent   — all other non-archived projects (last_opened_at within 30d, or
-//              old last_opened_at, or never-opened but created >30d ago)
-//   Archived — soft-deleted projects, collapsed by default
+// Layout:
 //
-// Bucketing rule interpretation:
-//   The AC says "Recent (last_opened_at within 30d AND no live session)".
-//   We treat this as the *primary* path into Recent, not as a hard filter.
-//   Any non-archived, non-pinned, non-live project that doesn't qualify for
-//   Active lands in Recent regardless of the age of last_opened_at.
-//   The 30-day threshold only matters for the never-opened boundary: a project
-//   that was never opened AND is freshly created (<30d) is promoted to Active.
-//   Otherwise it falls into Recent (shown with '—' time).
+//   [+ New project]                                  ← top action
 //
-// US-014b additions:
-//   Each project node expands to show its efforts (excluding archived ones unless
-//   the per-project 'show archived' toggle is on). Each effort expands to show
-//   sessions with status icon + title + last-activity timestamp.
+//   ── PROJECTS ──
+//   ▾ project-name                                  ← expandable
+//       ▸ Recents (5)                               ← default-expanded
+//           ● live-pulse  conversation-title
+//             …
+//       ▸ Pinned (n)                                ← when n > 0
+//       [ See more (k) ]                            ← when total > 5
+//   ▸ another-project
 //
-// US-014c additions:
-//   - Right-click context menus on project / effort / session rows.
-//   - Selection encoded in URL hash via useSelection() (hoisted to App.tsx).
-//   - Auto-expand: when selection changes (e.g. on page load with a deep link),
-//     expand the relevant project + effort so the selected node is visible.
+// Selection drives `#/p/:pid/c/:cid`. Clicking a project header selects the
+// project (no conversation). Clicking a conversation row sets both.
 
-import { useEffect, useRef, useState } from 'react'
-import { Circle, CircleAlert, CircleSlash, CircleOff, ChevronRight, ChevronDown, Plus, Pin, Pencil } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { ChevronRight, ChevronDown, Plus, Pin, PinOff, Pencil, MoreHorizontal, Archive } from 'lucide-react'
 import type { Project } from '../../server/db/projects'
-import type { Effort } from '../../server/db/efforts'
 import type { Session } from '../../server/db/sessions'
-import type { UnmanagedPRDItem } from '../../server/routes/unmanaged'
 import { authFetch } from '../auth'
-import { ContextMenu, useContextMenu } from './ContextMenu'
-import type { MenuItem } from './ContextMenu'
-import { NewProjectDialog } from './NewProjectDialog'
-import { NewEffortDialog } from './NewEffortDialog'
-import { NewSessionDialog } from './NewSessionDialog'
-import { ConfirmDeleteProjectDialog } from './ConfirmDeleteProjectDialog'
-import { ConfirmDeleteEffortDialog } from './ConfirmDeleteEffortDialog'
-import { ConfirmDeleteSessionDialog } from './ConfirmDeleteSessionDialog'
-
-export type SessionStatus = 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
+import { ContextMenu, useContextMenu, type MenuItem } from './ContextMenu'
 
 export interface SidebarProps {
   projects: Project[]
-  efforts: Effort[]
-  sessions: Session[]
+  sessionsByProject: Map<string, Session[]>
+  /** Session IDs in the registry's live-attached set. */
   liveSessionIds: Set<string>
-  effortsLiveByProject?: Map<string, boolean>
-  /** Session IDs with recent live transcript activity (turn events). Used for pulse indicator. */
-  recentActivityIds?: Set<string>
+  /** Session IDs with recent live transcript activity. Pulses for ~3s. */
+  recentActivityIds: Set<string>
   selectedProjectId: string | null
-  onSelectProject: (id: string) => void
-  selectedEffortId: string | null
-  onSelectEffort: (id: string) => void
-  selectedSessionId: string | null
-  onSelectSession: (id: string) => void
-  /** List of unmanaged PRDs to display. When non-empty, renders a section above the project tree. */
-  unmanaged?: UnmanagedPRDItem[]
-  /** Called when the user clicks an unmanaged PRD item to open the adopt dialog. */
-  onAdopt?: (item: UnmanagedPRDItem) => void
-  /** @deprecated Use unmanaged + onAdopt instead. Kept for backwards compat during migration. */
-  unmanagedPrds?: React.ReactNode
-  // Called after a mutation so the parent can re-fetch projects/efforts/sessions.
-  onRefresh?: () => void
-  // Called after a new session is created so the parent can navigate to it.
-  onSessionCreated?: (projectId: string, effortId: string, sessionId: string) => void
-  // Callbacks for hoisting dialog state to App.tsx so main-content buttons work too.
-  onOpenNewProject?: () => void
-  onOpenNewEffort?: (target: { projectId: string; rootDir: string }) => void
-  onOpenNewSession?: (target: { projectId: string; effortId: string; effortName: string; effortWorkingDir: string | null; projectRootDir: string }) => void
+  selectedConversationId: string | null
+  onSelectProject: (projectId: string) => void
+  onSelectConversation: (projectId: string, conversationId: string) => void
+  onOpenNewProject: () => void
+  onOpenNewSession: (projectId: string) => void
+  onRefresh: () => void
 }
 
-export interface BucketedProjects {
-  active: Project[]
-  recent: Project[]
-  archived: Project[]
-}
-
-// Pure bucketing function — exported for unit tests.
-//
-// Priority order:
-//   1. archived → archived bucket regardless of anything else
-//   2. pinned || hasLiveSession → active
-//   3. never-opened + newly-created (<30d) → active
-//   4. everything else → recent
-export function bucketProjects(
-  projects: Project[],
-  liveSessionIds: Set<string>,
-  effortsLiveByProject?: Map<string, boolean>,
-  now: number = Date.now(),
-): BucketedProjects {
-  const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000
-  const active: Project[] = []
-  const recent: Project[] = []
-  const archived: Project[] = []
-
-  for (const p of projects) {
-    if (p.archived) {
-      archived.push(p)
-      continue
-    }
-
-    const hasLiveSession = effortsLiveByProject?.get(p.id) === true
-
-    if (p.pinned || hasLiveSession) {
-      active.push(p)
-      continue
-    }
-
-    if (!p.last_opened_at) {
-      // Never opened — promote to Active only if freshly created
-      if (p.created_at && now - p.created_at < THIRTY_DAYS_MS) {
-        active.push(p)
-      } else {
-        recent.push(p)
-      }
-      continue
-    }
-
-    // Has a last_opened_at — all non-archived non-pinned non-live projects
-    // land in Recent regardless of how old last_opened_at is.
-    recent.push(p)
-  }
-
-  return { active, recent, archived }
-}
-
-// Group efforts by project_id — exported for unit tests.
-export function groupEffortsByProject(efforts: Effort[]): Map<string, Effort[]> {
-  const map = new Map<string, Effort[]>()
-  for (const e of efforts) {
-    const list = map.get(e.project_id) ?? []
-    list.push(e)
-    map.set(e.project_id, list)
-  }
-  return map
-}
-
-// Group sessions by effort_id — exported for unit tests.
-export function groupSessionsByEffort(sessions: Session[]): Map<string, Session[]> {
-  const map = new Map<string, Session[]>()
-  for (const s of sessions) {
-    const list = map.get(s.effort_id) ?? []
-    list.push(s)
-    map.set(s.effort_id, list)
-  }
-  return map
-}
-
-// Client-side status approximation.
-//
-// The server's computeSessionStatus uses the PTY registry (in-memory handle with
-// `handle.exited` flag) which is not available in the client. The client only has
-// liveSessionIds — a set of session IDs that currently have a live, attached PTY
-// handle, broadcast via SSE. This means:
-//
-//   - 'exited' cannot be distinguished from 'dormant' on the client. The exited
-//     state is a transient grace window during which the PTY handle is still in
-//     the registry but handle.exited === true. From the client's perspective,
-//     once a session is no longer in liveSessionIds, we treat it as 'dormant'.
-//     The session detail view can show a more nuanced state via a direct API call.
-//
-//   - 'live-attached' vs 'live-orphaned': if a session ID is in liveSessionIds we
-//     know the server has an active PTY handle → 'live-attached'. If it's NOT in
-//     liveSessionIds but has a non-null process_pid, the process is orphaned.
-export function computeStatusClient(
-  session: Session,
-  liveSessionIds: Set<string>,
-): SessionStatus {
-  if (liveSessionIds.has(session.id) && session.process_pid != null) {
-    return 'live-attached'
-  }
-  if (!liveSessionIds.has(session.id) && session.process_pid != null) {
-    return 'live-orphaned'
-  }
-  // process_pid == null (or in liveSessionIds but pid is null, which shouldn't
-  // happen in practice) — treat as dormant.
-  return 'dormant'
-}
-
-// Status icon — maps a SessionStatus to a lucide-react icon.
-function StatusIcon({ status }: { status: SessionStatus }) {
-  switch (status) {
-    case 'live-attached':
-      return <Circle fill="currentColor" className="text-green-500 w-3 h-3 shrink-0" />
-    case 'live-orphaned':
-      return <CircleAlert className="text-yellow-500 w-3 h-3 shrink-0" />
-    case 'dormant':
-      return <CircleSlash className="text-zinc-400 w-3 h-3 shrink-0" />
-    case 'exited':
-      return <CircleOff className="text-zinc-300/50 w-3 h-3 shrink-0" />
-  }
-}
-
-// Small helper — same shape as timeAgo in App.tsx but lives here so Sidebar
-// has no cross-file dependency on App internals.
-function timeAgo(ms: number): string {
-  const diff = Date.now() - ms
-  if (diff < 0) return 'in future'
-  const s = Math.floor(diff / 1000)
-  if (s < 60) return `${s}s ago`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
-}
-
-// ---------------------------------------------------------------------------
-// API mutation helpers
-// ---------------------------------------------------------------------------
-
-async function patchProject(id: string, patch: Record<string, unknown>): Promise<Response> {
-  return authFetch(`/api/projects/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  })
-}
-
-async function patchEffort(id: string, patch: Record<string, unknown>): Promise<Response> {
-  return authFetch(`/api/efforts/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  })
-}
-
-async function patchSession(id: string, patch: Record<string, unknown>): Promise<Response> {
-  return authFetch(`/api/sessions/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(patch),
-  })
-}
-
-// Kill: US-016c will add the actual endpoint. For now we POST to
-// /api/sessions/:id/kill and swallow 404/501 silently; a real error will be
-// surfaced as a console.error + alert so the user knows something went wrong.
-async function killSession(id: string): Promise<void> {
-  const r = await authFetch(`/api/sessions/${id}/kill`, { method: 'POST' })
-  if (!r.ok && r.status !== 404 && r.status !== 501) {
-    const body = await r.json().catch(() => ({}))
-    throw new Error((body as { error?: string }).error ?? `HTTP ${r.status}`)
-  }
-}
-
-// ---------------------------------------------------------------------------
-// SessionRow
-// ---------------------------------------------------------------------------
-
-interface SessionRowProps {
-  session: Session
-  selected: boolean
-  liveSessionIds: Set<string>
-  recentActivityIds?: Set<string>
-  onSelect: () => void
-  onContextMenu: (e: React.MouseEvent) => void
-  renamingId: string | null
-  onRenameCommit: (id: string, name: string) => void
-  onRenameCancel: () => void
-  dimmed?: boolean
-}
-
-function SessionRow({
-  session,
-  selected,
-  liveSessionIds,
-  recentActivityIds,
-  onSelect,
-  onContextMenu,
-  renamingId,
-  onRenameCommit,
-  onRenameCancel,
-  dimmed,
-}: SessionRowProps) {
-  const status = computeStatusClient(session, liveSessionIds)
-  const lastActivity = session.last_activity_at ? timeAgo(session.last_activity_at) : '—'
-  const displayTitle = session.title ?? session.id.slice(0, 8)
-  const isRenaming = renamingId === session.id
-  const renameInputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (isRenaming && renameInputRef.current) {
-      renameInputRef.current.focus()
-      renameInputRef.current.select()
-    }
-  }, [isRenaming])
-
-  return (
-    <li className={dimmed ? 'opacity-60' : undefined}>
-      {isRenaming ? (
-        <div className="pl-10 pr-3 py-1.5">
-          <input
-            ref={renameInputRef}
-            defaultValue={session.title ?? ''}
-            placeholder={session.id.slice(0, 8)}
-            className="w-full text-xs bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none min-w-0"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                const v = (e.target as HTMLInputElement).value.trim()
-                if (v) onRenameCommit(session.id, v)
-                else onRenameCancel()
-              } else if (e.key === 'Escape') {
-                onRenameCancel()
-              }
-            }}
-            onBlur={(e) => {
-              const v = e.target.value.trim()
-              if (v) onRenameCommit(session.id, v)
-              else onRenameCancel()
-            }}
-            onClick={(e) => e.stopPropagation()}
-          />
-        </div>
-      ) : (
-        <button
-          onClick={onSelect}
-          onContextMenu={onContextMenu}
-          data-testid={`session-row-${session.id}`}
-          className={`w-full text-left pl-10 pr-3 py-1.5 rounded transition ${
-            selected
-              ? 'bg-zinc-700/60 text-zinc-100'
-              : 'hover:bg-zinc-800/60 text-zinc-400'
-          }`}
-        >
-          <div className="flex items-center gap-1.5 min-w-0">
-            <StatusIcon status={status} />
-            <span className="text-xs truncate flex-1">{displayTitle}</span>
-            <span className="text-[11px] text-zinc-600 tabular-nums shrink-0">{lastActivity}</span>
-            {recentActivityIds?.has(session.id) && (
-              <span
-                className="shrink-0 size-2 rounded-full bg-emerald-500 animate-pulse"
-                title="live activity"
-              />
-            )}
-          </div>
-        </button>
-      )}
-    </li>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// EffortRow
-// ---------------------------------------------------------------------------
-
-interface EffortRowProps {
-  effort: Effort
-  sessions: Session[]
-  expanded: boolean
-  selected: boolean
-  selectedSessionId: string | null
-  liveSessionIds: Set<string>
-  recentActivityIds?: Set<string>
-  onToggle: () => void
-  onSelect: () => void
-  onSelectSession: (id: string) => void
-  onContextMenu: (e: React.MouseEvent) => void
-  onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
-  renamingId: string | null
-  onRenameCommit: (id: string, name: string) => void
-  onRenameCancel: () => void
-  onNewSession?: () => void
-  showArchivedSessions: boolean
-  onToggleShowArchivedSessions: () => void
-}
-
-function EffortRow({
-  effort,
-  sessions,
-  expanded,
-  selected,
-  selectedSessionId,
-  liveSessionIds,
-  recentActivityIds,
-  onToggle,
-  onSelect,
-  onSelectSession,
-  onContextMenu,
-  onSessionContextMenu,
-  renamingId,
-  onRenameCommit,
-  onRenameCancel,
-  onNewSession,
-  showArchivedSessions,
-  onToggleShowArchivedSessions,
-}: EffortRowProps) {
-  const hasLive = sessions.some(
-    (s) => computeStatusClient(s, liveSessionIds) === 'live-attached' ||
-           computeStatusClient(s, liveSessionIds) === 'live-orphaned',
-  )
-
-  const archivedSessionCount = sessions.filter((s) => s.archived).length
-  const visibleSessions = showArchivedSessions
-    ? sessions
-    : sessions.filter((s) => !s.archived)
-
-  const isRenaming = renamingId === effort.id
-  const renameInputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (isRenaming && renameInputRef.current) {
-      renameInputRef.current.focus()
-      renameInputRef.current.select()
-    }
-  }, [isRenaming])
-
-  return (
-    <>
-      <li>
-        <div
-          onContextMenu={onContextMenu}
-          className={`flex items-center pl-5 pr-3 py-1.5 rounded transition ${
-            selected
-              ? 'bg-zinc-700/40 text-zinc-200'
-              : 'hover:bg-zinc-800/40 text-zinc-400'
-          }`}
-        >
-          <button
-            onClick={onToggle}
-            className="shrink-0 mr-1 text-zinc-500 hover:text-zinc-300 transition"
-            aria-label={expanded ? 'collapse effort' : 'expand effort'}
-          >
-            {expanded
-              ? <ChevronDown className="w-3 h-3" />
-              : <ChevronRight className="w-3 h-3" />}
-          </button>
-          {isRenaming ? (
-            <input
-              ref={renameInputRef}
-              defaultValue={effort.name}
-              className="flex-1 text-xs bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none min-w-0"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  const v = (e.target as HTMLInputElement).value.trim()
-                  if (v) onRenameCommit(effort.id, v)
-                  else onRenameCancel()
-                } else if (e.key === 'Escape') {
-                  onRenameCancel()
-                }
-              }}
-              onBlur={(e) => {
-                const v = e.target.value.trim()
-                if (v && v !== effort.name) onRenameCommit(effort.id, v)
-                else onRenameCancel()
-              }}
-              onClick={(e) => e.stopPropagation()}
-            />
-          ) : (
-            <>
-              <button
-                onClick={onSelect}
-                data-testid={`effort-row-${effort.id}`}
-                className="flex items-center gap-2 min-w-0 flex-1 text-left"
-              >
-                <span className={`size-1.5 rounded-full shrink-0 ${
-                  hasLive ? 'bg-emerald-500' : 'bg-zinc-600'
-                }`} />
-                <span className="text-xs truncate">{effort.name}</span>
-                {effort.status === 'done' && (
-                  <span className="text-[10px] text-zinc-600 shrink-0">done</span>
-                )}
-              </button>
-              {onNewSession && effort.status !== 'archived' && (
-                <button
-                  type="button"
-                  title="New session"
-                  onClick={(e) => { e.stopPropagation(); onNewSession() }}
-                  className="shrink-0 ml-1 w-4 h-4 flex items-center justify-center rounded text-zinc-600 hover:text-zinc-200 hover:bg-zinc-700 transition opacity-40 hover:opacity-100"
-                  aria-label="New session"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-              )}
-            </>
-          )}
-        </div>
-      </li>
-      {expanded && (
-        <ul className="space-y-0.5">
-          {visibleSessions.length === 0 && archivedSessionCount === 0 && (
-            <li className="pl-10 pr-3 py-1 text-[11px] text-zinc-600 italic">no sessions</li>
-          )}
-          {visibleSessions.map((s) => (
-            <SessionRow
-              key={s.id}
-              session={s}
-              selected={s.id === selectedSessionId}
-              liveSessionIds={liveSessionIds}
-              recentActivityIds={recentActivityIds}
-              onSelect={() => onSelectSession(s.id)}
-              onContextMenu={(e) => onSessionContextMenu(s, e)}
-              renamingId={renamingId}
-              onRenameCommit={onRenameCommit}
-              onRenameCancel={onRenameCancel}
-              dimmed={s.archived}
-            />
-          ))}
-          {archivedSessionCount > 0 && (
-            <li>
-              <button
-                onClick={onToggleShowArchivedSessions}
-                className="pl-10 pr-3 py-1 text-[11px] text-zinc-600 hover:text-zinc-400 transition italic"
-              >
-                {showArchivedSessions
-                  ? `hide ${archivedSessionCount} archived`
-                  : `+${archivedSessionCount} archived`}
-              </button>
-            </li>
-          )}
-        </ul>
-      )}
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// ProjectRow
-// ---------------------------------------------------------------------------
-
-interface ProjectRowProps {
-  project: Project
-  efforts: Effort[]
-  sessionsByEffort: Map<string, Session[]>
-  expanded: boolean
-  selected: boolean
-  hasLiveSession: boolean
-  selectedEffortId: string | null
-  selectedSessionId: string | null
-  liveSessionIds: Set<string>
-  recentActivityIds?: Set<string>
-  expandedEfforts: Set<string>
-  showArchivedEfforts: boolean
-  showArchivedByEffort: Set<string>
-  onToggle: () => void
-  onSelect: () => void
-  onSelectEffort: (id: string) => void
-  onSelectSession: (id: string) => void
-  onToggleEffort: (id: string) => void
-  onToggleShowArchived: () => void
-  onToggleShowArchivedSessions: (effortId: string) => void
-  onContextMenu: (e: React.MouseEvent) => void
-  onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
-  onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
-  renamingId: string | null
-  onRenameCommit: (id: string, name: string) => void
-  onRenameCancel: () => void
-  onNewEffort?: () => void
-  onNewSession?: (effort: Effort) => void
-}
-
-function ProjectRow({
-  project,
-  efforts,
-  sessionsByEffort,
-  expanded,
-  selected,
-  hasLiveSession,
-  selectedEffortId,
-  selectedSessionId,
-  liveSessionIds,
-  recentActivityIds,
-  expandedEfforts,
-  showArchivedEfforts,
-  showArchivedByEffort,
-  onToggle,
-  onSelect,
-  onSelectEffort,
-  onSelectSession,
-  onToggleEffort,
-  onToggleShowArchived,
-  onToggleShowArchivedSessions,
-  onContextMenu,
-  onEffortContextMenu,
-  onSessionContextMenu,
-  renamingId,
-  onRenameCommit,
-  onRenameCancel,
-  onNewEffort,
-  onNewSession,
-}: ProjectRowProps) {
-  const dotColor = hasLiveSession
-    ? 'bg-emerald-500'
-    : project.pinned
-      ? 'bg-sky-400'
-      : 'bg-zinc-600'
-
-  const lastActivity = project.last_opened_at
-    ? timeAgo(project.last_opened_at)
-    : '—'
-
-  // Filter archived efforts based on the per-project toggle
-  const visibleEfforts = showArchivedEfforts
-    ? efforts
-    : efforts.filter((e) => e.status !== 'archived')
-
-  const archivedCount = efforts.filter((e) => e.status === 'archived').length
-
-  const isRenaming = renamingId === project.id
-  const renameInputRef = useRef<HTMLInputElement>(null)
-
-  useEffect(() => {
-    if (isRenaming && renameInputRef.current) {
-      renameInputRef.current.focus()
-      renameInputRef.current.select()
-    }
-  }, [isRenaming])
-
-  return (
-    <>
-      <li>
-        <div
-          onContextMenu={onContextMenu}
-          className={`flex items-start rounded transition ${
-            selected
-              ? 'bg-zinc-700/60 text-zinc-100'
-              : 'hover:bg-zinc-800/60 text-zinc-300'
-          }`}
-        >
-          <button
-            onClick={onToggle}
-            className="shrink-0 mt-2.5 ml-1 mr-0.5 text-zinc-500 hover:text-zinc-300 transition"
-            aria-label={expanded ? 'collapse project' : 'expand project'}
-          >
-            {expanded
-              ? <ChevronDown className="w-3 h-3" />
-              : <ChevronRight className="w-3 h-3" />}
-          </button>
-          <div className="flex-1 px-2 py-2 min-w-0">
-            {isRenaming ? (
-              <input
-                ref={renameInputRef}
-                defaultValue={project.name}
-                className="w-full text-sm bg-zinc-800 border border-zinc-600 rounded px-1 py-0.5 text-zinc-100 outline-none"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    const v = (e.target as HTMLInputElement).value.trim()
-                    if (v) onRenameCommit(project.id, v)
-                    else onRenameCancel()
-                  } else if (e.key === 'Escape') {
-                    onRenameCancel()
-                  }
-                }}
-                onBlur={(e) => {
-                  const v = e.target.value.trim()
-                  if (v && v !== project.name) onRenameCommit(project.id, v)
-                  else onRenameCancel()
-                }}
-                onClick={(e) => e.stopPropagation()}
-              />
-            ) : (
-              <div className="flex items-start gap-0.5 min-w-0 w-full">
-                <button
-                  onClick={onSelect}
-                  data-testid={`project-row-${project.id}`}
-                  className="flex-1 text-left min-w-0"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span
-                      className={`size-2 rounded-full shrink-0 ${dotColor}`}
-                      title={hasLiveSession ? 'live' : project.pinned ? 'pinned' : 'dormant'}
-                    />
-                    <span className="text-sm truncate flex-1">{project.name}</span>
-                    {project.pinned && (
-                      <Pin className="w-3 h-3 text-sky-400 shrink-0" aria-label="pinned" />
-                    )}
-                  </div>
-                  <div className="mt-0.5 ml-4 text-[11px] text-zinc-500 tabular-nums">
-                    {lastActivity}
-                  </div>
-                </button>
-                {onNewEffort && (
-                  <button
-                    type="button"
-                    title="New effort"
-                    onClick={(e) => { e.stopPropagation(); onNewEffort() }}
-                    className="shrink-0 mt-1.5 w-4 h-4 flex items-center justify-center rounded text-zinc-600 hover:text-zinc-200 hover:bg-zinc-700 transition opacity-40 hover:opacity-100"
-                    aria-label="New effort"
-                  >
-                    <Plus className="w-3 h-3" />
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      </li>
-
-      {expanded && (
-        <ul className="space-y-0.5">
-          {visibleEfforts.length === 0 && archivedCount === 0 && (
-            <li className="pl-7 pr-3 py-1 text-[11px] text-zinc-600 italic">no efforts</li>
-          )}
-          {visibleEfforts.map((e) => (
-            <EffortRow
-              key={e.id}
-              effort={e}
-              sessions={sessionsByEffort.get(e.id) ?? []}
-              expanded={expandedEfforts.has(e.id)}
-              selected={e.id === selectedEffortId}
-              selectedSessionId={selectedSessionId}
-              liveSessionIds={liveSessionIds}
-              recentActivityIds={recentActivityIds}
-              onToggle={() => onToggleEffort(e.id)}
-              onSelect={() => onSelectEffort(e.id)}
-              onSelectSession={onSelectSession}
-              onContextMenu={(ev) => onEffortContextMenu(e, ev)}
-              onSessionContextMenu={onSessionContextMenu}
-              renamingId={renamingId}
-              onRenameCommit={onRenameCommit}
-              onRenameCancel={onRenameCancel}
-              onNewSession={onNewSession ? () => onNewSession(e) : undefined}
-              showArchivedSessions={showArchivedByEffort.has(e.id)}
-              onToggleShowArchivedSessions={() => onToggleShowArchivedSessions(e.id)}
-            />
-          ))}
-          {archivedCount > 0 && (
-            <li>
-              <button
-                onClick={onToggleShowArchived}
-                className="pl-7 pr-3 py-1 text-[11px] text-zinc-600 hover:text-zinc-400 transition italic"
-              >
-                {showArchivedEfforts
-                  ? `hide ${archivedCount} archived`
-                  : `show ${archivedCount} archived`}
-              </button>
-            </li>
-          )}
-        </ul>
-      )}
-    </>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Section
-// ---------------------------------------------------------------------------
-
-interface SectionProps {
-  title: string
-  projects: Project[]
-  open: boolean
-  onToggle: () => void
-  selectedProjectId: string | null
-  onSelectProject: (id: string) => void
-  liveSessionIds: Set<string>
-  effortsLiveByProject?: Map<string, boolean>
-  recentActivityIds?: Set<string>
-  effortsByProject: Map<string, Effort[]>
-  sessionsByEffort: Map<string, Session[]>
-  selectedEffortId: string | null
-  onSelectEffort: (id: string) => void
-  selectedSessionId: string | null
-  onSelectSession: (id: string) => void
-  // Per-project expansion state — hoisted up to the Section so all projects
-  // within a section share the same maps (avoid losing state on re-render).
-  expandedProjects: Set<string>
-  onToggleProject: (id: string) => void
-  expandedEfforts: Set<string>
-  onToggleEffort: (id: string) => void
-  showArchivedByProject: Set<string>
-  onToggleShowArchived: (id: string) => void
-  showArchivedByEffort: Set<string>
-  onToggleShowArchivedSessions: (id: string) => void
-  onProjectContextMenu: (project: Project, e: React.MouseEvent) => void
-  onEffortContextMenu: (effort: Effort, e: React.MouseEvent) => void
-  onSessionContextMenu: (session: Session, e: React.MouseEvent) => void
-  renamingId: string | null
-  onRenameCommit: (id: string, name: string) => void
-  onRenameCancel: () => void
-  onNewEffortForProject?: (project: Project) => void
-  onNewSessionForEffort?: (effort: Effort) => void
-  /** When true, renders projects with reduced opacity (for Archived section). */
-  dimmed?: boolean
-}
-
-function Section({
-  title,
-  projects,
-  open,
-  onToggle,
-  selectedProjectId,
-  onSelectProject,
-  effortsLiveByProject,
-  recentActivityIds,
-  effortsByProject,
-  sessionsByEffort,
-  selectedEffortId,
-  onSelectEffort,
-  selectedSessionId,
-  onSelectSession,
-  liveSessionIds,
-  expandedProjects,
-  onToggleProject,
-  expandedEfforts,
-  onToggleEffort,
-  showArchivedByProject,
-  onToggleShowArchived,
-  showArchivedByEffort,
-  onToggleShowArchivedSessions,
-  onProjectContextMenu,
-  onEffortContextMenu,
-  onSessionContextMenu,
-  renamingId,
-  onRenameCommit,
-  onRenameCancel,
-  onNewEffortForProject,
-  onNewSessionForEffort,
-  dimmed,
-}: SectionProps) {
-  return (
-    <div className={dimmed ? 'opacity-60' : undefined}>
-      <button
-        onClick={onToggle}
-        data-testid={`sidebar-section-${title.toLowerCase()}`}
-        className="w-full flex items-center justify-between px-1 py-1.5 text-[11px] uppercase tracking-widest text-zinc-500 font-semibold hover:text-zinc-300 transition"
-      >
-        <span>
-          {title} ({projects.length})
-        </span>
-        <span className="text-zinc-600">{open ? '▾' : '▸'}</span>
-      </button>
-      {open && projects.length > 0 && (
-        <ul className="space-y-0.5">
-          {projects.map((p) => (
-            <ProjectRow
-              key={p.id}
-              project={p}
-              efforts={effortsByProject.get(p.id) ?? []}
-              sessionsByEffort={sessionsByEffort}
-              expanded={expandedProjects.has(p.id)}
-              selected={p.id === selectedProjectId}
-              hasLiveSession={effortsLiveByProject?.get(p.id) === true}
-              selectedEffortId={selectedEffortId}
-              selectedSessionId={selectedSessionId}
-              liveSessionIds={liveSessionIds}
-              recentActivityIds={recentActivityIds}
-              expandedEfforts={expandedEfforts}
-              showArchivedEfforts={showArchivedByProject.has(p.id)}
-              showArchivedByEffort={showArchivedByEffort}
-              onToggle={() => onToggleProject(p.id)}
-              onSelect={() => onSelectProject(p.id)}
-              onSelectEffort={onSelectEffort}
-              onSelectSession={onSelectSession}
-              onToggleEffort={onToggleEffort}
-              onToggleShowArchived={() => onToggleShowArchived(p.id)}
-              onToggleShowArchivedSessions={onToggleShowArchivedSessions}
-              onContextMenu={(e) => onProjectContextMenu(p, e)}
-              onEffortContextMenu={onEffortContextMenu}
-              onSessionContextMenu={onSessionContextMenu}
-              renamingId={renamingId}
-              onRenameCommit={onRenameCommit}
-              onRenameCancel={onRenameCancel}
-              onNewEffort={onNewEffortForProject ? () => onNewEffortForProject(p) : undefined}
-              onNewSession={onNewSessionForEffort}
-            />
-          ))}
-        </ul>
-      )}
-      {open && projects.length === 0 && (
-        <div className="px-3 py-1.5 text-[11px] text-zinc-600 italic">
-          none
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Sidebar
-// ---------------------------------------------------------------------------
+const RECENT_COUNT = 5
 
 export function Sidebar({
   projects,
-  efforts,
-  sessions,
+  sessionsByProject,
   liveSessionIds,
-  effortsLiveByProject,
   recentActivityIds,
   selectedProjectId,
+  selectedConversationId,
   onSelectProject,
-  selectedEffortId,
-  onSelectEffort,
-  selectedSessionId,
-  onSelectSession,
-  unmanaged,
-  onAdopt,
-  unmanagedPrds,
-  onRefresh,
-  onSessionCreated,
+  onSelectConversation,
   onOpenNewProject,
-  onOpenNewEffort,
   onOpenNewSession,
+  onRefresh,
 }: SidebarProps) {
-  const [activeOpen, setActiveOpen] = useState(true)
-  const [recentOpen, setRecentOpen] = useState(true)
-  const [archivedOpen, setArchivedOpen] = useState(false)
+  // Per-project expansion state. Auto-expand the selected project.
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    const s = new Set<string>()
+    if (selectedProjectId) s.add(selectedProjectId)
+    return s
+  })
+  const [showAll, setShowAll] = useState<Set<string>>(new Set())
 
-  // "+" menu — opens a small popover with "New Project" (future: "New Effort").
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
-  const plusMenuRef = useRef<HTMLDivElement>(null)
-
-  // Close the "+" popover when clicking outside it.
-  useEffect(() => {
-    if (!plusMenuOpen) return
-    const handler = (e: MouseEvent) => {
-      if (plusMenuRef.current && !plusMenuRef.current.contains(e.target as Node)) {
-        setPlusMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handler)
-    return () => document.removeEventListener('mousedown', handler)
-  }, [plusMenuOpen])
-
-  const [showNewProjectDialog, setShowNewProjectDialog] = useState(false)
-
-  // New Effort dialog state — stores { projectId, rootDir } when open, null when closed.
-  const [newEffortTarget, setNewEffortTarget] = useState<{
-    projectId: string
-    rootDir: string
-    initialPickedPath?: string
-  } | null>(null)
-
-  // New Session dialog state — stores effort info when open, null when closed.
-  const [newSessionTarget, setNewSessionTarget] = useState<{
-    projectId: string
-    effortId: string
-    effortName: string
-    effortWorkingDir: string | null
-    projectRootDir: string
-  } | null>(null)
-
-  // Per-project expansion state (shared across sections via a single set)
-  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set())
-  const toggleProject = (id: string) => {
-    setExpandedProjects((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  // Per-effort expansion state
-  const [expandedEfforts, setExpandedEfforts] = useState<Set<string>>(new Set())
-  const toggleEffort = (id: string) => {
-    setExpandedEfforts((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  // Per-project "show archived efforts" toggle
-  const [showArchivedByProject, setShowArchivedByProject] = useState<Set<string>>(new Set())
-  const toggleShowArchived = (id: string) => {
-    setShowArchivedByProject((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  // Per-effort "show archived sessions" toggle
-  const [showArchivedByEffort, setShowArchivedByEffort] = useState<Set<string>>(new Set())
-  const toggleShowArchivedSessions = (id: string) => {
-    setShowArchivedByEffort((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-
-  // ---------------------------------------------------------------------------
-  // Auto-expand on selection changes (US-014c)
-  //
-  // When the URL carries a deep link (e.g. #/p/abc/e/def/s/ghi) we need to
-  // expand the relevant project and effort so the selected node is visible.
-  //
-  // Edge case: if the selected project/effort isn't in the loaded data yet
-  // (data hasn't arrived from the server), the expansion is a no-op — neither
-  // set will contain the id, and the node won't be visible. Once the data
-  // arrives and the component re-renders, this effect re-runs and expands the
-  // correct nodes.
-  // ---------------------------------------------------------------------------
   useEffect(() => {
     if (selectedProjectId) {
-      setExpandedProjects((prev) => {
+      setExpanded((prev) => {
         if (prev.has(selectedProjectId)) return prev
         const next = new Set(prev)
         next.add(selectedProjectId)
         return next
       })
     }
-    if (selectedEffortId) {
-      setExpandedEfforts((prev) => {
-        if (prev.has(selectedEffortId)) return prev
-        const next = new Set(prev)
-        next.add(selectedEffortId)
-        return next
-      })
-    }
-  }, [selectedProjectId, selectedEffortId])
+  }, [selectedProjectId])
 
-  const buckets = bucketProjects(projects, liveSessionIds, effortsLiveByProject)
-  const effortsByProject = groupEffortsByProject(efforts)
-  const sessionsByEffort = groupSessionsByEffort(sessions)
-
-  // ---------------------------------------------------------------------------
-  // Context menu wiring
-  // ---------------------------------------------------------------------------
-
-  const menu = useContextMenu()
-
-  // Delete dialog state for project / effort / session
-  const [deleteProjectTarget, setDeleteProjectTarget] = useState<Project | null>(null)
-  const [deleteEffortTarget, setDeleteEffortTarget] = useState<Effort | null>(null)
-  const [deleteSessionTarget, setDeleteSessionTarget] = useState<Session | null>(null)
-
-  // Inline rename state — stores the id of the project or effort being renamed
-  // (both share the same field since only one item can be renamed at a time).
-  const [renamingId, setRenamingId] = useState<string | null>(null)
-
-  const handleRenameCommitProject = async (id: string, name: string) => {
-    setRenamingId(null)
-    const res = await patchProject(id, { name })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      window.alert(`Rename failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
-      return
-    }
-    onRefresh?.()
-  }
-
-  const handleRenameCommitEffort = async (id: string, name: string) => {
-    setRenamingId(null)
-    const res = await patchEffort(id, { name })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      window.alert(`Rename failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
-      return
-    }
-    onRefresh?.()
-  }
-
-  const handleRenameCommitSession = async (id: string, title: string) => {
-    setRenamingId(null)
-    const res = await patchSession(id, { title })
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      window.alert(`Rename failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
-      return
-    }
-    onRefresh?.()
-  }
-
-  // Unified rename commit — detects whether the id is a project, effort, or session.
-  const handleRenameCommit = async (id: string, name: string) => {
-    const isProject = projects.some((p) => p.id === id)
-    if (isProject) {
-      await handleRenameCommitProject(id, name)
-      return
-    }
-    const isEffort = efforts.some((e) => e.id === id)
-    if (isEffort) {
-      await handleRenameCommitEffort(id, name)
-      return
-    }
-    // Must be a session.
-    await handleRenameCommitSession(id, name)
-  }
-
-  const handleRenameCancel = () => setRenamingId(null)
-
-  const handleProjectContextMenu = (project: Project, e: React.MouseEvent) => {
-    e.preventDefault()
-    const items: MenuItem[] = [
-      {
-        label: 'New Effort',
-        onClick: () => {
-          if (onOpenNewEffort) {
-            onOpenNewEffort({ projectId: project.id, rootDir: project.root_dir })
-          } else {
-            setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir })
-          }
-        },
-      },
-      {
-        label: project.pinned ? 'Unpin' : 'Pin',
-        onClick: async () => {
-          const res = await patchProject(project.id, { pinned: !project.pinned })
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({}))
-            window.alert(`Pin failed: ${(body as { error?: string }).error ?? `HTTP ${res.status}`}`)
-            return
-          }
-          onRefresh?.()
-        },
-      },
-      {
-        label: project.archived ? 'Unarchive' : 'Archive',
-        onClick: async () => {
-          const res = await patchProject(project.id, { archived: !project.archived })
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({})) as { error?: string }
-            if (body.error === 'project_has_live_sessions') {
-              window.alert('Stop the live session first.')
-            } else {
-              window.alert(`Archive failed: ${body.error ?? `HTTP ${res.status}`}`)
-            }
-            return
-          }
-          onRefresh?.()
-        },
-      },
-      {
-        label: 'Rename',
-        onClick: () => {
-          setRenamingId(project.id)
-        },
-      },
-      {
-        label: 'Delete',
-        destructive: true,
-        separator: true,
-        onClick: () => {
-          setDeleteProjectTarget(project)
-        },
-      },
-    ]
-    menu.open(e.clientX, e.clientY, items)
-  }
-
-  const handleEffortContextMenu = (effort: Effort, e: React.MouseEvent) => {
-    e.preventDefault()
-    const items: MenuItem[] = [
-      {
-        label: 'New Session',
-        onClick: () => {
-          const proj = projects.find((p) => p.id === effort.project_id)
-          const projectRootDir = proj?.root_dir ?? ''
-          if (onOpenNewSession) {
-            onOpenNewSession({
-              projectId: effort.project_id,
-              effortId: effort.id,
-              effortName: effort.name,
-              effortWorkingDir: effort.working_dir,
-              projectRootDir,
-            })
-          } else {
-            setNewSessionTarget({
-              projectId: effort.project_id,
-              effortId: effort.id,
-              effortName: effort.name,
-              effortWorkingDir: effort.working_dir,
-              projectRootDir,
-            })
-          }
-        },
-      },
-      {
-        separator: true,
-        label: effort.status === 'archived' ? 'Unarchive' : 'Archive',
-        onClick: async () => {
-          const res = await patchEffort(effort.id, {
-            status: effort.status === 'archived' ? 'active' : 'archived',
-          })
-          if (!res.ok) {
-            const body = await res.json().catch(() => ({})) as { error?: string }
-            if (body.error === 'effort_has_live_sessions') {
-              window.alert('Stop the live session first.')
-            } else {
-              window.alert(`Archive failed: ${body.error ?? `HTTP ${res.status}`}`)
-            }
-            return
-          }
-          onRefresh?.()
-        },
-      },
-      {
-        label: 'Rename',
-        onClick: () => {
-          setRenamingId(effort.id)
-        },
-      },
-      {
-        label: 'Delete',
-        destructive: true,
-        separator: true,
-        onClick: () => {
-          setDeleteEffortTarget(effort)
-        },
-      },
-    ]
-    menu.open(e.clientX, e.clientY, items)
-  }
-
-  const handleSessionContextMenu = (session: Session, e: React.MouseEvent) => {
-    e.preventDefault()
-    const status = computeStatusClient(session, liveSessionIds)
-    const isLive = status === 'live-attached' || status === 'live-orphaned'
-
-    const items: MenuItem[] = []
-
-    if (isLive) {
-      items.push({
-        label: 'Kill',
-        destructive: true,
-        onClick: async () => {
-          try {
-            await killSession(session.id)
-            onRefresh?.()
-          } catch (err) {
-            console.error('[sidebar] kill session failed:', err)
-            window.alert(`Kill failed: ${(err as Error)?.message ?? err}`)
-          }
-        },
-      })
-    }
-
-    items.push({
-      label: 'Rename',
-      onClick: () => {
-        setRenamingId(session.id)
-      },
+  const toggleProject = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
     })
-
-    items.push({
-      label: session.archived ? 'Unarchive' : 'Archive',
-      onClick: async () => {
-        const res = await patchSession(session.id, { archived: !session.archived })
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({})) as { error?: string }
-          window.alert(`Archive failed: ${body.error ?? `HTTP ${res.status}`}`)
-          return
-        }
-        onRefresh?.()
-      },
-    })
-
-    items.push({
-      label: 'Delete…',
-      destructive: true,
-      separator: true,
-      onClick: () => {
-        setDeleteSessionTarget(session)
-      },
-    })
-
-    menu.open(e.clientX, e.clientY, items)
   }
 
-  const sharedSectionProps = {
-    liveSessionIds,
-    effortsLiveByProject,
-    recentActivityIds,
-    effortsByProject,
-    sessionsByEffort,
-    selectedEffortId,
-    onSelectEffort,
-    selectedSessionId,
-    onSelectSession,
-    expandedProjects,
-    onToggleProject: toggleProject,
-    expandedEfforts,
-    onToggleEffort: toggleEffort,
-    showArchivedByProject,
-    onToggleShowArchived: toggleShowArchived,
-    showArchivedByEffort,
-    onToggleShowArchivedSessions: toggleShowArchivedSessions,
-    onProjectContextMenu: handleProjectContextMenu,
-    onEffortContextMenu: handleEffortContextMenu,
-    onSessionContextMenu: handleSessionContextMenu,
-    renamingId,
-    onRenameCommit: handleRenameCommit,
-    onRenameCancel: handleRenameCancel,
-    onNewEffortForProject: onOpenNewEffort
-      ? (project: Project) => onOpenNewEffort({ projectId: project.id, rootDir: project.root_dir })
-      : (project: Project) => setNewEffortTarget({ projectId: project.id, rootDir: project.root_dir }),
-    onNewSessionForEffort: onOpenNewSession
-      ? (effort: Effort) => {
-          const proj = projects.find((p) => p.id === effort.project_id)
-          onOpenNewSession({
-            projectId: effort.project_id,
-            effortId: effort.id,
-            effortName: effort.name,
-            effortWorkingDir: effort.working_dir,
-            projectRootDir: proj?.root_dir ?? '',
-          })
-        }
-      : (effort: Effort) => {
-          const proj = projects.find((p) => p.id === effort.project_id)
-          setNewSessionTarget({
-            projectId: effort.project_id,
-            effortId: effort.id,
-            effortName: effort.name,
-            effortWorkingDir: effort.working_dir,
-            projectRootDir: proj?.root_dir ?? '',
-          })
-        },
+  const toggleShowAll = (id: string) => {
+    setShowAll((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
 
   return (
-    <aside
-      data-testid="sidebar"
-      className="w-64 border-r border-zinc-700/40 overflow-y-auto p-3 space-y-2"
-    >
-      {/* Sidebar header with "+" menu */}
-      <div className="flex items-center justify-between px-1 pb-1">
-        <span className="text-[11px] uppercase tracking-widest text-zinc-500 font-semibold">
-          Projects
-        </span>
-        <div className="relative" ref={plusMenuRef}>
-          <button
-            type="button"
-            data-testid="sidebar-plus-button"
-            onClick={() => setPlusMenuOpen((o) => !o)}
-            className="flex items-center justify-center w-5 h-5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition"
-            aria-label="New project"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
-          {plusMenuOpen && (
-            <div className="absolute right-0 top-full mt-1 z-[200] min-w-[140px] bg-zinc-900 border border-zinc-700 rounded shadow-xl py-1">
-              <button
-                type="button"
-                onClick={() => {
-                  setPlusMenuOpen(false)
-                  if (onOpenNewProject) {
-                    onOpenNewProject()
-                  } else {
-                    setShowNewProjectDialog(true)
-                  }
-                }}
-                className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
-              >
-                New Project
-              </button>
-              {selectedProjectId && (() => {
-                const proj = projects.find((p) => p.id === selectedProjectId)
-                return proj ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setPlusMenuOpen(false)
-                      if (onOpenNewEffort) {
-                        onOpenNewEffort({ projectId: proj.id, rootDir: proj.root_dir })
-                      } else {
-                        setNewEffortTarget({ projectId: proj.id, rootDir: proj.root_dir })
-                      }
-                    }}
-                    className="w-full text-left px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100 transition"
-                  >
-                    New Effort
-                  </button>
-                ) : null
-              })()}
+    <aside className="border-r border-zinc-800 bg-zinc-950 overflow-y-auto flex flex-col">
+      <div className="p-3 border-b border-zinc-800">
+        <button
+          type="button"
+          onClick={onOpenNewProject}
+          className="w-full flex items-center gap-2 px-2 py-1.5 text-xs rounded bg-emerald-700 text-white hover:bg-emerald-600 transition"
+        >
+          <Plus className="w-3.5 h-3.5" />
+          New project
+        </button>
+      </div>
+
+      <div className="px-2 py-2 text-[11px] uppercase tracking-wide text-zinc-500">
+        Projects
+      </div>
+
+      <nav className="flex-1">
+        {projects.length === 0 && (
+          <div className="px-3 py-4 text-xs text-zinc-600 italic">
+            No projects yet — open a folder to start.
+          </div>
+        )}
+        {projects.map((p) => (
+          <ProjectRow
+            key={p.id}
+            project={p}
+            sessions={sessionsByProject.get(p.id) ?? []}
+            liveSessionIds={liveSessionIds}
+            recentActivityIds={recentActivityIds}
+            isExpanded={expanded.has(p.id)}
+            isSelected={p.id === selectedProjectId}
+            selectedConversationId={selectedConversationId}
+            showAll={showAll.has(p.id)}
+            onToggleExpand={() => toggleProject(p.id)}
+            onToggleShowAll={() => toggleShowAll(p.id)}
+            onSelectProject={() => onSelectProject(p.id)}
+            onSelectConversation={(cid) => onSelectConversation(p.id, cid)}
+            onOpenNewSession={() => onOpenNewSession(p.id)}
+            onRefresh={onRefresh}
+          />
+        ))}
+      </nav>
+    </aside>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Project row
+// ---------------------------------------------------------------------------
+
+interface ProjectRowProps {
+  project: Project
+  sessions: Session[]
+  liveSessionIds: Set<string>
+  recentActivityIds: Set<string>
+  isExpanded: boolean
+  isSelected: boolean
+  selectedConversationId: string | null
+  showAll: boolean
+  onToggleExpand: () => void
+  onToggleShowAll: () => void
+  onSelectProject: () => void
+  onSelectConversation: (cid: string) => void
+  onOpenNewSession: () => void
+  onRefresh: () => void
+}
+
+function ProjectRow({
+  project,
+  sessions,
+  liveSessionIds,
+  recentActivityIds,
+  isExpanded,
+  isSelected,
+  selectedConversationId,
+  showAll,
+  onToggleExpand,
+  onToggleShowAll,
+  onSelectProject,
+  onSelectConversation,
+  onOpenNewSession,
+  onRefresh,
+}: ProjectRowProps) {
+  const ctx = useContextMenu()
+  const [renaming, setRenaming] = useState(false)
+  const [draftName, setDraftName] = useState(project.name)
+
+  const pinned = sessions.filter((s) => s.pinned)
+  const unpinned = sessions.filter((s) => !s.pinned)
+  const sortByRecency = (a: Session, b: Session) =>
+    (b.last_activity_at ?? 0) - (a.last_activity_at ?? 0) ||
+    b.created_at - a.created_at
+  pinned.sort(sortByRecency)
+  unpinned.sort(sortByRecency)
+
+  const recents = unpinned.slice(0, showAll ? unpinned.length : RECENT_COUNT)
+  const moreCount = unpinned.length - recents.length
+
+  const projectMenuItems: MenuItem[] = [
+    {
+      label: 'Rename project',
+      onClick: () => {
+        setDraftName(project.name)
+        setRenaming(true)
+      },
+    },
+    { label: 'New session', onClick: onOpenNewSession },
+    {
+      label: project.pinned ? 'Unpin project' : 'Pin project',
+      onClick: () => void togglePinProject(project, onRefresh),
+    },
+    {
+      label: 'Rescan disk + tasks',
+      onClick: () => void rescanProject(project.id, onRefresh),
+    },
+    {
+      label: project.archived ? 'Unarchive' : 'Archive',
+      onClick: () => void archiveProject(project, onRefresh),
+      separator: true,
+    },
+  ]
+
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    ctx.open(e.clientX, e.clientY, projectMenuItems)
+  }
+
+  return (
+    <div className="group">
+      <div
+        className={`flex items-center gap-1 px-2 py-1.5 text-sm cursor-pointer hover:bg-zinc-900 ${
+          isSelected ? 'bg-zinc-900 text-zinc-100' : 'text-zinc-300'
+        }`}
+        onClick={() => {
+          onToggleExpand()
+          onSelectProject()
+        }}
+        onContextMenu={onContextMenu}
+      >
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggleExpand() }}
+          className="text-zinc-500 hover:text-zinc-300 transition shrink-0"
+        >
+          {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+        </button>
+        {project.pinned && <Pin className="w-3 h-3 text-amber-500 shrink-0" />}
+        {renaming ? (
+          <input
+            autoFocus
+            type="text"
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                void renameProject(project.id, draftName.trim(), onRefresh)
+                setRenaming(false)
+              } else if (e.key === 'Escape') setRenaming(false)
+            }}
+            onBlur={() => {
+              if (draftName.trim() && draftName.trim() !== project.name) {
+                void renameProject(project.id, draftName.trim(), onRefresh)
+              }
+              setRenaming(false)
+            }}
+            className="flex-1 min-w-0 bg-zinc-800 border border-zinc-600 rounded px-1.5 py-0.5 text-sm text-zinc-100 outline-none"
+          />
+        ) : (
+          <span className="flex-1 min-w-0 truncate font-medium">{project.name}</span>
+        )}
+        <button
+          type="button"
+          title="New session"
+          onClick={(e) => { e.stopPropagation(); onOpenNewSession() }}
+          className="opacity-0 group-hover:opacity-100 transition text-zinc-500 hover:text-zinc-200 shrink-0"
+        >
+          <Plus className="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      {isExpanded && (
+        <div className="ml-5 border-l border-zinc-800/60">
+          {pinned.length > 0 && (
+            <>
+              <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wide text-zinc-600">
+                Pinned
+              </div>
+              {pinned.map((s) => (
+                <ConversationRow
+                  key={s.id}
+                  session={s}
+                  isLive={liveSessionIds.has(s.id)}
+                  isActive={recentActivityIds.has(s.id)}
+                  isSelected={s.id === selectedConversationId}
+                  onSelect={() => onSelectConversation(s.id)}
+                  onRefresh={onRefresh}
+                />
+              ))}
+            </>
+          )}
+
+          {recents.length > 0 && (
+            <>
+              {pinned.length > 0 && (
+                <div className="px-2 pt-2 pb-1 text-[10px] uppercase tracking-wide text-zinc-600">
+                  Recents
+                </div>
+              )}
+              {recents.map((s) => (
+                <ConversationRow
+                  key={s.id}
+                  session={s}
+                  isLive={liveSessionIds.has(s.id)}
+                  isActive={recentActivityIds.has(s.id)}
+                  isSelected={s.id === selectedConversationId}
+                  onSelect={() => onSelectConversation(s.id)}
+                  onRefresh={onRefresh}
+                />
+              ))}
+            </>
+          )}
+
+          {moreCount > 0 && !showAll && (
+            <button
+              type="button"
+              onClick={onToggleShowAll}
+              className="w-full text-left px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-300 transition flex items-center gap-1"
+            >
+              <MoreHorizontal className="w-3 h-3" />
+              See {moreCount} more
+            </button>
+          )}
+          {showAll && unpinned.length > RECENT_COUNT && (
+            <button
+              type="button"
+              onClick={onToggleShowAll}
+              className="w-full text-left px-2 py-1 text-[11px] text-zinc-500 hover:text-zinc-300 transition"
+            >
+              Collapse
+            </button>
+          )}
+
+          {pinned.length === 0 && recents.length === 0 && (
+            <div className="px-2 py-2 text-[11px] text-zinc-600 italic">
+              No conversations yet.
             </div>
           )}
         </div>
-      </div>
-
-      {/* Unmanaged PRDs section — rendered from the `unmanaged` prop array (preferred)
-          or from the legacy `unmanagedPrds` slot. */}
-      {unmanaged && unmanaged.length > 0 && (
-        <div>
-          <div className="px-1 pt-2 pb-1 text-[10px] uppercase tracking-widest text-zinc-500 font-semibold">
-            Unmanaged PRDs
-          </div>
-          <ul>
-            {unmanaged.map((item) => (
-              <li key={item.unitName}>
-                <button
-                  onClick={() => onAdopt?.(item)}
-                  className="w-full text-left px-2 py-2 rounded hover:bg-zinc-800/60 transition"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="size-2 rounded-full bg-zinc-600 shrink-0" title="unmanaged" />
-                    <span className="text-xs text-zinc-300 truncate">
-                      {item.unitName.replace(/^ralph-pilot-native-/, '')}
-                    </span>
-                  </div>
-                  <div className="mt-0.5 text-[10px] text-zinc-500 truncate font-mono">
-                    {item.taskDir}
-                  </div>
-                  {item.suggestedProjectId && (
-                    <div className="mt-0.5 text-[10px] text-emerald-500">
-                      worktree match{item.suggestedBranch ? ` · ${item.suggestedBranch}` : ''}
-                    </div>
-                  )}
-                  <div className="mt-0.5 text-[10px] text-zinc-600 italic">click to adopt</div>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {/* Legacy slot support */}
-      {unmanagedPrds}
-
-      <Section
-        title="Active"
-        projects={buckets.active}
-        open={activeOpen}
-        onToggle={() => setActiveOpen((o) => !o)}
-        selectedProjectId={selectedProjectId}
-        onSelectProject={onSelectProject}
-        {...sharedSectionProps}
-      />
-
-      <Section
-        title="Recent"
-        projects={buckets.recent}
-        open={recentOpen}
-        onToggle={() => setRecentOpen((o) => !o)}
-        selectedProjectId={selectedProjectId}
-        onSelectProject={onSelectProject}
-        {...sharedSectionProps}
-      />
-
-      <Section
-        title="Archived"
-        projects={buckets.archived}
-        open={archivedOpen}
-        onToggle={() => setArchivedOpen((o) => !o)}
-        selectedProjectId={selectedProjectId}
-        onSelectProject={onSelectProject}
-        dimmed
-        {...sharedSectionProps}
-      />
-
-      {/* Context menu portal — renders at fixed position over everything */}
-      <ContextMenu {...menu.state} onClose={menu.close} />
-
-      {/* Delete-project confirmation dialog */}
-      {deleteProjectTarget && (
-        <ConfirmDeleteProjectDialog
-          project={deleteProjectTarget}
-          onClose={() => setDeleteProjectTarget(null)}
-          onDeleted={() => {
-            setDeleteProjectTarget(null)
-            onRefresh?.()
-          }}
-        />
       )}
 
-      {/* Delete-effort confirmation dialog */}
-      {deleteEffortTarget && (
-        <ConfirmDeleteEffortDialog
-          effort={deleteEffortTarget}
-          onClose={() => setDeleteEffortTarget(null)}
-          onDeleted={() => {
-            setDeleteEffortTarget(null)
-            onRefresh?.()
-          }}
-        />
-      )}
-
-      {/* Delete-session confirmation dialog */}
-      {deleteSessionTarget && (
-        <ConfirmDeleteSessionDialog
-          session={deleteSessionTarget}
-          onClose={() => setDeleteSessionTarget(null)}
-          onDeleted={() => {
-            setDeleteSessionTarget(null)
-            onRefresh?.()
-          }}
-        />
-      )}
-
-      {/* New Project dialog */}
-      <NewProjectDialog
-        open={showNewProjectDialog}
-        onClose={() => setShowNewProjectDialog(false)}
-        onCreated={() => {
-          setShowNewProjectDialog(false)
-          onRefresh?.()
-        }}
-        onAddAsEffort={(projectId, pickedPath) => {
-          // Open the New Effort dialog for the matched project, pre-filling prd_path.
-          setShowNewProjectDialog(false)
-          const proj = projects.find((p) => p.id === projectId)
-          if (proj) {
-            setNewEffortTarget({
-              projectId: proj.id,
-              rootDir: proj.root_dir,
-              initialPickedPath: pickedPath,
-            })
-          } else {
-            onRefresh?.()
-          }
-        }}
-        projects={projects.map((p) => ({ id: p.id, name: p.name }))}
-      />
-
-      {/* New Effort dialog */}
-      {newEffortTarget && (
-        <NewEffortDialog
-          open={true}
-          projectId={newEffortTarget.projectId}
-          projectRootDir={newEffortTarget.rootDir}
-          initialPickedPath={newEffortTarget.initialPickedPath}
-          onClose={() => setNewEffortTarget(null)}
-          onCreated={() => {
-            setNewEffortTarget(null)
-            onRefresh?.()
-          }}
-        />
-      )}
-
-      {/* New Session dialog */}
-      {newSessionTarget && (
-        <NewSessionDialog
-          open={true}
-          effortId={newSessionTarget.effortId}
-          effortName={newSessionTarget.effortName}
-          effortWorkingDir={newSessionTarget.effortWorkingDir}
-          projectRootDir={newSessionTarget.projectRootDir}
-          onClose={() => setNewSessionTarget(null)}
-          onCreated={(session) => {
-            const { projectId, effortId } = newSessionTarget
-            setNewSessionTarget(null)
-            onRefresh?.()
-            onSessionCreated?.(projectId, effortId, session.id)
-          }}
-        />
-      )}
-    </aside>
+      <ContextMenu {...ctx.state} onClose={ctx.close} items={projectMenuItems} />
+    </div>
   )
+}
+
+// ---------------------------------------------------------------------------
+// Conversation row
+// ---------------------------------------------------------------------------
+
+interface ConversationRowProps {
+  session: Session
+  isLive: boolean
+  isActive: boolean
+  isSelected: boolean
+  onSelect: () => void
+  onRefresh: () => void
+}
+
+function ConversationRow({
+  session,
+  isLive,
+  isActive,
+  isSelected,
+  onSelect,
+  onRefresh,
+}: ConversationRowProps) {
+  const ctx = useContextMenu()
+  const [renaming, setRenaming] = useState(false)
+  const [draft, setDraft] = useState(session.title ?? '')
+
+  const display = session.title ?? session.id.slice(0, 8)
+
+  const items: MenuItem[] = [
+    { label: 'Rename', onClick: () => { setDraft(session.title ?? ''); setRenaming(true) } },
+    {
+      label: session.pinned ? 'Unpin' : 'Pin',
+      onClick: () => void toggleSessionPin(session, onRefresh),
+    },
+    {
+      label: session.archived ? 'Unarchive' : 'Archive',
+      onClick: () => void toggleSessionArchive(session, onRefresh),
+    },
+  ]
+
+  const onContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    ctx.open(e.clientX, e.clientY, items)
+  }
+
+  return (
+    <div
+      className={`flex items-center gap-2 pl-2 pr-2 py-1 text-[13px] cursor-pointer hover:bg-zinc-900 group ${
+        isSelected ? 'bg-zinc-800/70 text-zinc-100' : 'text-zinc-400'
+      }`}
+      onClick={onSelect}
+      onContextMenu={onContextMenu}
+    >
+      <span className="shrink-0 w-2 h-2 flex items-center justify-center">
+        {isActive ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        ) : isLive ? (
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-600" />
+        ) : (
+          <span className="w-1 h-1 rounded-full bg-zinc-700" />
+        )}
+      </span>
+      {session.pinned && <Pin className="w-2.5 h-2.5 text-amber-500/70 shrink-0" />}
+      {renaming ? (
+        <input
+          autoFocus
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              void renameSession(session.id, draft.trim(), onRefresh)
+              setRenaming(false)
+            } else if (e.key === 'Escape') setRenaming(false)
+          }}
+          onBlur={() => {
+            if (draft.trim() && draft.trim() !== session.title) {
+              void renameSession(session.id, draft.trim(), onRefresh)
+            }
+            setRenaming(false)
+          }}
+          className="flex-1 min-w-0 bg-zinc-800 border border-zinc-600 rounded px-1.5 py-0.5 text-[12px] text-zinc-100 outline-none"
+        />
+      ) : (
+        <span className="flex-1 min-w-0 truncate" title={display}>{display}</span>
+      )}
+      <ContextMenu {...ctx.state} onClose={ctx.close} items={items} />
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Mutators (local helpers)
+// ---------------------------------------------------------------------------
+
+async function renameProject(id: string, name: string, onRefresh: () => void) {
+  if (!name) return
+  await authFetch(`/api/projects/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  onRefresh()
+}
+
+async function togglePinProject(p: Project, onRefresh: () => void) {
+  await authFetch(`/api/projects/${p.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned: !p.pinned }),
+  })
+  onRefresh()
+}
+
+async function archiveProject(p: Project, onRefresh: () => void) {
+  await authFetch(`/api/projects/${p.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ archived: !p.archived }),
+  })
+  onRefresh()
+}
+
+async function rescanProject(id: string, onRefresh: () => void) {
+  await authFetch(`/api/projects/${id}/scan`, { method: 'POST' })
+  onRefresh()
+}
+
+async function renameSession(id: string, title: string, onRefresh: () => void) {
+  await authFetch(`/api/sessions/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  })
+  onRefresh()
+}
+
+async function toggleSessionPin(s: Session, onRefresh: () => void) {
+  await authFetch(`/api/sessions/${s.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinned: !s.pinned }),
+  })
+  onRefresh()
+}
+
+async function toggleSessionArchive(s: Session, onRefresh: () => void) {
+  await authFetch(`/api/sessions/${s.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ archived: !s.archived }),
+  })
+  onRefresh()
 }

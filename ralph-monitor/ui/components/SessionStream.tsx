@@ -50,7 +50,7 @@ export interface SessionStreamProps {
   sessionId: string
   // Status from US-006 / US-016b — passed in by the parent. Stream is enabled
   // only when status === 'live-attached'.
-  status: 'dormant' | 'live-attached' | 'live-orphaned' | 'exited'
+  status: 'dormant' | 'live-attached' | 'live-orphaned' | 'exited' | 'external-owned'
   // The auth wrapper from US-004. Taking it as a prop keeps the component
   // testable without monkey-patching the auth module.
   authWebSocket: (url: string) => WebSocket
@@ -173,10 +173,25 @@ export function SessionStream({ sessionId, status, authWebSocket }: SessionStrea
     // Try once immediately in case the container is already sized.
     init()
 
+    // Intercept Shift+Enter at capture phase, beating xterm's bubble-phase
+    // listener. xterm doesn't differentiate Shift+Enter from plain Enter
+    // (both → \r); we send \x1b\r (canonical Alt+Enter) which claude-code's
+    // TUI treats as a literal newline within the input box.
+    const onContainerKeyDown = (e: KeyboardEvent) => {
+      const isEnter =
+        e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter'
+      if (!isEnter || !e.shiftKey) return
+      e.preventDefault()
+      e.stopPropagation()
+      try { wsRef.current?.send(JSON.stringify({ type: 'input', data: '\x1b\r' })) } catch {}
+    }
+    container.addEventListener('keydown', onContainerKeyDown, { capture: true })
+
     return () => {
       disposed = true
       ro.disconnect()
       if (onResize) window.removeEventListener('resize', onResize)
+      container.removeEventListener('keydown', onContainerKeyDown, { capture: true })
       try { ws?.close() } catch {}
       try { inputDispose?.dispose() } catch {}
       try { term?.dispose() } catch {}

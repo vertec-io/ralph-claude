@@ -1,31 +1,34 @@
-// Sqlite schema for ralph-monitor's session-aware persistence layer.
+// Sqlite schema for ralph-monitor.
 //
-// Migrations are applied in order by `runMigrations` in ./migrate.ts. Each entry
-// must be idempotent across runs in the sense that the migration runner reads
-// PRAGMA user_version and only applies versions strictly greater than it.
+// New world (post-redesign): no efforts tier. Projects map directly to
+// directories on disk; sessions belong to a project, not an effort. PRDs are a
+// first-class entity discovered from `<root>/tasks/*/prd.json` and joined to
+// sessions via `conversation_prds` (M:N — a single conversation can drive
+// multiple PRDs, e.g. /ralph-runner).
 //
-// Adding a new migration:
+// Migrations are applied in order by `runMigrations` in ./migrate.ts. The
+// runner reads PRAGMA user_version and applies versions strictly greater than
+// it. Adding a new migration:
 //   1. Append a new entry with the next integer version.
-//   2. Do NOT edit prior migrations once they have shipped — the runner relies
-//      on user_version monotonicity, and altering history would silently skip
-//      databases that already advanced past the prior version.
+//   2. Do NOT edit prior migrations once they have shipped.
 
 export interface Migration {
   version: number
   sql: string
 }
 
-// Migration 1: initial schema — projects, efforts, sessions + indexes.
+// Migration 1: clean-room schema.
 //
-// Design notes:
-//   - All FKs are NOT NULL and ON DELETE CASCADE (see AC: "no nullable FK columns").
-//   - sessions.working_dir IS nullable; spawn-time resolution falls back to
-//     effort.working_dir, then project.root_dir.
-//   - The kind='prd' CHECK enforces a non-empty prd_path on PRD-kind efforts;
-//     length() > 0 rejects empty strings as well as NULL.
-//   - The partial unique index `idx_sessions_one_live_per_effort` is what
-//     enforces "at most one live session per effort" — process_pid IS NULL
-//     rows (terminated sessions) are exempt and accumulate freely as history.
+//   projects          — directory-anchored, no kind/effort tier.
+//   sessions          — claude conversations. Owned directly by a project.
+//                       `pinned` is per-project (a session is pinned within
+//                       its owning project's sidebar).
+//   prd_specs         — discovered PRDs under <root>/tasks/<slug>/prd.json.
+//                       `slug` is the directory name.
+//   conversation_prds — M:N join. A session can be associated with 0..N PRDs.
+//
+// All FKs are NOT NULL ON DELETE CASCADE so a project drop cleans up its
+// sessions, prd_specs, and the join rows referencing them.
 const MIGRATION_1 = `
 CREATE TABLE projects (
   id              TEXT PRIMARY KEY,
@@ -37,22 +40,9 @@ CREATE TABLE projects (
   pinned          INTEGER NOT NULL DEFAULT 0
 );
 
-CREATE TABLE efforts (
-  id           TEXT PRIMARY KEY,
-  project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  name         TEXT NOT NULL,
-  kind         TEXT NOT NULL CHECK (kind IN ('prd','task','general')),
-  prd_path     TEXT,
-  working_dir  TEXT,
-  status       TEXT NOT NULL CHECK (status IN ('active','done','archived')) DEFAULT 'active',
-  created_at   INTEGER NOT NULL,
-  completed_at INTEGER,
-  CHECK (kind != 'prd' OR (prd_path IS NOT NULL AND length(prd_path) > 0))
-);
-
 CREATE TABLE sessions (
   id                  TEXT PRIMARY KEY,
-  effort_id           TEXT NOT NULL REFERENCES efforts(id) ON DELETE CASCADE,
+  project_id          TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   working_dir         TEXT,
   jsonl_path          TEXT NOT NULL,
   title               TEXT,
@@ -60,44 +50,41 @@ CREATE TABLE sessions (
   process_pid         INTEGER,
   process_started_at  INTEGER,
   last_activity_at    INTEGER,
-  created_at          INTEGER NOT NULL
+  created_at          INTEGER NOT NULL,
+  archived            INTEGER NOT NULL DEFAULT 0,
+  pinned              INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE prd_specs (
+  id           TEXT PRIMARY KEY,
+  project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  slug         TEXT NOT NULL,
+  prd_path     TEXT NOT NULL,
+  prd_json     TEXT,
+  mtime        INTEGER,
+  created_at   INTEGER NOT NULL,
+  UNIQUE (project_id, slug)
+);
+
+CREATE TABLE conversation_prds (
+  session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  prd_spec_id  TEXT NOT NULL REFERENCES prd_specs(id) ON DELETE CASCADE,
+  created_at   INTEGER NOT NULL,
+  PRIMARY KEY (session_id, prd_spec_id)
 );
 
 CREATE INDEX idx_projects_archived       ON projects(archived);
-CREATE INDEX idx_efforts_project         ON efforts(project_id);
-CREATE INDEX idx_efforts_status          ON efforts(status);
-CREATE INDEX idx_sessions_effort         ON sessions(effort_id);
+CREATE INDEX idx_sessions_project        ON sessions(project_id);
 CREATE INDEX idx_sessions_last_activity  ON sessions(last_activity_at);
+CREATE INDEX idx_sessions_archived       ON sessions(archived);
+CREATE INDEX idx_sessions_pinned         ON sessions(pinned);
 CREATE INDEX idx_sessions_live           ON sessions(process_pid)
   WHERE process_pid IS NOT NULL;
-CREATE UNIQUE INDEX idx_sessions_one_live_per_effort ON sessions(effort_id)
-  WHERE process_pid IS NOT NULL;
-`
-
-// Migration 2: add archived column to sessions + index.
-//
-// Uses ALTER TABLE so existing data (sessions already in the DB) receives the
-// new column with its DEFAULT value (0 = not archived). SQLite evaluates
-// ALTER TABLE ... ADD COLUMN only when user_version < 2, so running the
-// migration runner a second time is a safe no-op.
-const MIGRATION_2 = `
-ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
-CREATE INDEX IF NOT EXISTS idx_sessions_archived ON sessions(archived);
-`
-
-// Migration 3: lift the one-live-session-per-effort constraint.
-//
-// The partial unique index `idx_sessions_one_live_per_effort` previously
-// enforced at most one session with a non-null process_pid per effort. We are
-// removing this constraint to allow multiple parallel live sessions under the
-// same effort. DROP INDEX IF EXISTS is safe on both fresh (where the index was
-// just created by MIGRATION_1) and existing DBs.
-const MIGRATION_3 = `
-DROP INDEX IF EXISTS idx_sessions_one_live_per_effort;
+CREATE UNIQUE INDEX idx_sessions_jsonl   ON sessions(jsonl_path);
+CREATE INDEX idx_prd_specs_project       ON prd_specs(project_id);
+CREATE INDEX idx_conv_prds_prd           ON conversation_prds(prd_spec_id);
 `
 
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: MIGRATION_1 },
-  { version: 2, sql: MIGRATION_2 },
-  { version: 3, sql: MIGRATION_3 },
 ]

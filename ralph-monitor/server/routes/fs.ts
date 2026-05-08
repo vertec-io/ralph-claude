@@ -44,6 +44,13 @@ function getAllowedRoots(): string[] {
     .filter((r): r is string => r !== null)
 }
 
+// GET /api/fs/roots — returns the allowed roots so the UI directory picker
+// has a sane starting path (defaults to $HOME).
+fs.get('/api/fs/roots', (c) => {
+  const roots = getAllowedRoots()
+  return c.json({ roots, default: roots[0] ?? homedir() })
+})
+
 fs.get('/api/fs/list', async (c) => {
   const requestedPath = c.req.query('path')
   if (!requestedPath || typeof requestedPath !== 'string') {

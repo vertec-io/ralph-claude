@@ -114,65 +114,20 @@ export function DirectoryPicker({ onPick, onCancel, initialPath }: DirectoryPick
       return
     }
 
-    // Strategy: try the server-default root by fetching /api/fs/list without a
-    // path — but the endpoint requires a path, so we probe a few well-known
-    // starting points in order: the home dir heuristic (we can't read HOME from
-    // the browser, so we ask for the path the UI's origin suggests), then fall
-    // back to /home/<window.location implied>, then to '/'.
-    //
-    // Simplest reliable approach: fetch a discovery helper.  Since there's no
-    // dedicated "what is HOME" endpoint, we just try likely paths:
-    //   1. We ask /api/fs/list with the special path '~' — but that won't work
-    //      because realpathSync('~') will fail.
-    //
-    // Best practical option: fetch /api/fs/list?path=<origin-path> with the
-    // known fallback chain. We use '/home' as a reasonable starting guess when
-    // nothing else is available, and let the server tell us the real root.
-    //
-    // The cleanest UX is to just ask for '/api/fs/list?path=/' and navigate from
-    // there, but that will 403 if the allowlist is restricted to $HOME. Instead
-    // we try $HOME candidates in order and settle on whichever succeeds first.
-
-    const candidates = [
-      // Try to infer home from location (works when running on localhost as the
-      // user, which is the only supported deployment anyway).
-      // We can't actually derive $HOME in the browser — use a server-side env
-      // probe instead.  For now the best we can do without a dedicated endpoint
-      // is to try '/home/' + navigator.platform hints which is unreliable.
-      // Safest: just use the navigator approach or fall through to an empty fetch.
-      // We'll fetch '/api/fs/list?path=' with no path to get the 400 error's
-      // normalizedPath side-effect... actually that won't work either.
-      //
-      // Real approach: fetch the root ('/') and rely on the server 403ing for
-      // paths outside the allowlist, then the error message contains `allowed`
-      // which we could parse. But that's too clever.
-      //
-      // For this implementation we use a one-shot probe: try HOME-like paths,
-      // then fall back to '/'. The server's allowed roots default to $HOME, so
-      // /home/<user> should work. We pick up the OS username hint from the env.
-      // In the browser we can't read /etc/passwd, so we rely on the 200 response.
-      '/home',
-      '/',
-    ]
-
-    // We try each candidate in sequence until one succeeds (returns 200).
+    // Ask the server which directory to start in. Defaults to $HOME unless
+    // RALPH_MONITOR_PROJECT_ROOTS overrides it.
     ;(async () => {
-      for (const candidate of candidates) {
-        try {
-          const res = await authFetch(
-            `/api/fs/list?path=${encodeURIComponent(candidate)}`,
-          )
-          if (res.ok) {
-            const data = await res.json() as FsListResult
-            setCurrentPath(data.normalizedPath)
-            setEntries(data.entries.filter((e) => e.isDir || e.isSymlink))
+      try {
+        const res = await authFetch('/api/fs/roots')
+        if (res.ok) {
+          const body = (await res.json()) as { default?: string; roots?: string[] }
+          const start = body.default ?? body.roots?.[0]
+          if (start) {
+            await fetchDir(start)
             return
           }
-        } catch {
-          // ignore, try next
         }
-      }
-      // All candidates failed — leave currentPath empty and show error.
+      } catch {}
       setError('Could not determine a starting directory. Please navigate manually.')
     })()
   }, [fetchDir, initialPath])

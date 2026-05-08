@@ -1,23 +1,16 @@
-// Typed CRUD operations for the `projects` table.
+// Typed CRUD for the `projects` table.
+//
+// A project is a pointer to a directory on disk. Creating a project is just
+// "opening a directory". There is no kind, no effort tier, and no auto-created
+// child rows — sessions and prd_specs are populated by discovery (see
+// disk-discovery service and tasks-scan).
 //
 // Conventions:
 //   - All write paths use prepared statements; nothing is interpolated into SQL.
 //   - INTEGER 0/1 columns (`archived`, `pinned`) are mapped to booleans at the
-//     row boundary via `!!row.archived` so callers never see the raw 0/1.
-//   - `updateProject` only emits SET clauses for keys that are actually present
-//     in the patch object (we treat `undefined` as "not provided", NOT as
-//     "clear to null"). This keeps the partial-update contract unambiguous.
-//   - `getProjectByRootDir` does NOT throw on a missing path — realpath is
-//     wrapped so callers can pass arbitrary user-supplied input.
-//
-// Soft delete is implemented via the `archived` flag (acceptance criterion).
-// `hardDeleteProject` is the explicit escape hatch and cascades through FKs to
-// efforts + sessions.
-//
-// Auto-'general' effort: `createProject` mirrors the contract from US-001's
-// `createProjectWithGeneralEffort` — every project gets exactly one auto-named
-// 'General' effort inserted in the same transaction, so callers always have a
-// valid parent for session creation.
+//     row boundary so callers never see the raw 0/1.
+//   - `updateProject` only emits SET clauses for keys present in the patch
+//     object (`undefined` means "not provided", NOT "clear to null").
 
 import type { Database } from 'bun:sqlite'
 import { realpathSync } from 'node:fs'
@@ -32,8 +25,6 @@ export interface Project {
   pinned: boolean
 }
 
-// Internal row shape as returned by sqlite — INTEGER columns surface as numbers
-// rather than booleans. Kept private; callers consume the parsed `Project`.
 interface ProjectRow {
   id: string
   name: string
@@ -56,19 +47,14 @@ function rowToProject(row: ProjectRow): Project {
   }
 }
 
-// Normalize a project root_dir: realpath it (resolves symlinks, canonicalizes
-// case where the FS preserves it) and strip any trailing slash. Used at write
-// time so the on-disk row is always canonical.
+// Normalize a project root_dir: realpath it (resolves symlinks) and strip any
+// trailing slash. Used at write time so the on-disk row is canonical.
 export function normalizeRootDir(rootDir: string): string {
   const real = realpathSync.native(rootDir)
   if (real.length > 1 && real.endsWith('/')) return real.slice(0, -1)
   return real
 }
 
-// Lookup-time normalization: same shape as `normalizeRootDir`, but tolerates a
-// missing path by returning `null`. realpath() throws ENOENT for paths that
-// don't exist; we trap that so callers passing user-supplied input get a clean
-// "no match" rather than a crash.
 function normalizeForLookup(rootDir: string): string | null {
   try {
     const real = realpathSync.native(rootDir)
@@ -87,34 +73,19 @@ export interface CreateProjectInput {
 
 export interface CreateProjectResult {
   projectId: string
-  effortId: string
   rootDir: string
 }
 
-// Insert a project + auto-'general' effort transactionally. The schema
-// invariant (every project has at least one effort at insertion time) is what
-// lets the rest of the system assume there is always a valid parent for a new
-// session — so this is the ONLY blessed way to create a project.
 export function createProject(db: Database, input: CreateProjectInput): CreateProjectResult {
   const projectId = input.id ?? crypto.randomUUID()
-  const effortId = crypto.randomUUID()
   const rootDir = normalizeRootDir(input.root_dir)
   const now = Date.now()
 
-  const insertProject = db.prepare(
+  db.prepare(
     'INSERT INTO projects (id, name, root_dir, created_at) VALUES (?, ?, ?, ?)',
-  )
-  const insertEffort = db.prepare(
-    `INSERT INTO efforts (id, project_id, name, kind, status, created_at)
-     VALUES (?, ?, 'General', 'general', 'active', ?)`,
-  )
+  ).run(projectId, input.name, rootDir, now)
 
-  db.transaction(() => {
-    insertProject.run(projectId, input.name, rootDir, now)
-    insertEffort.run(effortId, projectId, now)
-  })()
-
-  return { projectId, effortId, rootDir }
+  return { projectId, rootDir }
 }
 
 export function getProjectById(db: Database, id: string): Project | null {
@@ -124,9 +95,6 @@ export function getProjectById(db: Database, id: string): Project | null {
   return row ? rowToProject(row) : null
 }
 
-// realpath the input, then exact-match `root_dir`. Returns `null` when the
-// path doesn't exist on disk (callers don't need to pre-check) OR when there
-// is simply no matching row.
 export function getProjectByRootDir(db: Database, path: string): Project | null {
   const normalized = normalizeForLookup(path)
   if (normalized === null) return null
@@ -141,14 +109,9 @@ export interface ListProjectsFilter {
   pinned?: boolean
 }
 
-// Filter semantics: `true` keeps only matching rows, `false` keeps only
-// non-matching rows, omitted means "don't filter on this column". We build the
-// WHERE clause dynamically but every value goes through a parameter binding —
-// the only string concatenation is the column name + comparator, which is
-// drawn from a fixed set.
 export function listProjects(db: Database, filter: ListProjectsFilter = {}): Project[] {
   const where: string[] = []
-  const params: (number)[] = []
+  const params: number[] = []
   if (filter.archived !== undefined) {
     where.push('archived = ?')
     params.push(filter.archived ? 1 : 0)
@@ -158,8 +121,6 @@ export function listProjects(db: Database, filter: ListProjectsFilter = {}): Pro
     params.push(filter.pinned ? 1 : 0)
   }
   const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
-  // Pinned projects float to the top; within a pin-bucket, most-recently
-  // opened first. NULLS LAST keeps never-opened projects out of the way.
   const sql = `SELECT * FROM projects ${whereSql}
                ORDER BY pinned DESC, last_opened_at DESC NULLS LAST, created_at DESC`
   const rows = db.prepare(sql).all(...params) as ProjectRow[]
@@ -173,9 +134,6 @@ export interface UpdateProjectPatch {
   last_opened_at?: number | null
 }
 
-// Typed partial update. Only fields actually present in the patch object are
-// emitted as SET clauses. `undefined` is treated as "not provided"; if a
-// caller wants to clear `last_opened_at`, they pass `null` explicitly.
 export function updateProject(db: Database, id: string, patch: UpdateProjectPatch): void {
   const sets: string[] = []
   const params: (string | number | null)[] = []
@@ -211,9 +169,6 @@ export function unarchiveProject(db: Database, id: string): void {
   updateProject(db, id, { archived: false })
 }
 
-// Hard delete — cascades through FKs to efforts and sessions per schema.
-// Soft delete (archived flag) is the default; this is the explicit escape
-// hatch when a project must be permanently removed.
 export function hardDeleteProject(db: Database, id: string): void {
   db.prepare('DELETE FROM projects WHERE id = ?').run(id)
 }

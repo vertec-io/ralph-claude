@@ -1,134 +1,79 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { authFetch, authEventSource, getToken } from './auth'
-import type { UnmanagedPRDItem } from '../server/routes/unmanaged'
 import type { Project } from '../server/db'
-import type { Effort } from '../server/db/efforts'
 import type { Session } from '../server/db/sessions'
-import { AdoptPrdDialog } from './components/AdoptPrdDialog'
+import type { LifecycleAppEvent } from '../server/types'
 import { Sidebar } from './components/Sidebar'
-import { SessionDetail } from './components/SessionDetail'
+import { ConversationDetail } from './components/ConversationDetail'
 import { NewProjectDialog } from './components/NewProjectDialog'
-import { NewEffortDialog } from './components/NewEffortDialog'
 import { NewSessionDialog } from './components/NewSessionDialog'
 import { Welcome } from './components/Welcome'
 import { ProjectDetail } from './components/ProjectDetail'
-import { EffortDetail } from './components/EffortDetail'
+import { PrdDetail } from './components/PrdDetail'
+import { GitStatusBar } from './components/GitStatusBar'
 import { useSelection } from './router'
 
-// ---------------------------------------------------------------------------
-// Hook: fetch /api/unmanaged-prds + /api/projects on demand.
-// ---------------------------------------------------------------------------
-function useUnmanagedPrds(triggerVersion: number): {
-  unmanaged: UnmanagedPRDItem[]
-  projects: Project[]
-  refresh: () => void
-} {
-  const [unmanaged, setUnmanaged] = useState<UnmanagedPRDItem[]>([])
-  const [projects, setProjects] = useState<Project[]>([])
-  const versionRef = useRef(triggerVersion)
-  versionRef.current = triggerVersion
-
-  const fetch_ = useCallback(() => {
-    authFetch('/api/unmanaged-prds')
-      .then((r) => r.json())
-      .then((body: any) => { if (Array.isArray(body?.unmanaged)) setUnmanaged(body.unmanaged) })
-      .catch(() => {})
-    authFetch('/api/projects')
-      .then((r) => r.json())
-      .then((body: any) => { if (Array.isArray(body?.projects)) setProjects(body.projects) })
-      .catch(() => {})
-  }, [])
-
-  // Re-fetch whenever the trigger version increments (SSE event) or on mount.
-  useEffect(() => { fetch_() }, [fetch_, triggerVersion])
-
-  return { unmanaged, projects, refresh: fetch_ }
-}
-
-// ---------------------------------------------------------------------------
-// App
-// ---------------------------------------------------------------------------
-
 export function App() {
-  const [unmanagedVersion, setUnmanagedVersion] = useState(0)
-  const bumpUnmanaged = useCallback(() => setUnmanagedVersion((v) => v + 1), [])
+  const [projects, setProjects] = useState<Project[]>([])
+  const [sessionsByProject, setSessionsByProject] = useState<Map<string, Session[]>>(new Map())
+  const [liveSessionIds, setLiveSessionIds] = useState<Set<string>>(new Set())
 
-  const { unmanaged, projects, refresh: refreshUnmanaged } = useUnmanagedPrds(unmanagedVersion)
-
-  const [efforts, setEfforts] = useState<Effort[]>([])
-  const [sessions, setSessions] = useState<Session[]>([])
-
-  // Session live-activity state: tracks session IDs that have had recent
-  // transcript turn events (from session.activity SSE). Each entry auto-expires
-  // after 3 seconds via a per-session timer ref.
   const [recentActivityIds, setRecentActivityIds] = useState<Set<string>>(new Set())
   const activityTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
 
   const [selection, setSelection] = useSelection()
-  const { projectId, effortId, sessionId } = selection
+  const { projectId, conversationId, prdSpecId } = selection
 
-  const [adoptItem, setAdoptItem] = useState<UnmanagedPRDItem | null>(null)
-
-  // ---------------------------------------------------------------------------
-  // Dialog state — hoisted here so both Sidebar and main-content buttons
-  // can open the same modals.
-  // ---------------------------------------------------------------------------
   const [newProjectOpen, setNewProjectOpen] = useState(false)
-  const [newEffortTarget, setNewEffortTarget] = useState<{
-    projectId: string
-    rootDir: string
-    initialPickedPath?: string
-  } | null>(null)
-  const [newSessionTarget, setNewSessionTarget] = useState<{
-    projectId: string
-    effortId: string
-    effortName: string
-    effortWorkingDir: string | null
-    projectRootDir: string
-  } | null>(null)
+  const [newSessionTarget, setNewSessionTarget] = useState<Project | null>(null)
 
-  // ---------------------------------------------------------------------------
-  // Fan out from projects to load all efforts + sessions.
-  // ---------------------------------------------------------------------------
-  const refreshEffortsAndSessions = useCallback(async () => {
-    if (projects.length === 0) {
-      setEfforts([])
-      setSessions([])
-      return
-    }
-    const effortBatches = await Promise.all(
-      projects.map((p) =>
-        authFetch(`/api/projects/${p.id}/efforts`)
-          .then((r) => (r.ok ? r.json() : { efforts: [] }))
-          .catch(() => ({ efforts: [] })),
-      ),
-    )
-    const allEfforts: Effort[] = effortBatches.flatMap((b: any) =>
-      Array.isArray(b?.efforts) ? (b.efforts as Effort[]) : [],
-    )
-    setEfforts(allEfforts)
+  const refreshProjects = useCallback(async () => {
+    try {
+      const res = await authFetch('/api/projects')
+      if (!res.ok) return
+      const body = (await res.json()) as { projects: Project[] }
+      setProjects(body.projects)
+    } catch {}
+  }, [])
 
-    const sessionBatches = await Promise.all(
-      allEfforts.map((e) =>
-        authFetch(`/api/efforts/${e.id}/sessions`)
-          .then((r) => (r.ok ? r.json() : { sessions: [] }))
-          .catch(() => ({ sessions: [] })),
-      ),
+  const refreshSessions = useCallback(async (projectList: Project[]) => {
+    const map = new Map<string, Session[]>()
+    await Promise.all(
+      projectList.map(async (p) => {
+        try {
+          const res = await authFetch(
+            `/api/projects/${p.id}/sessions?include_archived=false`,
+          )
+          if (res.ok) {
+            const body = (await res.json()) as { sessions: Session[] }
+            map.set(p.id, body.sessions)
+          } else {
+            map.set(p.id, [])
+          }
+        } catch {
+          map.set(p.id, [])
+        }
+      }),
     )
-    const allSessions: Session[] = sessionBatches.flatMap((b: any) =>
-      Array.isArray(b?.sessions) ? (b.sessions as Session[]) : [],
-    )
-    setSessions(allSessions)
-  }, [projects])
+    setSessionsByProject(map)
+  }, [])
 
-  useEffect(() => { void refreshEffortsAndSessions() }, [refreshEffortsAndSessions])
-
-  // ---------------------------------------------------------------------------
-  // Thin SSE subscription — replaces the old useServerStream for App's needs.
-  // SessionDetail has its own SSE subscription; leave it alone.
-  // ---------------------------------------------------------------------------
+  // Initial load.
   useEffect(() => {
-    // Wait for the token to be loaded before opening the EventSource.
+    void refreshProjects()
+  }, [refreshProjects])
+
+  // Whenever projects change, refresh per-project sessions.
+  useEffect(() => {
+    void refreshSessions(projects)
+  }, [projects, refreshSessions])
+
+  const refreshAll = useCallback(async () => {
+    await refreshProjects()
+  }, [refreshProjects])
+
+  // Lifecycle SSE — refresh on project / session events; track live + activity.
+  useEffect(() => {
     let es: EventSource | null = null
     let cancelled = false
 
@@ -136,43 +81,68 @@ export function App() {
       .then(() => {
         if (cancelled) return
         es = authEventSource('/events')
-        const handler = (e: MessageEvent) => {
+
+        es.addEventListener('lifecycle.snapshot', (ev) => {
           try {
-            const evt = JSON.parse(e.data)
-            const t = evt.type
-            if (t === 'session.activity') {
-              // Live-activity pulse: add the session id to the recent set,
-              // replacing any existing timer to extend the highlight.
-              const sessionId = evt.id as string
-              if (sessionId) {
-                setRecentActivityIds((prev) => {
-                  const next = new Set(prev)
-                  next.add(sessionId)
-                  return next
-                })
-                const existingTimer = activityTimers.current.get(sessionId)
-                if (existingTimer !== undefined) clearTimeout(existingTimer)
-                const timer = setTimeout(() => {
-                  setRecentActivityIds((prev) => {
-                    const next = new Set(prev)
-                    next.delete(sessionId)
-                    return next
-                  })
-                  activityTimers.current.delete(sessionId)
-                }, 3000)
-                activityTimers.current.set(sessionId, timer)
-              }
-              return
+            const data = JSON.parse((ev as MessageEvent).data) as {
+              projects: Project[]
+              live_session_ids: string[]
             }
-            if (
-              t?.startsWith('effort.') ||
-              t?.startsWith('session.') ||
-              t?.startsWith('project.')
-            ) {
-              void refreshEffortsAndSessions()
-              if (t === 'effort.created' || t === 'effort.deleted') bumpUnmanaged()
-            }
+            setProjects(data.projects)
+            setLiveSessionIds(new Set(data.live_session_ids))
           } catch {}
+        })
+
+        const handler = (e: MessageEvent) => {
+          let evt: LifecycleAppEvent
+          try { evt = JSON.parse(e.data) } catch { return }
+
+          if (evt.type === 'session.activity') {
+            const id = evt.id
+            setRecentActivityIds((prev) => {
+              const next = new Set(prev)
+              next.add(id)
+              return next
+            })
+            const existing = activityTimers.current.get(id)
+            if (existing !== undefined) clearTimeout(existing)
+            const timer = setTimeout(() => {
+              setRecentActivityIds((prev) => {
+                const next = new Set(prev)
+                next.delete(id)
+                return next
+              })
+              activityTimers.current.delete(id)
+            }, 3000)
+            activityTimers.current.set(id, timer)
+            return
+          }
+
+          if (evt.type === 'session.created' || evt.type === 'session.updated') {
+            // Mark/unmark live session id based on process_pid presence.
+            const s = evt.session
+            setLiveSessionIds((prev) => {
+              const next = new Set(prev)
+              if (s.process_pid != null) next.add(s.id)
+              else next.delete(s.id)
+              return next
+            })
+          }
+          if (evt.type === 'session.exited' || evt.type === 'session.deleted') {
+            setLiveSessionIds((prev) => {
+              const next = new Set(prev)
+              next.delete(evt.id)
+              return next
+            })
+          }
+
+          if (
+            evt.type.startsWith('session.') ||
+            evt.type.startsWith('project.') ||
+            evt.type.startsWith('prd_spec.')
+          ) {
+            void refreshAll()
+          }
         }
         es.addEventListener('update', handler as EventListener)
       })
@@ -180,187 +150,91 @@ export function App() {
 
     return () => {
       cancelled = true
-      if (es) {
-        es.close()
-      }
+      if (es) es.close()
     }
-  }, [refreshEffortsAndSessions, bumpUnmanaged])
+  }, [refreshAll])
 
-  // ---------------------------------------------------------------------------
-  // Derived selection state
-  // ---------------------------------------------------------------------------
   const selectedProject = projects.find((p) => p.id === projectId) ?? null
-  const selectedEffort = efforts.find((e) => e.id === effortId) ?? null
+  const projectSessions = projectId ? sessionsByProject.get(projectId) ?? [] : []
 
-  const projectEfforts = selectedProject
-    ? efforts.filter((e) => e.project_id === selectedProject.id)
-    : []
-  const effortSessions = selectedEffort
-    ? sessions.filter((s) => s.effort_id === selectedEffort.id)
-    : []
-
-  // ---------------------------------------------------------------------------
-  // Render
-  // ---------------------------------------------------------------------------
   return (
     <div className="grid grid-cols-[280px_1fr] h-screen">
       <Sidebar
         projects={projects}
-        efforts={efforts}
-        sessions={sessions}
-        liveSessionIds={new Set<string>()}
+        sessionsByProject={sessionsByProject}
+        liveSessionIds={liveSessionIds}
         recentActivityIds={recentActivityIds}
         selectedProjectId={projectId}
-        onSelectProject={(id) => setSelection({ projectId: id, effortId: null, sessionId: null })}
-        selectedEffortId={effortId}
-        onSelectEffort={(id) => {
-          const e = efforts.find((x) => x.id === id)
-          setSelection({ projectId: e?.project_id ?? projectId, effortId: id, sessionId: null })
-        }}
-        selectedSessionId={sessionId}
-        onSelectSession={(id) => {
-          const s = sessions.find((x) => x.id === id)
-          const e = s ? efforts.find((x) => x.id === s.effort_id) : null
-          setSelection({
-            projectId: e?.project_id ?? projectId,
-            effortId: e?.id ?? effortId,
-            sessionId: id,
-          })
-        }}
-        unmanaged={unmanaged}
-        onAdopt={setAdoptItem}
-        onRefresh={() => { refreshUnmanaged(); void refreshEffortsAndSessions() }}
-        onSessionCreated={(pId, eId, sId) =>
-          setSelection({ projectId: pId, effortId: eId, sessionId: sId })
+        selectedConversationId={conversationId}
+        onSelectProject={(id) =>
+          setSelection({ projectId: id, conversationId: null, prdSpecId: null })
+        }
+        onSelectConversation={(pid, cid) =>
+          setSelection({ projectId: pid, conversationId: cid, prdSpecId: null })
         }
         onOpenNewProject={() => setNewProjectOpen(true)}
-        onOpenNewEffort={(target) => setNewEffortTarget(target)}
-        onOpenNewSession={(target) => {
-          const proj = projects.find((p) => p.id === target.projectId)
-          setNewSessionTarget({ ...target, projectRootDir: proj?.root_dir ?? target.projectRootDir })
+        onOpenNewSession={(pid) => {
+          const p = projects.find((x) => x.id === pid)
+          if (p) setNewSessionTarget(p)
         }}
+        onRefresh={() => void refreshAll()}
       />
 
-      <main className="overflow-y-auto bg-zinc-950">
-        {sessionId ? (
-          <SessionDetail
-            sessionId={sessionId}
-            project={selectedProject}
-            effort={selectedEffort}
-          />
-        ) : effortId && selectedEffort ? (
-          <EffortDetail
-            project={selectedProject}
-            effort={selectedEffort}
-            sessions={effortSessions}
-            onSelectSession={(id) =>
-              setSelection({ projectId, effortId, sessionId: id })
-            }
-            onNewSession={() => {
-              if (selectedEffort) {
-                const proj = projects.find((p) => p.id === selectedEffort.project_id)
-                setNewSessionTarget({
-                  projectId: selectedEffort.project_id,
-                  effortId: selectedEffort.id,
-                  effortName: selectedEffort.name,
-                  effortWorkingDir: selectedEffort.working_dir,
-                  projectRootDir: proj?.root_dir ?? '',
-                })
+      <main className="grid grid-rows-[1fr_auto] overflow-hidden bg-zinc-950">
+        <div className="overflow-y-auto min-h-0">
+          {conversationId ? (
+            <ConversationDetail
+              conversationId={conversationId}
+              project={selectedProject}
+            />
+          ) : prdSpecId && selectedProject ? (
+            <PrdDetail
+              project={selectedProject}
+              prdSpecId={prdSpecId}
+              onSelectConversation={(cid) =>
+                setSelection({ projectId: selectedProject.id, conversationId: cid, prdSpecId: null })
               }
-            }}
-          />
-        ) : projectId && selectedProject ? (
-          <ProjectDetail
-            project={selectedProject}
-            efforts={projectEfforts}
-            sessions={sessions}
-            onSelectEffort={(id) =>
-              setSelection({ projectId: selectedProject.id, effortId: id, sessionId: null })
-            }
-            onNewEffort={() => {
-              if (selectedProject) {
-                setNewEffortTarget({
-                  projectId: selectedProject.id,
-                  rootDir: selectedProject.root_dir,
-                })
+            />
+          ) : selectedProject ? (
+            <ProjectDetail
+              project={selectedProject}
+              sessions={projectSessions}
+              onSelectConversation={(cid) =>
+                setSelection({ projectId: selectedProject.id, conversationId: cid, prdSpecId: null })
               }
-            }}
-            onRefresh={() => void refreshEffortsAndSessions()}
-          />
-        ) : (
-          <Welcome
-            unmanagedCount={unmanaged.length}
-            onNewProject={() => setNewProjectOpen(true)}
-          />
-        )}
+              onSelectPrd={(pid) =>
+                setSelection({ projectId: selectedProject.id, conversationId: null, prdSpecId: pid })
+              }
+              onOpenNewSession={() => setNewSessionTarget(selectedProject)}
+              onRefresh={() => void refreshAll()}
+            />
+          ) : (
+            <Welcome onNewProject={() => setNewProjectOpen(true)} />
+          )}
+        </div>
+        {selectedProject && <GitStatusBar projectId={selectedProject.id} />}
       </main>
 
-      {/* Adopt PRD dialog */}
-      {adoptItem && (
-        <AdoptPrdDialog
-          item={adoptItem}
-          projects={projects}
-          onClose={() => setAdoptItem(null)}
-          onAdopted={() => {
-            setAdoptItem(null)
-            refreshUnmanaged()
-          }}
-        />
-      )}
-
-      {/* New Project dialog */}
       <NewProjectDialog
         open={newProjectOpen}
         onClose={() => setNewProjectOpen(false)}
-        onCreated={() => {
+        onCreated={(project) => {
           setNewProjectOpen(false)
-          refreshUnmanaged()
+          void refreshAll()
+          setSelection({ projectId: project.id, conversationId: null, prdSpecId: null })
         }}
-        onAddAsEffort={(pId, pickedPath) => {
-          setNewProjectOpen(false)
-          const proj = projects.find((p) => p.id === pId)
-          if (proj) {
-            setNewEffortTarget({
-              projectId: proj.id,
-              rootDir: proj.root_dir,
-              initialPickedPath: pickedPath,
-            })
-          } else {
-            refreshUnmanaged()
-          }
-        }}
-        projects={projects.map((p) => ({ id: p.id, name: p.name }))}
       />
 
-      {/* New Effort dialog */}
-      {newEffortTarget && (
-        <NewEffortDialog
-          open={true}
-          projectId={newEffortTarget.projectId}
-          projectRootDir={newEffortTarget.rootDir}
-          initialPickedPath={newEffortTarget.initialPickedPath}
-          onClose={() => setNewEffortTarget(null)}
-          onCreated={() => {
-            setNewEffortTarget(null)
-            void refreshEffortsAndSessions()
-          }}
-        />
-      )}
-
-      {/* New Session dialog */}
       {newSessionTarget && (
         <NewSessionDialog
           open={true}
-          effortId={newSessionTarget.effortId}
-          effortName={newSessionTarget.effortName}
-          effortWorkingDir={newSessionTarget.effortWorkingDir}
-          projectRootDir={newSessionTarget.projectRootDir}
+          project={newSessionTarget}
           onClose={() => setNewSessionTarget(null)}
           onCreated={(session) => {
-            const { projectId: pId, effortId: eId } = newSessionTarget
+            const p = newSessionTarget
             setNewSessionTarget(null)
-            void refreshEffortsAndSessions()
-            setSelection({ projectId: pId, effortId: eId, sessionId: session.id })
+            void refreshAll()
+            setSelection({ projectId: p.id, conversationId: session.id, prdSpecId: null })
           }}
         />
       )}

@@ -1,29 +1,17 @@
-// Typed CRUD operations for the `sessions` table.
+// Typed CRUD for the `sessions` table.
 //
-// Two acceptance-criteria-driven contracts that differ from the other modules:
+// Sessions belong directly to a project (no effort tier). A session points at
+// a JSONL transcript on disk; `id` doubles as the JSONL filename, so it is
+// caller-allocated. Two sources populate this table:
 //
-//   1. `id` is REQUIRED on createSession and is caller-allocated. The DB layer
-//      does NOT auto-generate UUIDs here — sessions.id is also used as the
-//      filename of the on-disk JSONL transcript, and pre-allocation by the
-//      caller is what lets the watcher discover a session before the row
-//      lands in sqlite. Passing `undefined` is a programming error and we
-//      throw a TypeError.
+//   1. Conversations spawned by ralph-monitor — the row is inserted at spawn
+//      time with a generated UUID.
+//   2. Conversations discovered on disk under ~/.claude/projects/<encoded>/ —
+//      the row is upserted by the discovery service using the JSONL filename
+//      (claude-code's session uuid) as `id`.
 //
-//   2. There is no archive / soft-delete for sessions. Sessions are
-//      transcript-anchored history; they're either alive (process_pid set) or
-//      terminated (process_pid NULL). The only delete path is the explicit
-//      `hardDeleteSession`.
-//
-// Two unique-index violations can happen on insert/update:
-//
-//   - PRIMARY KEY collision on `id` -> `SessionIdCollisionError`.
-//   - Partial unique index `idx_sessions_one_live_per_effort` on
-//     `(effort_id) WHERE process_pid IS NOT NULL` -> `OneLiveSessionPerEffortError`.
-//
-// Both surface as `SQLiteError.code === 'SQLITE_CONSTRAINT_UNIQUE'` from
-// bun:sqlite, so we differentiate on the message text. The sqlite error
-// messages are stable: PRIMARY KEY violations include "sessions.id" and
-// partial-index violations include the index name.
+// `(project_id, jsonl_path)` is unique so the same JSONL is never tracked
+// twice. `pinned` is per-project (sidebar pinning).
 
 import { SQLiteError, type Database } from 'bun:sqlite'
 
@@ -31,7 +19,7 @@ export type SessionMode = 'interactive' | 'autonomous'
 
 export interface Session {
   id: string
-  effort_id: string
+  project_id: string
   working_dir: string | null
   jsonl_path: string
   title: string | null
@@ -41,11 +29,12 @@ export interface Session {
   last_activity_at: number | null
   created_at: number
   archived: boolean
+  pinned: boolean
 }
 
 interface SessionRow {
   id: string
-  effort_id: string
+  project_id: string
   working_dir: string | null
   jsonl_path: string
   title: string | null
@@ -55,12 +44,13 @@ interface SessionRow {
   last_activity_at: number | null
   created_at: number
   archived: number
+  pinned: number
 }
 
 function rowToSession(row: SessionRow): Session {
   return {
     id: row.id,
-    effort_id: row.effort_id,
+    project_id: row.project_id,
     working_dir: row.working_dir,
     jsonl_path: row.jsonl_path,
     title: row.title,
@@ -70,12 +60,10 @@ function rowToSession(row: SessionRow): Session {
     last_activity_at: row.last_activity_at,
     created_at: row.created_at,
     archived: !!row.archived,
+    pinned: !!row.pinned,
   }
 }
 
-// Typed errors. Both extend Error and set a discriminating `name`. Callers
-// can use `instanceof` (cross-module if they import the class) or
-// `err.name === 'OneLiveSessionPerEffortError'` (string compare, no import).
 export class SessionIdCollisionError extends Error {
   override readonly name = 'SessionIdCollisionError'
   constructor(message = 'a session with this id already exists') {
@@ -83,31 +71,21 @@ export class SessionIdCollisionError extends Error {
   }
 }
 
-export class OneLiveSessionPerEffortError extends Error {
-  override readonly name = 'OneLiveSessionPerEffortError'
-  constructor(message = 'another live session already exists for this effort') {
+export class JsonlPathCollisionError extends Error {
+  override readonly name = 'JsonlPathCollisionError'
+  constructor(message = 'a session with this jsonl_path already exists') {
     super(message)
   }
 }
 
-// Translate a SQLiteError UNIQUE constraint violation into one of our typed
-// errors based on which column/index the message names. Returns `null` if
-// this isn't a recognized unique-violation; the caller should rethrow.
-//
-// bun:sqlite (libsqlite3) formats a partial-unique-index violation using the
-// indexed column rather than the index name — e.g.
-// "UNIQUE constraint failed: sessions.effort_id" — so we differentiate on
-// "sessions.id" (PRIMARY KEY) vs "sessions.effort_id" (one-live-per-effort
-// partial index). The index name is also accepted as a fallback in case a
-// future sqlite formats it that way.
 function classifyUniqueError(err: unknown): Error | null {
   if (!(err instanceof SQLiteError)) return null
   if (err.code !== 'SQLITE_CONSTRAINT_UNIQUE' && err.code !== 'SQLITE_CONSTRAINT_PRIMARYKEY') {
     return null
   }
   const msg = err.message
-  if (msg.includes('idx_sessions_one_live_per_effort') || msg.includes('sessions.effort_id')) {
-    return new OneLiveSessionPerEffortError()
+  if (msg.includes('idx_sessions_jsonl') || msg.includes('sessions.jsonl_path')) {
+    return new JsonlPathCollisionError()
   }
   if (msg.includes('sessions.id')) {
     return new SessionIdCollisionError()
@@ -116,43 +94,42 @@ function classifyUniqueError(err: unknown): Error | null {
 }
 
 export interface CreateSessionInput {
-  // REQUIRED. Caller-allocated UUID — the DB layer never generates this.
   id: string
-  effort_id: string
+  project_id: string
   mode: SessionMode
   jsonl_path: string
   working_dir?: string | null
   title?: string | null
   process_pid?: number | null
   process_started_at?: number | null
+  last_activity_at?: number | null
+  created_at?: number
 }
 
 export function createSession(db: Database, input: CreateSessionInput): Session {
-  // Defensive runtime guard. TypeScript marks `id` required, but a JS caller
-  // (or a caller assembling input dynamically) can still send undefined; we'd
-  // rather throw a clear error here than let sqlite bind NULL and produce an
-  // opaque NOT NULL violation downstream.
   if (input.id === undefined || input.id === null || input.id === '') {
     throw new TypeError('createSession requires a caller-allocated id')
   }
-  const now = Date.now()
+  const created_at = input.created_at ?? Date.now()
 
   const stmt = db.prepare(
     `INSERT INTO sessions
-       (id, effort_id, working_dir, jsonl_path, title, mode, process_pid, process_started_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, project_id, working_dir, jsonl_path, title, mode,
+        process_pid, process_started_at, last_activity_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   try {
     stmt.run(
       input.id,
-      input.effort_id,
+      input.project_id,
       input.working_dir ?? null,
       input.jsonl_path,
       input.title ?? null,
       input.mode,
       input.process_pid ?? null,
       input.process_started_at ?? null,
-      now,
+      input.last_activity_at ?? null,
+      created_at,
     )
   } catch (err) {
     const typed = classifyUniqueError(err)
@@ -162,16 +139,17 @@ export function createSession(db: Database, input: CreateSessionInput): Session 
 
   return {
     id: input.id,
-    effort_id: input.effort_id,
+    project_id: input.project_id,
     working_dir: input.working_dir ?? null,
     jsonl_path: input.jsonl_path,
     title: input.title ?? null,
     mode: input.mode,
     process_pid: input.process_pid ?? null,
     process_started_at: input.process_started_at ?? null,
-    last_activity_at: null,
-    created_at: now,
+    last_activity_at: input.last_activity_at ?? null,
+    created_at,
     archived: false,
+    pinned: false,
   }
 }
 
@@ -182,30 +160,40 @@ export function getSessionById(db: Database, id: string): Session | null {
   return row ? rowToSession(row) : null
 }
 
-// Most-recently-active first. NULLS LAST keeps never-active sessions out of
-// the way; secondary sort on `created_at DESC` keeps insertion order stable
-// within a no-activity bucket.
-//
-// `includeArchived` (default false) mirrors the projects.listProjects pattern:
-// by default archived=1 rows are excluded; pass true to get everything.
-export function listSessionsByEffort(
+export function getSessionByJsonlPath(db: Database, jsonlPath: string): Session | null {
+  const row = db
+    .prepare('SELECT * FROM sessions WHERE jsonl_path = ?')
+    .get(jsonlPath) as SessionRow | null
+  return row ? rowToSession(row) : null
+}
+
+export interface ListSessionsFilter {
+  includeArchived?: boolean
+  pinnedOnly?: boolean
+  limit?: number
+}
+
+export function listSessionsByProject(
   db: Database,
-  effort_id: string,
-  includeArchived = false,
+  project_id: string,
+  filter: ListSessionsFilter = {},
 ): Session[] {
-  const sql = includeArchived
-    ? `SELECT * FROM sessions WHERE effort_id = ?
-       ORDER BY last_activity_at DESC NULLS LAST, created_at DESC`
-    : `SELECT * FROM sessions WHERE effort_id = ? AND archived = 0
-       ORDER BY last_activity_at DESC NULLS LAST, created_at DESC`
-  const rows = db.prepare(sql).all(effort_id) as SessionRow[]
+  const where: string[] = ['project_id = ?']
+  const params: (string | number)[] = [project_id]
+  if (!filter.includeArchived) where.push('archived = 0')
+  if (filter.pinnedOnly) where.push('pinned = 1')
+  let sql = `SELECT * FROM sessions WHERE ${where.join(' AND ')}
+             ORDER BY pinned DESC, last_activity_at DESC NULLS LAST, created_at DESC`
+  if (filter.limit && filter.limit > 0) {
+    sql += ' LIMIT ?'
+    params.push(filter.limit)
+  }
+  const rows = db.prepare(sql).all(...params) as SessionRow[]
   return rows.map(rowToSession)
 }
 
-// All sessions whose `process_pid` is non-null. Used by the startup
-// reconciler (US-006) to enumerate rows that claim to track a live process.
-// Order is `created_at DESC` for human-readable logs; the reconciler doesn't
-// depend on the order itself.
+// All sessions whose `process_pid` is non-null. Used by the startup reconciler
+// to enumerate rows that claim to track a live process.
 export function listSessionsWithPid(db: Database): Session[] {
   const rows = db
     .prepare(
@@ -222,12 +210,9 @@ export interface UpdateSessionPatch {
   process_started_at?: number | null
   last_activity_at?: number | null
   archived?: boolean
+  pinned?: boolean
 }
 
-// Typed partial. Setting `process_pid` to a different non-null value while
-// another live session exists for the same effort trips the partial unique
-// index — surfaced as `OneLiveSessionPerEffortError` so callers can distinguish
-// a contention error from any other failure.
 export function updateSession(db: Database, id: string, patch: UpdateSessionPatch): void {
   const sets: string[] = []
   const params: (string | number | null)[] = []
@@ -255,6 +240,10 @@ export function updateSession(db: Database, id: string, patch: UpdateSessionPatc
   if ('archived' in patch && patch.archived !== undefined) {
     sets.push('archived = ?')
     params.push(patch.archived ? 1 : 0)
+  }
+  if ('pinned' in patch && patch.pinned !== undefined) {
+    sets.push('pinned = ?')
+    params.push(patch.pinned ? 1 : 0)
   }
 
   if (sets.length === 0) return

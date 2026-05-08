@@ -1,118 +1,59 @@
-// NewProjectDialog — US-015b
+// NewProjectDialog — open a directory as a project.
 //
 // Two-step flow:
-//   Step 1: Directory picker (browses /api/fs/list, navigates downward from the
-//           allowed root, or from $HOME when the server default applies). The
-//           current path is shown in a breadcrumb. "Use this folder" confirms.
-//   Step 2: Name field (defaulted to basename of the picked path, editable) +
-//           optional worktree-match warning if /api/projects/check-worktree
-//           returns matched:true. The warning offers two actions:
-//             (a) "Add as effort under <ProjectName>" — fires onAddAsEffort
-//             (b) "Create new project anyway" — proceeds normally
+//   Step 1: Directory picker (browses /api/fs/list).
+//   Step 2: Name field (defaulted to basename of the picked path, editable).
 //
-// Submitting the create-project action calls POST /api/projects and fires
-// onCreated with the new project. The server normalizes (realpaths, trims
-// trailing slash) before inserting, so we don't need to do that client-side.
-//
-// No new deps — only lucide-react (already in deps), React, authFetch.
+// Submitting calls POST /api/projects { name, root_dir } and fires onCreated
+// with the new project. The server normalizes (realpaths, trims trailing
+// slash) before inserting.
 
 import { useCallback, useEffect, useState } from 'react'
 import { FolderOpen, X } from 'lucide-react'
 import { authFetch } from '../auth'
 import { DirectoryPicker } from './DirectoryPicker'
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type CheckWorktreeResult =
-  | { matched: true; projectId: string; branch: string | null }
-  | { matched: false }
-
 export interface NewProjectDialogProps {
   open: boolean
   onClose: () => void
   onCreated: (project: { id: string; name: string }) => void
-  /** Called when the user chooses "Add as effort under X" instead of creating a
-   *  new project. The parent is responsible for opening the effort-create flow. */
-  onAddAsEffort?: (projectId: string, pickedPath: string) => void
-  /** Pre-populate the list of project names for the worktree-match warning. */
-  projects?: { id: string; name: string }[]
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Portable basename — works for Unix paths in the browser bundle. */
 function basename(p: string): string {
   const trimmed = p.replace(/\/+$/, '')
   const idx = trimmed.lastIndexOf('/')
   return idx >= 0 ? trimmed.slice(idx + 1) : trimmed
 }
 
-// ---------------------------------------------------------------------------
-// Main dialog
-// ---------------------------------------------------------------------------
-
-export function NewProjectDialog({
-  open,
-  onClose,
-  onCreated,
-  onAddAsEffort,
-  projects = [],
-}: NewProjectDialogProps) {
+export function NewProjectDialog({ open, onClose, onCreated }: NewProjectDialogProps) {
   type Step = 'pick' | 'name'
 
   const [step, setStep] = useState<Step>('pick')
   const [pickedPath, setPickedPath] = useState('')
   const [name, setName] = useState('')
-  const [worktreeCheck, setWorktreeCheck] = useState<CheckWorktreeResult | null>(null)
-  const [checkingWorktree, setCheckingWorktree] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Reset state when dialog opens/closes.
   useEffect(() => {
     if (!open) {
       setStep('pick')
       setPickedPath('')
       setName('')
-      setWorktreeCheck(null)
       setError(null)
     }
   }, [open])
 
-  // ESC closes the dialog.
   useEffect(() => {
     if (!open) return
-    const h = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
   }, [open, onClose])
 
-  // When a directory is picked, run the worktree check and advance to step 2.
-  const handlePick = useCallback(async (path: string) => {
+  const handlePick = useCallback((path: string) => {
     setPickedPath(path)
     setName(basename(path) || path)
-    setWorktreeCheck(null)
     setStep('name')
-
-    setCheckingWorktree(true)
-    try {
-      const res = await authFetch(
-        `/api/projects/check-worktree?path=${encodeURIComponent(path)}`,
-      )
-      if (res.ok) {
-        setWorktreeCheck(await res.json() as CheckWorktreeResult)
-      }
-    } catch {
-      // Non-fatal — we just won't show the worktree warning.
-    } finally {
-      setCheckingWorktree(false)
-    }
   }, [])
 
   const handleCreate = async () => {
@@ -129,10 +70,10 @@ export function NewProjectDialog({
         body: JSON.stringify({ name: name.trim(), root_dir: pickedPath }),
       })
       if (!res.ok) {
-        const body = await res.json().catch(() => ({})) as { error?: string }
+        const body = (await res.json().catch(() => ({}))) as { error?: string }
         throw new Error(body?.error ?? `Create project failed (${res.status})`)
       }
-      const project = await res.json() as { id: string; name: string }
+      const project = (await res.json()) as { id: string; name: string }
       onCreated(project)
     } catch (err) {
       setError(String((err as Error)?.message ?? err))
@@ -140,16 +81,6 @@ export function NewProjectDialog({
       setSubmitting(false)
     }
   }
-
-  const handleAddAsEffort = () => {
-    if (worktreeCheck?.matched) {
-      onAddAsEffort?.(worktreeCheck.projectId, pickedPath)
-    }
-  }
-
-  const matchedProject = worktreeCheck?.matched
-    ? projects.find((p) => p.id === worktreeCheck.projectId)
-    : undefined
 
   if (!open) return null
 
@@ -163,10 +94,9 @@ export function NewProjectDialog({
         style={{ maxHeight: '80vh' }}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
         <div className="px-6 py-4 border-b border-zinc-800 flex items-center justify-between shrink-0">
           <h2 className="text-sm font-semibold text-zinc-100">
-            {step === 'pick' ? 'New Project — pick a folder' : 'New Project'}
+            {step === 'pick' ? 'Open a folder' : 'New Project'}
           </h2>
           <button
             type="button"
@@ -178,15 +108,12 @@ export function NewProjectDialog({
           </button>
         </div>
 
-        {/* Step 1: directory picker */}
         {step === 'pick' && (
           <DirectoryPicker onPick={handlePick} onCancel={onClose} />
         )}
 
-        {/* Step 2: name + optional worktree warning */}
         {step === 'name' && (
           <div className="px-6 py-5 space-y-4 overflow-y-auto">
-            {/* Picked path display */}
             <div className="flex items-center gap-2 text-xs text-zinc-400 bg-zinc-950 rounded px-3 py-2 font-mono">
               <FolderOpen className="w-3.5 h-3.5 text-amber-400/70 shrink-0" />
               <span className="truncate" title={pickedPath}>{pickedPath}</span>
@@ -199,65 +126,24 @@ export function NewProjectDialog({
               </button>
             </div>
 
-            {/* Worktree warning */}
-            {checkingWorktree && (
-              <div className="text-[11px] text-zinc-500 italic">
-                Checking for existing project match…
-              </div>
-            )}
-            {!checkingWorktree && worktreeCheck?.matched && (
-              <div className="rounded border border-amber-700/50 bg-amber-950/20 px-4 py-3 space-y-3">
-                <p className="text-sm text-amber-300">
-                  This looks like a worktree of{' '}
-                  <strong>{matchedProject?.name ?? worktreeCheck.projectId}</strong>
-                  {worktreeCheck.branch ? (
-                    <> (branch: <code className="font-mono">{worktreeCheck.branch}</code>)</>
-                  ) : null}
-                  . Add as a new effort under that project instead?
-                </p>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    autoFocus
-                    onClick={handleAddAsEffort}
-                    className="flex-1 px-3 py-1.5 text-xs rounded bg-amber-700 text-white hover:bg-amber-600 transition"
-                  >
-                    Add as effort under {matchedProject?.name ?? 'existing project'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setWorktreeCheck({ matched: false })}
-                    className="px-3 py-1.5 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition"
-                  >
-                    Create new project anyway
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Name field — hidden while the matched banner with its actions is shown */}
-            {(!worktreeCheck?.matched) && (
-              <div className="space-y-1">
-                <label
-                  htmlFor="new-project-name"
-                  className="text-[11px] uppercase tracking-wide text-zinc-500"
-                >
-                  Project name
-                </label>
-                <input
-                  id="new-project-name"
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !submitting) void handleCreate()
-                  }}
-                  autoFocus
-                  placeholder="My project"
-                  className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 transition"
-                />
-              </div>
-            )}
+            <div className="space-y-1">
+              <label
+                htmlFor="new-project-name"
+                className="text-[11px] uppercase tracking-wide text-zinc-500"
+              >
+                Project name
+              </label>
+              <input
+                id="new-project-name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !submitting) void handleCreate() }}
+                autoFocus
+                placeholder="My project"
+                className="w-full bg-zinc-950 border border-zinc-700 rounded px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-zinc-500 transition"
+              />
+            </div>
 
             {error && (
               <div className="text-xs text-rose-400 bg-rose-950/30 border border-rose-900/40 rounded px-3 py-2">
@@ -265,26 +151,23 @@ export function NewProjectDialog({
               </div>
             )}
 
-            {/* Footer buttons — only shown when no matched banner */}
-            {!worktreeCheck?.matched && (
-              <div className="flex justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  className="px-4 py-2 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleCreate()}
-                  disabled={submitting || !name.trim()}
-                  className="px-4 py-2 text-xs rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed transition"
-                >
-                  {submitting ? 'Creating…' : 'Create project'}
-                </button>
-              </div>
-            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:border-zinc-600 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCreate()}
+                disabled={submitting || !name.trim()}
+                className="px-4 py-2 text-xs rounded bg-emerald-700 text-white hover:bg-emerald-600 disabled:bg-zinc-800 disabled:text-zinc-600 disabled:cursor-not-allowed transition"
+              >
+                {submitting ? 'Creating…' : 'Create project'}
+              </button>
+            </div>
           </div>
         )}
       </div>
