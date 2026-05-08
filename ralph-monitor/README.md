@@ -87,3 +87,43 @@ For local dev, just run `bun run dev` and use Vite's HMR.
 ## Why this exists
 
 `/ralph-pilot-native` runs PRDs as a single Claude Code session backed by a systemd watchdog. This UI gives you the same observability you'd get from `ralph-tui` — but for the native execution model, with cross-PRD aggregation and a richer live event feed. See `~/.claude/skills/ralph-pilot-native/SKILL.md` for the orchestration model.
+
+## Session manager — restart and recovery
+
+Beyond passive PRD watching, ralph-monitor now also operates as a local Claude conversation manager: it stores projects → efforts → sessions in sqlite, owns PTY processes for live `claude` sessions, and renders chat transcripts directly from the JSONL files Claude Code writes to `~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`.
+
+### Restarting ralph-monitor
+
+`ralph-monitor` owns the PTYs of every session it spawns. When the server stops (Ctrl+C, `pkill -f ralph-monitor`, `systemctl --user restart ralph-monitor.service`, or a crash), the kernel sends SIGHUP to those child processes and they exit. The DB rows are preserved.
+
+On restart, the reconciler walks every row with a non-null `process_pid` and:
+
+- If the PID is no longer alive → clears `process_pid` and `process_started_at`. The session moves to `dormant`.
+- If the PID is alive but its `/proc/<pid>/comm != "bun"` or `RALPH_MONITOR_SESSION` env mismatches → treats the session as `live-orphaned` (rare; happens only if a foreign process recycled the PID before the row was reconciled).
+- Otherwise → re-attaches.
+
+Because owned children die with the parent, the common case after a restart is "every session is dormant." The transcript view still renders prior turns by parsing the JSONL file directly — only the live PTY is gone.
+
+To restart cleanly:
+
+```bash
+pkill -f ralph-monitor
+# or, if running under systemd:
+systemctl --user restart ralph-monitor.service
+```
+
+### Resuming a session
+
+A dormant session shows a **Resume** button in its detail pane. Clicking it calls `POST /api/sessions/:id/resume`, which spawns a new PTY running `claude --resume <session-uuid>`. Claude Code reads the existing JSONL, replays the conversation into its working memory, and continues from the last turn. The session moves to `live-attached`, the input box re-enables, and you can keep typing.
+
+For an orphaned session (rare — see above), the detail pane shows a **Kill & Resume** button. This sends SIGTERM (then SIGKILL after 5s) to the orphaned PID, clears the DB pid columns, and then runs the same Resume flow. The last in-flight turn is lost — use this only when the orphaned PTY is unrecoverable, not as a routine restart.
+
+### What happens to autonomous runs on restart
+
+Autonomous sessions (e.g., `/ralph-pilot-native` orchestrators that run unattended for hours) follow the same ownership rule: the PTY is a child of `ralph-monitor`, so a server restart kills it. When ralph-monitor comes back up, the session is dormant, and the JSONL on disk is intact and parseable through the last fully-flushed turn boundary.
+
+Click **Resume**: `claude --resume <id>` continues the run from the last completed turn. Sub-agent transcripts (written to `<encoded-cwd>/<session-uuid>/subagents/agent-*.jsonl`) are preserved on disk but are not surfaced as separate sessions in the sidebar — the parent session's chat view shows Agent tool-use blocks expandably (per US-009).
+
+This is reliable for "I started something at 5pm, restarted ralph-monitor at 6pm, want to keep going" — Claude Code's `--resume` is the supported continuation path.
+
+True out-of-process survival (the autonomous run keeps running while ralph-monitor is down) is deferred to v2; it requires `setsid` to detach the PTY from the manager's process group and is non-trivial. v1's contract: ralph-monitor restart = every owned session goes dormant.

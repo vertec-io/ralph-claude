@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ServerSnapshot, AppEvent } from '../server/types'
+import { authFetch, authEventSource, getToken } from './auth'
 
 export interface StreamState {
   snapshot: ServerSnapshot | null
@@ -13,44 +14,55 @@ export function useServerStream(): StreamState {
 
   useEffect(() => {
     let cancelled = false
+    let es: EventSource | null = null
 
-    async function bootstrap() {
+    // Block on token fetch first — the SSE connection below uses the
+    // synchronous token accessor, which requires the cache to be warm. If the
+    // server isn't up yet we just bail; the user will see the "connecting…"
+    // placeholder and a refresh will retry.
+    async function bootstrap(): Promise<boolean> {
       try {
-        const r = await fetch('/api/state')
-        if (!r.ok) return
+        await getToken()
+        if (cancelled) return false
+        const r = await authFetch('/api/state')
+        if (!r.ok) return true // token loaded; just couldn't fetch state. Continue to SSE.
         const initial = (await r.json()) as ServerSnapshot
         if (!cancelled) setSnapshot(initial)
-      } catch { /* server not up yet */ }
+        return true
+      } catch {
+        return false
+      }
     }
 
-    bootstrap()
+    bootstrap().then((ok) => {
+      if (cancelled || !ok) return
+      es = authEventSource('/events')
+      evtSrc.current = es
 
-    const es = new EventSource('/events')
-    evtSrc.current = es
+      es.onopen = () => setConnected(true)
+      es.onerror = () => setConnected(false)
 
-    es.onopen = () => setConnected(true)
-    es.onerror = () => setConnected(false)
+      es.addEventListener('state', (e) => {
+        try { setSnapshot(JSON.parse((e as MessageEvent).data) as ServerSnapshot) } catch {}
+      })
 
-    es.addEventListener('state', (e) => {
-      try { setSnapshot(JSON.parse((e as MessageEvent).data) as ServerSnapshot) } catch {}
-    })
-
-    es.addEventListener('update', (e) => {
-      // Any update → re-fetch full state (cheap; ≤10 PRDs locally).
-      // Also push the event into the live feed immediately.
-      try {
-        const evt = JSON.parse((e as MessageEvent).data) as AppEvent
-        setSnapshot(prev => prev ? { ...prev, events: [evt, ...prev.events].slice(0, 100) } : prev)
-      } catch {}
-      fetch('/api/state')
-        .then(r => r.json())
-        .then(s => { if (!cancelled) setSnapshot(s) })
-        .catch(() => {})
+      es.addEventListener('update', (e) => {
+        // Any update → re-fetch full state (cheap; ≤10 PRDs locally).
+        // Also push the event into the live feed immediately.
+        try {
+          const evt = JSON.parse((e as MessageEvent).data) as AppEvent
+          setSnapshot(prev => prev ? { ...prev, events: [evt, ...prev.events].slice(0, 100) } : prev)
+        } catch {}
+        authFetch('/api/state')
+          .then(r => r.json())
+          .then(s => { if (!cancelled) setSnapshot(s) })
+          .catch(() => {})
+      })
     })
 
     return () => {
       cancelled = true
-      es.close()
+      if (es) es.close()
     }
   }, [])
 
