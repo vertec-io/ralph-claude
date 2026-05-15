@@ -247,6 +247,8 @@ Each story should be small enough to implement in one focused session (one Ralph
 ### US-001: [Title]
 **Description:** As a [user], I want [feature] so that [benefit].
 **Model Hint:** opus|sonnet|haiku  *(optional — see below)*
+**Blocked By:** *(optional — list other story IDs that must complete first; omit if none)*
+**Parallel-safe:** yes|no  *(default: yes when Blocked By is empty)*
 
 **Acceptance Criteria:**
 - [ ] Specific verifiable criterion
@@ -254,6 +256,38 @@ Each story should be small enough to implement in one focused session (one Ralph
 - [ ] Typecheck/lint passes
 - [ ] **[UI stories only]** Using Playwright MCP, verify: [specific observable behavior]
 ```
+
+**Parallel Story Execution:**
+
+Ralph executors (`/ralph-pilot-native`, `/ralph-pilot`, `/ralph-runner`) can delegate independent stories to **parallel sub-agents** when the PRD explicitly identifies them. The PRD author's job is to:
+
+1. **Annotate dependencies via `Blocked By:`** — list every story-ID that must complete first. If empty, the story is parallelizable from the start. The Investigation PRD section already uses this; **make it standard for every PRD type**.
+2. **Set `Parallel-safe: no`** for stories that touch shared global state, mutate provisioner output the user has to approve, or otherwise can't run alongside siblings. Default: `yes` whenever `Blocked By:` is empty.
+3. **Avoid same-file overlap for parallel stories** — sub-agents touching the same source file silently clobber when one uses Write. The PRD author should keep each parallel story's edits scoped to disjoint files (or, if same-file edits are unavoidable, mark `Parallel-safe: no` and sequence them).
+4. **Group parallel stories visually** — when 3+ stories at the same dependency depth are all parallelizable, add a brief "### Parallel batch N" subheading so reviewers can see the breadth at a glance.
+
+**Worked example:**
+```markdown
+### Phase 1 — Foundation (one story, sequential)
+
+#### US-001: Add database schema for X
+**Blocked By:** none
+**Parallel-safe:** yes (but no siblings at this depth)
+
+### Phase 2 — Parallel batch (3 stories, run concurrently after US-001)
+
+#### US-002: REST handler for create-X    | Blocked By: US-001 | Parallel-safe: yes
+#### US-003: REST handler for list-X      | Blocked By: US-001 | Parallel-safe: yes
+#### US-004: TypeScript client for X      | Blocked By: US-001 | Parallel-safe: yes
+
+### Phase 3 — Integration (one story, sequential)
+
+#### US-005: End-to-end smoke test
+**Blocked By:** US-002, US-003, US-004
+**Parallel-safe:** no (depends on all 3 batch items)
+```
+
+A good PRD has more parallel batches than you'd think. Hard rule: **if two stories touch disjoint files and don't depend on each other's output, mark them parallel-safe and put them in the same batch**. The executor handles the rest.
 
 **Model Hint (optional):**
 
@@ -767,6 +801,9 @@ Before saving the PRD:
 - [ ] User stories are small and specific (completable in one iteration)
 - [ ] **For investigations:** Discovery stories have `Can Spawn Stories: Yes`
 - [ ] **For investigations:** Decision gates documented where user input may be needed
+- [ ] Each story has `Blocked By:` (or "none") so executors can run independent stories in parallel
+- [ ] Stories that share the same source file are marked `Parallel-safe: no` (or grouped under one story to avoid clobber)
+- [ ] At least one "Parallel batch N" grouping when 3+ same-depth stories are independent
 - [ ] Acceptance criteria are verifiable (not vague)
 - [ ] Functional requirements are numbered and unambiguous
 - [ ] Non-goals section defines clear boundaries
